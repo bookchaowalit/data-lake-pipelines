@@ -257,8 +257,8 @@ def send_telegram_message(message, *, parse_mode=None):
     import urllib.error
 
     try:
-        token = get_env("TELEGRAM_INFRA_BOT_TOKEN") or get_env("TELEGRAM_BOT_TOKEN")
-        chat_id = get_env("TELEGRAM_CHAT_ID")
+        token = get_env("TELEGRAM_NOTI_BOT_TOKEN") or get_env("TELEGRAM_BOT_TOKEN")
+        chat_id = get_env("TELEGRAM_NOTI_CHAT_ID") or get_env("TELEGRAM_CHAT_ID")
     except SecretResolutionError as exc:
         raise AlertDeliveryError("secret_" + classify_secret_error(exc)) from None
     if not token or not chat_id:
