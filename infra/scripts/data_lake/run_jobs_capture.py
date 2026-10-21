@@ -274,6 +274,28 @@ def run_capture(
             "error": "capture_unchanged",
             "duration_seconds": round(time.monotonic() - started, 3),
         }
+    # Rank the fresh postings into matched_jobs.csv; the owned ingest picks it
+    # up as the job_matches dataset that the readiness gate requires.
+    matcher_command = [
+        sys.executable,
+        str(JOB_SCRAPING / "scripts/filter_job_matches.py"),
+        "--input",
+        str(capture.capture_path),
+    ]
+    matcher_code, matcher_out, matcher_err = _run_command(
+        matcher_command,
+        cwd=JOB_SCRAPING,
+        env=env,
+        timeout_seconds=min(child_timeout, 120.0),
+    )
+    _write_log(log_dir, "matcher.log", matcher_out + matcher_err)
+    if matcher_code != 0:
+        return {
+            "status": "failed",
+            "error": "matcher_failed",
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "counts": _safe_counts(stdout),
+        }
     ingest_command = [
         sys.executable,
         str(SCRIPTS / "data_lake/ingest_job_captures.py"),

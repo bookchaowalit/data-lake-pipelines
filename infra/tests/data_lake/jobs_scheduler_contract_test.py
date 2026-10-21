@@ -27,6 +27,7 @@ class JobsSchedulerContractTests(unittest.TestCase):
     def test_runner_uses_only_bounded_free_api_slice(self) -> None:
         for value in (
             "scrape_job_postings.py",
+            "filter_job_matches.py",
             "remotive,remoteok-api,himalayas,jobicy",
             "python developer",
             "ingest_job_captures.py",

@@ -1,0 +1,132 @@
+name: Scheduled Lake Capture
+
+# Hosted copy of the host cron (setup_market_cron.sh / setup_jobs_cron.sh):
+# runs the bounded free-API capture runners and writes Bronze straight to the
+# R2 lake, so collection continues when the workstation is off.
+#
+# Required repository secrets: R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
+# R2_ACCOUNT_ID. Optional variable: R2_LAKE_URI. Without the secrets every run
+# is skipped with a warning instead of failing.
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"   # crypto
+    - cron: "0 8 * * *"     # stocks
+    - cron: "0 */6 * * *"   # fx
+    - cron: "0 7 * * *"     # defi
+    - cron: "30 */6 * * *"  # jobs
+  workflow_dispatch:
+    inputs:
+      feed:
+        description: Feed to capture
+        required: true
+        type: choice
+        options: [crypto, stocks, fx, defi, jobs]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: Capture ${{ inputs.feed || github.event.schedule }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: lake-capture-${{ inputs.feed || github.event.schedule }}
+      cancel-in-progress: false
+    env:
+      SOLO_BOOK_DEV_ROOT: ${{ github.workspace }}/book-dev
+      SOLO_EMPIRE_DATA_LAKE_URI: ${{ vars.R2_LAKE_URI || 's3://solo-empire-portfolio/lake/scraping-captures-v2' }}
+      DATA_LAKE_CLOUD_WRITE_ENABLED: "true"
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_REGION: auto
+      AWS_DEFAULT_REGION: auto
+      DATA_LAKE_S3_ENDPOINT: ${{ secrets.R2_ACCOUNT_ID && format('https://{0}.r2.cloudflarestorage.com', secrets.R2_ACCOUNT_ID) || '' }}
+    steps:
+      - name: Resolve feed
+        id: feed
+        env:
+          INPUT_FEED: ${{ inputs.feed }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          case "${INPUT_FEED:-$SCHEDULE}" in
+            crypto|"0 */4 * * *") feed=crypto ;;
+            stocks|"0 8 * * *") feed=stocks ;;
+            fx|"0 */6 * * *") feed=fx ;;
+            defi|"0 7 * * *") feed=defi ;;
+            jobs|"30 */6 * * *") feed=jobs ;;
+            *) echo "::error::Unknown feed for '${INPUT_FEED:-$SCHEDULE}'"; exit 1 ;;
+          esac
+          echo "name=${feed}" >> "$GITHUB_OUTPUT"
+          if [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ] || [ -z "${DATA_LAKE_S3_ENDPOINT}" ]; then
+            echo "::warning::R2 secrets are not configured; skipping ${feed} capture"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout data-lake-pipelines
+        if: steps.feed.outputs.enabled == 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          path: pipelines
+
+      - name: Checkout market-data
+        if: steps.feed.outputs.enabled == 'true' && steps.feed.outputs.name != 'jobs'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: bookchaowalit/market-data
+          path: book-dev/github/bookchaowalit/public/book-products/market-data
+
+      - name: Checkout career-job-scraper
+        if: steps.feed.outputs.enabled == 'true' && steps.feed.outputs.name == 'jobs'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: bookchaowalit/career-job-scraper
+          path: book-dev/github/bookchaowalit/public/book-apps/tools/career-job-scraper
+
+      - name: Checkout career-job-market-data
+        if: steps.feed.outputs.enabled == 'true' && steps.feed.outputs.name == 'jobs'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: bookchaowalit/career-job-market-data
+          path: book-dev/github/bookchaowalit/public/book-apps/tools/book-job-data-public
+
+      - name: Set up Python
+        if: steps.feed.outputs.enabled == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install bounded capture runtime
+        if: steps.feed.outputs.enabled == 'true'
+        run: python -m pip install --disable-pip-version-check duckdb pyarrow httpx beautifulsoup4 python-dotenv
+
+      - name: Capture into R2
+        if: steps.feed.outputs.enabled == 'true'
+        working-directory: pipelines
+        env:
+          FEED: ${{ steps.feed.outputs.name }}
+        run: |
+          mkdir -p data/logs
+          if [ "${FEED}" = "jobs" ]; then
+            python infra/scripts/data_lake/run_jobs_capture.py \
+              --lake-uri "${SOLO_EMPIRE_DATA_LAKE_URI}" \
+              --lock-path data/jobs-feeds.lock --log-dir data/logs/jobs-capture \
+              --attempts 2 --timeout-seconds 180 --json
+          else
+            python infra/scripts/data_lake/run_market_capture.py --product "${FEED}" \
+              --lake-uri "${SOLO_EMPIRE_DATA_LAKE_URI}" \
+              --lock-path data/market-feeds.lock --log-dir data/logs/market-capture \
+              --attempts 2 --timeout-seconds 180 --json
+          fi
+
+      - name: Upload capture logs
+        if: always() && steps.feed.outputs.enabled == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lake-capture-${{ steps.feed.outputs.name }}-${{ github.run_id }}
+          path: pipelines/data/logs
+          if-no-files-found: ignore
+          retention-days: 7
