@@ -1,0 +1,322 @@
+{
+  "schema_version": "platform-integration-sources.v1",
+  "platforms": [
+    {
+      "id": "codex-app",
+      "name": "Codex App",
+      "mcp_transports": [
+        "stdio",
+        "streamable_http"
+      ],
+      "docs_url": "https://developers.openai.com/codex/mcp/"
+    },
+    {
+      "id": "codex-cli",
+      "name": "Codex CLI",
+      "mcp_transports": [
+        "stdio",
+        "streamable_http"
+      ],
+      "docs_url": "https://developers.openai.com/codex/mcp/"
+    },
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "mcp_transports": [
+        "stdio",
+        "sse",
+        "streamable_http"
+      ],
+      "docs_url": "https://code.claude.com/docs/en/mcp"
+    },
+    {
+      "id": "claude-web",
+      "name": "Claude Web",
+      "mcp_transports": [
+        "streamable_http"
+      ],
+      "docs_url": "https://support.claude.com/en/articles/11175166-getting-started-with-custom-connectors-using-remote-mcp"
+    },
+    {
+      "id": "claude-desktop",
+      "name": "Claude Desktop",
+      "mcp_transports": [
+        "stdio",
+        "streamable_http"
+      ],
+      "docs_url": "https://modelcontextprotocol.io/docs/develop/connect-local-servers"
+    }
+  ],
+  "sources": [
+    {
+      "id": "codex-plugins",
+      "owner": "openai",
+      "url": "https://raw.githubusercontent.com/openai/plugins/main/.agents/plugins/marketplace.json",
+      "parser": "codex_marketplace",
+      "platforms": [
+        "codex-app",
+        "codex-cli"
+      ],
+      "permission": "public_catalog_read",
+      "privacy_class": "public",
+      "retention_class": "archival",
+      "freshness_hours": 24,
+      "aliases": {
+        "airtable": [
+          "airtable"
+        ],
+        "canva": [
+          "canva"
+        ],
+        "clickup": [
+          "clickup"
+        ],
+        "cloudflare": [
+          "cloudflare"
+        ],
+        "datadog": [
+          "datadog"
+        ],
+        "dropbox": [
+          "dropbox"
+        ],
+        "figma": [
+          "figma"
+        ],
+        "github": [
+          "github"
+        ],
+        "gmail": [
+          "gmail"
+        ],
+        "google-calendar": [
+          "google-calendar"
+        ],
+        "google-drive": [
+          "google-drive"
+        ],
+        "linear": [
+          "linear"
+        ],
+        "notion": [
+          "notion"
+        ],
+        "posthog": [
+          "posthog"
+        ],
+        "sentry": [
+          "sentry"
+        ],
+        "shopify": [
+          "shopify"
+        ],
+        "slack": [
+          "slack"
+        ],
+        "stripe": [
+          "stripe"
+        ],
+        "supabase": [
+          "supabase"
+        ],
+        "vercel": [
+          "vercel"
+        ],
+        "zoom": [
+          "zoom"
+        ],
+        "atlassian-rovo": [
+          "jira",
+          "confluence"
+        ],
+        "monday-com": [
+          "monday"
+        ],
+        "teams": [
+          "microsoft-graph"
+        ],
+        "sharepoint": [
+          "microsoft-graph"
+        ],
+        "outlook-email": [
+          "microsoft-graph"
+        ],
+        "outlook-calendar": [
+          "microsoft-graph"
+        ]
+      }
+    },
+    {
+      "id": "claude-plugins",
+      "owner": "anthropic",
+      "url": "https://raw.githubusercontent.com/anthropics/claude-plugins-official/main/.claude-plugin/marketplace.json",
+      "parser": "claude_marketplace",
+      "platforms": [
+        "claude-code"
+      ],
+      "permission": "public_catalog_read",
+      "privacy_class": "public",
+      "retention_class": "archival",
+      "freshness_hours": 24,
+      "aliases": {
+        "airtable": [
+          "airtable"
+        ],
+        "asana": [
+          "asana"
+        ],
+        "box": [
+          "box"
+        ],
+        "canva": [
+          "canva"
+        ],
+        "cloudflare": [
+          "cloudflare"
+        ],
+        "datadog": [
+          "datadog"
+        ],
+        "discord": [
+          "discord"
+        ],
+        "dropbox": [
+          "dropbox"
+        ],
+        "figma": [
+          "figma"
+        ],
+        "firecrawl": [
+          "firecrawl"
+        ],
+        "github": [
+          "github"
+        ],
+        "gitlab": [
+          "gitlab"
+        ],
+        "intercom": [
+          "intercom"
+        ],
+        "linear": [
+          "linear"
+        ],
+        "mapbox": [
+          "mapbox"
+        ],
+        "miro": [
+          "miro"
+        ],
+        "notion": [
+          "notion"
+        ],
+        "paypal": [
+          "paypal"
+        ],
+        "pinecone": [
+          "pinecone"
+        ],
+        "posthog": [
+          "posthog"
+        ],
+        "railway": [
+          "railway"
+        ],
+        "render": [
+          "render"
+        ],
+        "resend": [
+          "resend"
+        ],
+        "sentry": [
+          "sentry"
+        ],
+        "slack": [
+          "slack"
+        ],
+        "stripe": [
+          "stripe"
+        ],
+        "supabase": [
+          "supabase"
+        ],
+        "telegram": [
+          "telegram"
+        ],
+        "vercel": [
+          "vercel"
+        ],
+        "atlassian": [
+          "jira",
+          "confluence"
+        ]
+      }
+    },
+    {
+      "id": "github-mcp",
+      "owner": "anthropic",
+      "url": "https://raw.githubusercontent.com/anthropics/claude-plugins-official/main/external_plugins/github/.mcp.json",
+      "parser": "mcp_config",
+      "platforms": [
+        "codex-app",
+        "codex-cli",
+        "claude-code",
+        "claude-web",
+        "claude-desktop"
+      ],
+      "permission": "public_catalog_read",
+      "privacy_class": "public",
+      "retention_class": "archival",
+      "freshness_hours": 24,
+      "aliases": {
+        "github": [
+          "github"
+        ]
+      }
+    },
+    {
+      "id": "linear-mcp",
+      "owner": "anthropic",
+      "url": "https://raw.githubusercontent.com/anthropics/claude-plugins-official/main/external_plugins/linear/.mcp.json",
+      "parser": "mcp_config",
+      "platforms": [
+        "codex-app",
+        "codex-cli",
+        "claude-code",
+        "claude-web",
+        "claude-desktop"
+      ],
+      "permission": "public_catalog_read",
+      "privacy_class": "public",
+      "retention_class": "archival",
+      "freshness_hours": 24,
+      "aliases": {
+        "linear": [
+          "linear"
+        ]
+      }
+    },
+    {
+      "id": "notion-mcp",
+      "owner": "notion",
+      "url": "https://raw.githubusercontent.com/makenotion/claude-code-notion-plugin/main/.mcp.json",
+      "parser": "mcp_config",
+      "platforms": [
+        "codex-app",
+        "codex-cli",
+        "claude-code",
+        "claude-web",
+        "claude-desktop"
+      ],
+      "permission": "public_catalog_read",
+      "privacy_class": "public",
+      "retention_class": "archival",
+      "freshness_hours": 24,
+      "aliases": {
+        "notion": [
+          "notion"
+        ]
+      }
+    }
+  ]
+}

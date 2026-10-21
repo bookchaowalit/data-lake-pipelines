@@ -42,3 +42,7 @@ for t in $(find infra/tests -name '*_test.py' | sort); do .venv/bin/python "$t" 
 
 ข้อจำกัดที่ทราบ: `news_scheduler_contract_test` สอง test ที่รัน `book-news-scraping/setup_cron.sh` จะ skip เพราะสคริปต์นั้นหา
 `run_news_capture.py` โดยไล่ขึ้นไปตาม ancestor ของตัวเอง (ตอนนี้ runner อยู่ใน repo นี้ ต้องแก้ฝั่ง book-news-scraping ให้รับ root จาก env).
+
+## Platform integrations
+
+Public plugin catalogs และ approved remote MCP references เก็บ exact raw → Bronze → immutable manifests ก่อน atomic publication ให้ owning integrations API ไม่มีการอ่านข้อมูลบัญชีหรือเขียน application database ดูคำสั่ง replay/fetch, source governance และ failure/quarantine policy ใน [platform-integrations.v1](contracts/platform-integrations.v1.md) และ source allowlist ใน `systems/ai-data/platform-integration-sources.json`.
