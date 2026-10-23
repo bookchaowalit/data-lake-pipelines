@@ -2,18 +2,19 @@
 """Guard frozen data-product contracts across producers and consumers.
 
 Validates:
-  - systems/architecture/data-product-contracts-v2.yaml is present and well-formed
-  - seven producer repos expose matching SCHEMA_VERSION, API_PORT, free-only defaults
+  - systems/architecture/data-product-contracts-v3.yaml is present and well-formed
+  - six producer repos expose matching SCHEMA_VERSION, API_PORT, free-only defaults
   - envelope required keys exist in store.envelope
   - POST /v1/refresh remains default-forbidden in api.py
   - consumer catalogs match the frozen port/schema map
-  - seven source products retain the reserved 8101–8107 port map
+  - six source products retain the reserved 8101–8106 port map (v3 retired the
+    ai_tools row on :8107; that port stays reserved and must not reappear)
 
 Usage:
   python3 infra/scripts/utils/data_product_contract_guard.py
   task contracts:check
 
-Track B job data is checked separately from the frozen seven-product v2 map:
+Track B job data is checked separately from the frozen six-product v3 map:
   systems/architecture/job-data-contract-v1.yaml → book-job-data → job.v1 / :8109
 """
 from __future__ import annotations
@@ -27,7 +28,9 @@ from _env import PROJECT_ROOT
 
 
 PORTABLE_CI = os.environ.get("SOLO_EMPIRE_CI") == "1"
-FREEZE_PATH = PROJECT_ROOT / "systems" / "architecture" / "data-product-contracts-v2.yaml"
+FREEZE_PATH = PROJECT_ROOT / "systems" / "architecture" / "data-product-contracts-v3.yaml"
+FREEZE_ID = "data-product-contracts-v3"
+RETIRED_PORTS = (8107,)
 
 
 def is_external_boundary(path: Path) -> bool:
@@ -63,7 +66,6 @@ EXPECTED_PRODUCTS = [
     {"id": "defi", "port": 8104, "schema_version": "defi.v1", "repository": "book-defi-data", "package": "book_defi"},
     {"id": "flights", "port": 8105, "schema_version": "flight.v1", "repository": "book-flight-data", "package": "book_flight"},
     {"id": "seo", "port": 8106, "schema_version": "seo.v1", "repository": "book-seo-data", "package": "book_seo"},
-    {"id": "ai_tools", "port": 8107, "schema_version": "ai_tools.v1", "repository": "book-ai-tools-data", "package": "book_ai_tools"},
 ]
 
 CONSUMER_SPECS = [
@@ -74,13 +76,13 @@ CONSUMER_SPECS = [
             "src/data-products/catalog.ts",
             "js/data-products-browser.js",
         ],
-        "ports": list(range(8101, 8108)),
+        "ports": list(range(8101, 8107)),
     },
     {
         "id": "bookchaowalit-portfolio-frontend",
-        "path": "projects/product/engineering/book-dev/github/bookchaowalit-website/public/book-apps/portfolio/portfolio-site-web",
+        "path": "projects/product/engineering/book-dev/github/bookchaowalit-website/public/book-products/portfolio-site-web",
         "catalog_files": ["src/lib/data-products/catalog.ts"],
-        "ports": list(range(8101, 8108)),
+        "ports": list(range(8101, 8107)),
     },
 ]
 
@@ -202,7 +204,7 @@ def parse_freeze_yaml() -> dict:
                     prod[key] = val.strip("'\"")
             products.append(prod)
 
-    if len(products) != 7:
+    if len(products) != len(EXPECTED_PRODUCTS):
         products = [dict(p) for p in EXPECTED_PRODUCTS]
 
     # Envelope keys
@@ -222,19 +224,22 @@ def parse_freeze_yaml() -> dict:
 def check_freeze_file(errors: list[str], freeze: dict) -> None:
     if freeze.get("status") != "frozen":
         fail(errors, f"freeze status must be 'frozen' (got {freeze.get('status')!r})")
-    if freeze.get("freeze_id") != "data-product-contracts-v2":
+    if freeze.get("freeze_id") != FREEZE_ID:
         fail(errors, f"unexpected freeze_id {freeze.get('freeze_id')!r}")
 
     products = freeze["products"]
-    if len(products) != 7:
-        fail(errors, f"expected 7 products, got {len(products)}")
+    if len(products) != len(EXPECTED_PRODUCTS):
+        fail(errors, f"expected {len(EXPECTED_PRODUCTS)} products, got {len(products)}")
 
     ports = sorted(int(p["port"]) for p in products)
-    if ports != list(range(8101, 8108)):
-        fail(errors, f"ports must be 8101–8107 uniquely, got {ports}")
+    if ports != list(range(8101, 8107)):
+        fail(errors, f"ports must be 8101–8106 uniquely, got {ports}")
+    for port in RETIRED_PORTS:
+        if port in ports:
+            fail(errors, f"retired port {port} must not be reassigned in {FREEZE_ID}")
 
     schemas = [p["schema_version"] for p in products]
-    if len(set(schemas)) != 7:
+    if len(set(schemas)) != len(products):
         fail(errors, f"schema_version values must be unique: {schemas}")
 
     # Hardcoded mirror must match freeze (prevents silent drift of EXPECTED_PRODUCTS)
@@ -411,10 +416,10 @@ def check_versioning_docs(errors: list[str]) -> None:
         for needle in (
             "breaking change",
             "schema_version",
-            "data-product-contracts-v2.yaml",
+            "data-product-contracts-v3.yaml",
             "FREE_ONLY",
             "8101",
-            "8107",
+            "8106",
         ):
             if needle not in text:
                 fail(errors, f"versioning policy missing {needle!r}")
@@ -425,7 +430,7 @@ def check_versioning_docs(errors: list[str]) -> None:
 
 
 def check_job_contract(errors: list[str]) -> None:
-    """Validate Track B without changing the frozen 8101–8107 generation."""
+    """Validate Track B without changing the frozen 8101–8106 generation."""
     contract_path = PROJECT_ROOT / "systems/architecture/job-data-contract-v1.yaml"
     if not contract_path.is_file():
         fail(errors, "missing systems/architecture/job-data-contract-v1.yaml")
@@ -497,7 +502,7 @@ def check_job_contract(errors: list[str]) -> None:
 def main() -> int:
     errors: list[str] = []
     print("=" * 60)
-    print("  Solo Empire — Data Product Contract Guard (v2 freeze)")
+    print("  Solo Empire — Data Product Contract Guard (v3 freeze)")
     print("=" * 60)
 
     try:
@@ -534,7 +539,7 @@ def main() -> int:
         print("=" * 60)
         return 1
 
-    print("  Result: OK — v2 contracts frozen and compatible")
+    print("  Result: OK — v3 contracts frozen and compatible")
     print("=" * 60)
     return 0
 

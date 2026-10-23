@@ -45,7 +45,7 @@ class ScrapingCaptureIngestTests(unittest.TestCase):
 
     def test_all_frozen_products_have_snapshot_and_history_contracts(self) -> None:
         products = {spec.product for spec in CAPTURES}
-        self.assertEqual(products, {"crypto", "stocks", "fx", "defi", "flights", "seo", "ai_tools", "news", "property"})
+        self.assertEqual(products, {"crypto", "stocks", "fx", "defi", "flights", "seo", "news", "property"})
         for product in products:
             datasets = {spec.dataset for spec in CAPTURES if spec.product == product}
             self.assertTrue(any(not spec.history for spec in CAPTURES if spec.product == product))

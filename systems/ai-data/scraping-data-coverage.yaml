@@ -1,6 +1,6 @@
 schema_version: solo-empire.scraping-data-coverage.v1
 kind: scraping-data-requirements
-updated: 2026-09-14
+updated: 2026-10-23
 owner: data-product-owner
 
 scope:
@@ -411,7 +411,7 @@ products:
           max_age_hours: 6
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v2.yaml
+      contract_path: systems/architecture/data-product-contracts-v3.yaml
       schema_version: crypto.v1
       api_port: 8101
       api_mode: on_demand
@@ -448,7 +448,7 @@ products:
           max_age_hours: 30
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v2.yaml
+      contract_path: systems/architecture/data-product-contracts-v3.yaml
       schema_version: stock.v1
       api_port: 8102
       api_mode: on_demand
@@ -485,7 +485,7 @@ products:
           max_age_hours: 8
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v2.yaml
+      contract_path: systems/architecture/data-product-contracts-v3.yaml
       schema_version: fx.v1
       api_port: 8103
       api_mode: on_demand
@@ -522,7 +522,7 @@ products:
           max_age_hours: 30
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v2.yaml
+      contract_path: systems/architecture/data-product-contracts-v3.yaml
       schema_version: defi.v1
       api_port: 8104
       api_mode: on_demand
@@ -559,7 +559,7 @@ products:
           max_age_hours: 192
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v2.yaml
+      contract_path: systems/architecture/data-product-contracts-v3.yaml
       schema_version: flight.v1
       api_port: 8105
       api_mode: on_demand
@@ -596,48 +596,49 @@ products:
           max_age_hours: 30
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v2.yaml
+      contract_path: systems/architecture/data-product-contracts-v3.yaml
       schema_version: seo.v1
       api_port: 8106
       api_mode: on_demand
     next_action: Keep the approved parent lake-first owned-page SEO schedule on its daily cadence; keep Search Console, GA4, and Ahrefs data on authenticated import paths.
 
+  # Retired requirement. ai_tools.v1 / :8107 (book-ai-tools-data =
+  # bookchaowalit/tech-ai-tools-data) was retired on 2026-10-23 in
+  # systems/architecture/data-product-contracts-v3.yaml (owner approved). The row
+  # stays only because the pinned source-registry snapshot still lists the
+  # ai_tools job; it is not required, scheduled, ingested or served.
   - id: ai-tools
-    name: AI tool directory intelligence
+    name: AI tool directory intelligence (retired)
     domain: ai
     priority: P2
-    required: true
-    decision: Maintain attributed AI tool/category signals for technology evaluation.
+    required: false
+    decision: Retired 2026-10-23; no consumer needs AI tool directory signals and the producer repository is to be archived.
     owner: book-ai-tools-data
-    consumers: [technology-watch, solo-empire-insights]
-    grain: One attributed AI tool listing snapshot.
-    retention: evidence
+    consumers: [none-retired]
+    grain: None; retired.
+    retention: none
     permission:
-      status: conditional
+      status: retired
       classification: public_source_with_terms
-      basis: Bounded public directory pages are working; current terms must be confirmed before production reuse.
-    cron_tags: [book-ai-tools-data-feeds]
+      basis: Product retired in data-product-contracts-v3 (owner approved 2026-10-23); Futurepedia reuse was never approved (owner decision 2026-10-15, BOO-243).
+    cron_tags: []
     sources:
       - job: ai_tools
-        quality_status: verified
+        quality_status: retired
+        quality_note: Retired with the ai_tools product; do not schedule, capture or ingest.
         capture:
           paths:
             - projects/product/engineering/book-dev/github/bookchaowalit/private/book-ai/tech-ai-tools-data/data/exported/ai_tools.csv
           max_age_hours: 30
     lake:
-      required: true
-      datasets:
-        - id: ai_tools
-          paths:
-            - data/lake*/**/bronze/domain=ai-tools/dataset=ai_tools/schema_version=*/ingest_date=*/source=book-ai-tools-data/*.parquet
-          max_age_hours: 30
+      required: false
+      datasets: []
     delivery:
-      kind: api_and_duckdb
-      contract_path: systems/architecture/scraping-contracts/ai-tools.v1.yaml
+      kind: retired
+      contract_path: systems/architecture/data-product-contracts-v3.yaml
       schema_version: ai_tools.v1
-      api_port: 8107
-      api_mode: on_demand
-    next_action: Review the draft ai-tools.v1 against permitted reuse, then seek operator approval before scheduling the existing lake-first ingest.
+      api_mode: none
+    next_action: None. Drop this row when the source-registry snapshot is re-pinned to a career-job-scraper commit without the ai_tools job.
 
   - id: directory
     name: Directory and business listings

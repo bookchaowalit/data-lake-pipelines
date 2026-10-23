@@ -1,5 +1,10 @@
+# Retired 2026-10-23: the ai_tools data product was retired in
+# data-product-contracts-v3.yaml (owner approved). Kept for history only; the
+# producer bookchaowalit/tech-ai-tools-data is to be archived.
 contract_id: ai-tools.v1
-status: draft
+status: retired
+retired_on: 2026-10-23
+retired_by: data-product-contracts-v3
 collection_approval: pending_operator_approval
 not_yet_approved_for_collection: true
 source: book-ai-tools-data

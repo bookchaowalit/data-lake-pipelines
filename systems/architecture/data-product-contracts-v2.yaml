@@ -1,4 +1,4 @@
-# Frozen data-product contracts — generation 2 (v2)
+# Frozen data-product contracts — generation 2 (v2), superseded 2026-10-23
 #
 # Single source of truth for local free-only data-product APIs and consumers.
 # Machine-checked by: infra/scripts/utils/data_product_contract_guard.py
@@ -7,7 +7,11 @@
 # Domain schemas remain v1; the freeze generation changes the port map only.
 
 freeze_id: data-product-contracts-v2
-status: frozen
+status: superseded
+# Superseded by data-product-contracts-v3.yaml (2026-10-23), which retires the
+# ai_tools row (ai_tools.v1 / :8107, book-ai-tools-data). Rows below are kept
+# unchanged per the versioning policy; ai_tools is NOT a live producer.
+superseded_by: data-product-contracts-v3
 created: 2026-08-04
 host_default: 127.0.0.1
 bind_policy: loopback_only_by_default

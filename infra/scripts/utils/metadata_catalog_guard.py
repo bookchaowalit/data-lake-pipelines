@@ -16,7 +16,7 @@ CATALOG_DIR = PROJECT_ROOT / "systems" / "ai-data" / "metadata-catalog"
 CATALOG_PATH = CATALOG_DIR / "catalog.yaml"
 DICTIONARY_PATH = CATALOG_DIR / "data-dictionary.yaml"
 LINEAGE_PATH = CATALOG_DIR / "lineage.yaml"
-PRODUCT_CONTRACT_PATH = PROJECT_ROOT / "systems" / "architecture" / "data-product-contracts-v2.yaml"
+PRODUCT_CONTRACT_PATH = PROJECT_ROOT / "systems" / "architecture" / "data-product-contracts-v3.yaml"
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,127}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

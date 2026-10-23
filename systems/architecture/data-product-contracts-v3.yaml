@@ -1,0 +1,135 @@
+# Frozen data-product contracts — generation 3 (v3)
+#
+# Single source of truth for local free-only data-product APIs and consumers.
+# Machine-checked by: infra/scripts/utils/data_product_contract_guard.py
+# (data-lake-pipelines, platform-ops-cli) and scripts/metadata_catalog_guard.py.
+#
+# This generation retires the ai_tools product (ai_tools.v1 / :8107,
+# book-ai-tools-data = bookchaowalit/tech-ai-tools-data). Owner approved the
+# retirement on 2026-10-23 so the producer repository can be archived. The six
+# remaining rows are copied unchanged from v2; flights stays (on hold, not
+# retired). Port 8107 is retired with the row and is NOT reassigned in this
+# generation; reusing it needs a later freeze generation.
+
+freeze_id: data-product-contracts-v3
+status: frozen
+created: 2026-10-23
+supersedes: data-product-contracts-v2
+retired_rows:
+  products: [ai_tools]
+  schema_versions: [ai_tools.v1]
+  ports: [8107]
+  repositories: [book-ai-tools-data]  # GitHub: bookchaowalit/tech-ai-tools-data
+  retired_on: 2026-10-23
+  reason: Owner-approved retirement of the AI tools data product; the producer repository is to be archived.
+host_default: 127.0.0.1
+bind_policy: loopback_only_by_default
+transport: http
+methods:
+  allowed_for_consumers: [GET]
+  blocked_by_default: [POST]
+endpoints:
+  required:
+    - GET /healthz
+    - GET /v1/metadata
+    - GET /v1/records
+    - GET /v1/records/{record_id}
+    - GET /v1/history
+  refresh:
+    method: POST
+    path: /v1/refresh
+    default_status: 403
+    note: Disabled unless ALLOW_REFRESH=true and REFRESH_TOKEN matches.
+
+envelope:
+  required_keys:
+    - schema_version
+    - source
+    - retrieved_at
+    - data_status
+    - items
+    - next_cursor
+  data_status_values:
+    - ok
+    - empty
+    - stale
+    - malformed
+    - not_found
+    - forbidden
+    - error
+    - accepted
+
+policy_defaults:
+  FREE_ONLY: true
+  ALLOW_PAID_PROVIDERS: false
+  ALLOW_EXTERNAL_WRITES: false
+  ALLOW_REFRESH: false
+
+# Port map is reserved. Do not reassign ports (including retired 8107) without a
+# new freeze generation.
+products:
+  - id: crypto
+    port: 8101
+    schema_version: crypto.v1
+    repository: book-crypto-data
+    path: projects/product/engineering/book-dev/github/bookchaowalit/public/book-products/market-data/sources/crypto
+    package: book_crypto
+    role: domain_source
+  - id: stocks
+    port: 8102
+    schema_version: stock.v1
+    repository: book-stock-data
+    path: projects/product/engineering/book-dev/github/bookchaowalit/public/book-products/market-data/sources/stock
+    package: book_stock
+    role: domain_source
+  - id: fx
+    port: 8103
+    schema_version: fx.v1
+    repository: book-fx-data
+    path: projects/product/engineering/book-dev/github/bookchaowalit/public/book-products/market-data/sources/fx
+    package: book_fx
+    role: domain_source
+  - id: defi
+    port: 8104
+    schema_version: defi.v1
+    repository: book-defi-data
+    path: projects/product/engineering/book-dev/github/bookchaowalit/public/book-products/market-data/sources/defi
+    package: book_defi
+    role: domain_source
+  - id: flights
+    port: 8105
+    schema_version: flight.v1
+    repository: book-flight-data
+    path: projects/product/engineering/book-dev/github/bookchaowalit/private/book-products/travel-flight-price-data
+    package: book_flight
+    role: domain_source
+  - id: seo
+    port: 8106
+    schema_version: seo.v1
+    repository: book-seo-data
+    path: projects/product/engineering/book-dev/github/bookchaowalit/private/book-products/marketing-seo-ranking-data
+    package: book_seo
+    role: domain_source
+consumers:
+  - id: insights-dashboard
+    path: projects/product/engineering/book-dev/github/bookchaowalit/public/book-products/market-insights-web
+    catalog_files:
+      - src/data-products/catalog.ts
+      - js/data-products-browser.js
+    must_match_ports: [8101, 8102, 8103, 8104, 8105, 8106]
+  - id: bookchaowalit-portfolio-frontend
+    path: projects/product/engineering/book-dev/github/bookchaowalit-website/public/book-products/portfolio-site-web
+    catalog_files:
+      - src/lib/data-products/catalog.ts
+    must_match_ports: [8101, 8102, 8103, 8104, 8105, 8106]
+
+# Job consumers (import_job_scraper, book-sales leads, jobsdb) are Track B.
+# Their separate contract is systems/architecture/job-data-contract-v1.yaml:
+# book-job-data → job.v1 / :8109 — independent of the retired synthesis API.
+# Additive contracts outside this map: news.v1 / :8108 (news-data-contract-v1)
+# and discovery.v1 / :8110 (discovery-data-contract-v1).
+
+# Track B book-job-data remains under book-apps/tools. Each frozen producer
+# declares its exact owned checkout above because the data products span the
+# book-products and book-ai ownership categories.
+producer_root: projects/product/engineering/book-dev/github/bookchaowalit/public/book-apps/tools

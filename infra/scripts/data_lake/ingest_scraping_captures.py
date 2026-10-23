@@ -185,27 +185,6 @@ CAPTURES: tuple[CaptureSpec, ...] = (
         True,
     ),
     CaptureSpec(
-        "ai_tools",
-        "book-ai-tools-data",
-        "ai-tools",
-        "ai_tools.v1",
-        "ai_tools",
-        "projects/product/engineering/book-dev/github/bookchaowalit/private/book-ai/tech-ai-tools-data/data/exported/ai_tools.csv",
-        ("source", "url"),
-        "observed_at",
-    ),
-    CaptureSpec(
-        "ai_tools",
-        "book-ai-tools-data",
-        "ai-tools",
-        "ai_tools.v1",
-        "ai_tools_history",
-        "projects/product/engineering/book-dev/github/bookchaowalit/private/book-ai/tech-ai-tools-data/data/exported/ai_tools_history.csv",
-        ("source", "url", "observed_at"),
-        "observed_at",
-        True,
-    ),
-    CaptureSpec(
         "news",
         "book-news-scraping",
         "news",
@@ -592,8 +571,9 @@ def main(argv: list[str] | None = None) -> int:
     # Conditional/blocked sources require a separate source-owner decision;
     # this operational replay never treats their presence as approval.
     # SEO is approved for owned-page provenance only; news is approved for
-    # publisher RSS/Atom captures with attribution. AI directory reuse and
-    # flight collection remain held behind their source-owner gates.
+    # publisher RSS/Atom captures with attribution. Flight collection remains
+    # held behind its source-owner gate. The AI tools product was retired in
+    # data-product-contracts-v3 (2026-10-23) and has no capture spec.
     approved = {"crypto", "stocks", "fx", "defi", "seo", "news"}
     selected = set(args.product or approved)
     validate_only = args.validate_only or args.dry_run

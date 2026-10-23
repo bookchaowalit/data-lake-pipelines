@@ -145,7 +145,7 @@ projects:
     last_known_commit: fed35c7cc84b528fee4c286e336cb819f768e5ec
     former_path: projects/product/engineering/book-dev/book-opportunity-scraping
     local_path: projects/product/engineering/book-dev/github/bookchaowalit/public/book-apps/tools/opportunity-listing-scraper
-    notes: "Legacy multi-domain opportunity scraper. Target decomposition is crypto, stocks, FX, DeFi, flights, SEO, and AI tools; cross-domain synthesis is retired."
+    notes: "Legacy multi-domain opportunity scraper. Target decomposition is crypto, stocks, FX, DeFi, flights, SEO, and AI tools (AI tools retired 2026-10-23 in data-product-contracts-v3); cross-domain synthesis is retired."
 
   - id: pixiu_scraping_facebook_backend
     type: product

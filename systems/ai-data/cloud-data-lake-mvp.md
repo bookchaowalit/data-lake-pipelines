@@ -269,7 +269,7 @@ same snapshot on every registration retry. Its API on port 8106 reported
 direct Bronze Parquet. The hosted check used deterministic page fixtures and
 did not contact Google, Firecrawl, or a paid SERP provider.
 
-`book-ai-tools-data` also passed the live shared-store pilot on
+`book-ai-tools-data` (retired 2026-10-23 in data-product-contracts-v3; record kept as history) also passed the live shared-store pilot on
 `portfolio-demo/book-ai-tools-iceberg-001`: both
 `bronze.ai-tools_ai_tools` and `bronze.ai-tools_ai_tools_history` matched direct
 Bronze Parquet semantically across two directory-provider files, retained
