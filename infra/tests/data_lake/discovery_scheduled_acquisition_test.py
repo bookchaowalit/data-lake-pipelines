@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -44,6 +47,25 @@ class DiscoveryScheduledAcquisitionTests(unittest.TestCase):
 
     def test_summary_handles_empty_source_set(self) -> None:
         self.assertIn("sources=0", scheduled.summarize_result({"sources": []}))
+
+    def test_log_timestamps_are_utc_as_the_z_suffix_claims(self) -> None:
+        # The format string ends the timestamp with "Z"; the converter must be set on the
+        # Formatter (a handler attribute is ignored), or local time is written as UTC.
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            scheduled, "LOG_FILE", Path(tmp) / "logs" / "scheduled.log"
+        ):
+            logger = scheduled.configure_logger()
+            try:
+                formatter = logger.handlers[0].formatter
+                assert formatter is not None
+                record = logging.LogRecord("t", logging.INFO, __file__, 1, "msg", None, None)
+                record.created = 0.0
+                record.msecs = 0.0
+                self.assertTrue(formatter.format(record).startswith("1970-01-01 00:00:00,000Z"))
+            finally:
+                for handler in list(logger.handlers):
+                    handler.close()
+                logger.handlers.clear()
 
 
 if __name__ == "__main__":

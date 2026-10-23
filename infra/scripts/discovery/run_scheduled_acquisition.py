@@ -60,8 +60,9 @@ def configure_logger() -> logging.Logger:
         backupCount=3,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter("%(asctime)sZ %(levelname)s %(message)s"))
-    handler.converter = gmtime
+    formatter = logging.Formatter("%(asctime)sZ %(levelname)s %(message)s")
+    formatter.converter = gmtime
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
     return logger
 
