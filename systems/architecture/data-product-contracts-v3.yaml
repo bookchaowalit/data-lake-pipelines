@@ -1,4 +1,4 @@
-# Frozen data-product contracts — generation 3 (v3)
+# Frozen data-product contracts — generation 3 (v3), superseded 2026-10-23
 #
 # Single source of truth for local free-only data-product APIs and consumers.
 # Machine-checked by: infra/scripts/utils/data_product_contract_guard.py
@@ -12,7 +12,11 @@
 # generation; reusing it needs a later freeze generation.
 
 freeze_id: data-product-contracts-v3
-status: frozen
+status: superseded
+# Superseded by data-product-contracts-v4.yaml (2026-10-23), which retires the
+# flights row (flight.v1 / :8105, book-flight-data). Rows below are kept
+# unchanged per the versioning policy; flights is NOT a live producer.
+superseded_by: data-product-contracts-v4
 created: 2026-10-23
 supersedes: data-product-contracts-v2
 retired_rows:

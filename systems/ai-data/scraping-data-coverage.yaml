@@ -411,7 +411,7 @@ products:
           max_age_hours: 6
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v3.yaml
+      contract_path: systems/architecture/data-product-contracts-v4.yaml
       schema_version: crypto.v1
       api_port: 8101
       api_mode: on_demand
@@ -448,7 +448,7 @@ products:
           max_age_hours: 30
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v3.yaml
+      contract_path: systems/architecture/data-product-contracts-v4.yaml
       schema_version: stock.v1
       api_port: 8102
       api_mode: on_demand
@@ -485,7 +485,7 @@ products:
           max_age_hours: 8
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v3.yaml
+      contract_path: systems/architecture/data-product-contracts-v4.yaml
       schema_version: fx.v1
       api_port: 8103
       api_mode: on_demand
@@ -522,48 +522,49 @@ products:
           max_age_hours: 30
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v3.yaml
+      contract_path: systems/architecture/data-product-contracts-v4.yaml
       schema_version: defi.v1
       api_port: 8104
       api_mode: on_demand
     next_action: Keep the approved parent lake-first DeFi schedule on its daily cadence and verify Bronze/history reconciliation before enabling API consumers.
 
+  # Retired requirement. flight.v1 / :8105 (book-flight-data =
+  # bookchaowalit/travel-flight-price-data) was retired on 2026-10-23 in
+  # systems/architecture/data-product-contracts-v4.yaml (owner approved). The row
+  # stays only because the pinned source-registry snapshot still lists the
+  # flight_prices job; it is not required, scheduled, ingested or served.
   - id: flights
-    name: Flight and route price data
+    name: Flight and route price data (retired)
     domain: travel
     priority: P2
-    required: true
-    decision: Compare permitted route prices within an explicit query and cost budget.
+    required: false
+    decision: Retired 2026-10-23; no consumer needs flight price signals and the producer repository is to be archived.
     owner: book-flight-data
-    consumers: [travel-planning]
-    grain: One route/itinerary price observation per provider search.
-    retention: short-lived-operational
+    consumers: [none-retired]
+    grain: None; retired.
+    retention: none
     permission:
-      status: blocked
+      status: retired
       classification: public_source_with_terms
-      basis: Provider credential, current free-tier terms, and route-query budget are not approved.
-    cron_tags: [book-flight-data-feeds]
+      basis: Product retired in data-product-contracts-v4 (owner approved 2026-10-23); no provider credential or route-query budget was ever approved.
+    cron_tags: []
     sources:
       - job: flight_prices
-        quality_status: blocked
+        quality_status: retired
+        quality_note: Retired with the flights product; do not schedule, capture or ingest.
         capture:
           paths:
             - projects/product/engineering/book-dev/github/bookchaowalit/private/book-products/travel-flight-price-data/data/exported/flight_prices.csv
           max_age_hours: 192
     lake:
-      required: true
-      datasets:
-        - id: flight_prices
-          paths:
-            - data/lake*/**/bronze/domain=travel/dataset=flight_prices/schema_version=*/ingest_date=*/source=book-flight-data/*.parquet
-          max_age_hours: 192
+      required: false
+      datasets: []
     delivery:
-      kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v3.yaml
+      kind: retired
+      contract_path: systems/architecture/data-product-contracts-v4.yaml
       schema_version: flight.v1
-      api_port: 8105
-      api_mode: on_demand
-    next_action: Approve one provider and bounded route budget before activating collection; fixtures remain test evidence only.
+      api_mode: none
+    next_action: None. Drop this row when the source-registry snapshot is re-pinned to a career-job-scraper commit without the flight_prices job.
 
   - id: seo
     name: Owned-page SEO provenance
@@ -596,7 +597,7 @@ products:
           max_age_hours: 30
     delivery:
       kind: api_and_duckdb
-      contract_path: systems/architecture/data-product-contracts-v3.yaml
+      contract_path: systems/architecture/data-product-contracts-v4.yaml
       schema_version: seo.v1
       api_port: 8106
       api_mode: on_demand

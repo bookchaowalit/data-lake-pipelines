@@ -50,7 +50,6 @@ PRODUCTS: tuple[ProductRuntime, ...] = (
     ProductRuntime("stocks", "book-stock-data", "book_stock.api", 8102, "public/book-products/market-data/sources/stock"),
     ProductRuntime("fx", "book-fx-data", "book_fx.api", 8103, "public/book-products/market-data/sources/fx"),
     ProductRuntime("defi", "book-defi-data", "book_defi.api", 8104, "public/book-products/market-data/sources/defi"),
-    ProductRuntime("flights", "book-flight-data", "book_flight.api", 8105, "private/book-products/travel-flight-price-data"),
     ProductRuntime("seo", "book-seo-data", "book_seo.api", 8106, "private/book-products/marketing-seo-ranking-data"),
     ProductRuntime("news", "book-news-scraping", "news_data.api", 8108, "public/book-apps/tools/content-news-scraper"),
     ProductRuntime("discovery", "book-discovery-data", "discovery_data.api", 8110, "public/book-apps/tools/tech-discovery-data"),

@@ -249,7 +249,7 @@ same snapshot on registration retry. Its API on port 8104 reported
 direct Bronze Parquet. The hosted check used a deterministic DeFiLlama-shaped
 fixture and did not scrape the live upstream.
 
-`book-flight-data` also passed the live shared-store pilot on
+`book-flight-data` (retired 2026-10-23 in data-product-contracts-v4; record kept as history) also passed the live shared-store pilot on
 `portfolio-demo/book-flight-iceberg-001`: both
 `bronze.travel_flight_prices` and `bronze.travel_flight_prices_history` matched
 direct Bronze Parquet semantically across two provider files, retained

@@ -10,5 +10,4 @@
 50 * * * * /srv/data-lake/infra/scripts/setup/run-python3.sh /srv/data-lake/infra/scripts/data_lake/run_market_capture.py # book-stock-data-feeds
 55 * * * * /srv/data-lake/infra/scripts/setup/run-python3.sh /srv/data-lake/infra/scripts/data_lake/run_market_capture.py # book-fx-data-feeds
 5 * * * * /srv/data-lake/infra/scripts/setup/run-python3.sh /srv/data-lake/infra/scripts/data_lake/run_market_capture.py # book-defi-data-feeds
-10 * * * * /srv/data-lake/infra/scripts/setup/run-python3.sh /srv/data-lake/infra/scripts/data_lake/run_market_capture.py # book-flight-data-feeds
 20 * * * * /srv/data-lake/infra/scripts/setup/run-python3.sh /srv/data-lake/infra/scripts/data_lake/run_market_capture.py # book-directory-scraping-feeds

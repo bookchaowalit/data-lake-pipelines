@@ -123,7 +123,7 @@ The new domain v2 contracts do not alter the frozen contracts below.
 | Jobs capture | `book-job-scraping` | Collection-only file handoff |
 | Jobs data contract | [`bookchaowalit/career-job-market-data`](https://github.com/bookchaowalit/career-job-market-data) | Public `job.v1` / :8109; Lake-first Track B consumer boundary |
 | Ecommerce data | `book-ecommerce-scraping` | Already independent |
-| News data | `book-news-scraping` | `news.v1` Bronze/API on :8108; additive to the frozen v3 map |
+| News data | `book-news-scraping` | `news.v1` Bronze/API on :8108; additive to the frozen v4 map |
 | Technology discovery data | `book-discovery-data` | `discovery.v1` Bronze/API on :8110; additive technology signals from approved captures |
 | Property data | `book-property-scraping` | Already independent |
 | Food and beverage data | `book-restaurant-scraping` | Already independent; portfolio name may later become food-beverage |
@@ -132,7 +132,7 @@ The new domain v2 contracts do not alter the frozen contracts below.
 | Stocks data | `book-stock-data` (local staging) | Validate contract, then publish the stock data product |
 | FX data | `book-fx-data` (local staging) | Validate contract, then publish the currency data product |
 | DeFi data | `book-defi-data` (local staging) | Validate contract, then publish the DeFi data product |
-| Flight data | `book-flight-data` (local staging) | Validate provider policy, then publish the flight data product |
+| Flight data | `book-flight-data` (`bookchaowalit/travel-flight-price-data`) | **Retired 2026-10-23** in [`data-product-contracts-v4.yaml`](data-product-contracts-v4.yaml) (owner approved); no live producer or consumer, port 8105 never reused, repository to be archived |
 | SEO data | `book-seo-data` (local staging) | Validate provider policy, then publish the SEO intelligence product |
 | AI tools data | `book-ai-tools-data` (`bookchaowalit/tech-ai-tools-data`) | **Retired 2026-10-23** in [`data-product-contracts-v3.yaml`](data-product-contracts-v3.yaml) (owner approved); no live producer or consumer, repository to be archived |
 
@@ -149,7 +149,7 @@ become storage owners for scraper output.
 2. Define one normalized schema and fixture set per domain before moving code.
 3. Extract the smallest independently runnable source product from
    `book-opportunity-scraping` first: crypto, stocks, FX, DeFi, flights, SEO,
-   and AI tools were separate candidates (AI tools was retired on 2026-10-23).
+   and AI tools were separate candidates (flights and AI tools were retired on 2026-10-23).
 4. Keep `opportunities/` as the human-facing inventory and research area;
    executable discovery belongs to the owning domain repositories and the
    shared portfolio CLI.
@@ -161,8 +161,8 @@ become storage owners for scraper output.
 
 ## Current implementation handoff
 
-The free-only local API + CLI slice is implemented in the six frozen source
-repositories (the seventh, AI tools, was retired in v3), with the additive `book-news-scraping` `news.v1`,
+The free-only local API + CLI slice is implemented in the five frozen source
+repositories (AI tools was retired in v3 and flights in v4), with the additive `book-news-scraping` `news.v1`,
 `book-discovery-data` `discovery.v1`, and separate Track B `book-job-data`
 boundaries, and tracked in
 [`operations/runbooks/CODING-AGENT-DATA-PRODUCT-API-FREE-PLAN.md`](../../operations/runbooks/CODING-AGENT-DATA-PRODUCT-API-FREE-PLAN.md).
@@ -170,12 +170,13 @@ Each repo exposes a loopback read-only HTTP API that serves normalized local
 data only, with `POST /v1/refresh` disabled by default and paid providers
 blocked unless explicitly opted in.
 
-**The six domain source-product v1 contracts are frozen in generation v3** (v3
-retires `ai_tools.v1` / `:8107`; v2 is superseded). Port map, envelope keys, schema_version values,
+**The five domain source-product v1 contracts are frozen in generation v4** (v4
+retires `flight.v1` / `:8105`, v3 retired `ai_tools.v1` / `:8107`; both ports are
+never reused; v3 and v2 are superseded). Port map, envelope keys, schema_version values,
 GET-only consumer surface, and free-only defaults are the single source of
 truth in:
 
-- [`data-product-contracts-v3.yaml`](data-product-contracts-v3.yaml)
+- [`data-product-contracts-v4.yaml`](data-product-contracts-v4.yaml)
 - [`data-product-versioning-policy.md`](data-product-versioning-policy.md)
 
 Breaking changes require a **new** `schema_version` (for example `crypto.v2`),

@@ -142,27 +142,6 @@ CAPTURES: tuple[CaptureSpec, ...] = (
         True,
     ),
     CaptureSpec(
-        "flights",
-        "book-flight-data",
-        "travel",
-        "flight.v1",
-        "flight_prices",
-        "projects/product/engineering/book-dev/github/bookchaowalit/private/book-products/travel-flight-price-data/data/exported/flight_prices.csv",
-        ("origin", "destination", "departure"),
-        "scraped_at",
-    ),
-    CaptureSpec(
-        "flights",
-        "book-flight-data",
-        "travel",
-        "flight.v1",
-        "flight_prices_history",
-        "projects/product/engineering/book-dev/github/bookchaowalit/private/book-products/travel-flight-price-data/data/exported/flight_prices_history.csv",
-        ("origin", "destination", "departure"),
-        "date",
-        True,
-    ),
-    CaptureSpec(
         "seo",
         "book-seo-data",
         "seo",
@@ -571,9 +550,9 @@ def main(argv: list[str] | None = None) -> int:
     # Conditional/blocked sources require a separate source-owner decision;
     # this operational replay never treats their presence as approval.
     # SEO is approved for owned-page provenance only; news is approved for
-    # publisher RSS/Atom captures with attribution. Flight collection remains
-    # held behind its source-owner gate. The AI tools product was retired in
-    # data-product-contracts-v3 (2026-10-23) and has no capture spec.
+    # publisher RSS/Atom captures with attribution. The AI tools product was
+    # retired in data-product-contracts-v3 and the flights product in
+    # data-product-contracts-v4 (both 2026-10-23); neither has a capture spec.
     approved = {"crypto", "stocks", "fx", "defi", "seo", "news"}
     selected = set(args.product or approved)
     validate_only = args.validate_only or args.dry_run
