@@ -241,10 +241,10 @@ def _prepare_captures(
         records_raw = full_raw
         capture_mode = "snapshot"
         if spec.history:
-            records_raw, capture_mode = _history_delta(
+            delta, capture_mode = _history_delta(
                 history_before.get(spec.path, b""), full_raw
             )
-            if records_raw is None:
+            if delta is None:
                 validated.append(
                     {
                         "dataset": spec.dataset,
@@ -254,6 +254,7 @@ def _prepare_captures(
                     }
                 )
                 continue
+            records_raw = delta
         try:
             parsed = _records(records_raw, spec.id_fields, spec.event_time_field)
             mapped = tuple(_map_records(spec, parsed))
@@ -614,4 +615,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from data_lake.observability import run_with_reporting
+
+    raise SystemExit(run_with_reporting("news", main))

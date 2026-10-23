@@ -244,7 +244,7 @@ def validate_config(
             if not isinstance(row.get("status"), str) or not row["status"].strip():
                 errors.append(f"source registry job {row['job']} must have a non-empty status")
         registry_jobs = {
-            row.get("job")
+            str(row["job"])
             for row in _source_rows(source_registry)
             if isinstance(row.get("job"), str)
         }

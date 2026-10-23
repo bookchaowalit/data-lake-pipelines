@@ -36,7 +36,7 @@ def _lock_nonblocking(handle) -> None:
             handle.write(b"\0")
             handle.flush()
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined,unused-ignore]
         return
 
     import fcntl
@@ -49,7 +49,7 @@ def _unlock(handle) -> None:
         import msvcrt
 
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined,unused-ignore]
         return
 
     import fcntl

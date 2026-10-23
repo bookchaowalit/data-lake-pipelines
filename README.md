@@ -33,7 +33,7 @@ repo นี้ไม่มี symlink ไปยัง solo-empire. สิ่ง�
 ## ติดตั้งและทดสอบ
 
 ```bash
-uv venv && uv pip install -r requirements.txt     # pyarrow, duckdb, pyiceberg, httpx, dbt-duckdb, ...
+uv sync --all-extras    # จาก uv.lock (pyproject.toml ตรงกับ infra/requirements-data-lake.txt); หรือ uv venv && uv pip install -r requirements.txt
 for t in $(find infra/tests -name '*_test.py' | sort); do .venv/bin/python "$t" || echo "FAIL $t"; done
 ```
 

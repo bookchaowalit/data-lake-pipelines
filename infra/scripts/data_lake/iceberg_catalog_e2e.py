@@ -87,7 +87,7 @@ def run_catalog_e2e(
     _assert(bronze_key.startswith("bronze/"), "manifest must reference a Bronze object")
     _assert(not bronze_key.endswith(".csv"), "catalog E2E must use Bronze Parquet")
     _assert(manifest.get("record_count", 0) > 0, "manifest must contain records")
-    _assert(store.get_bytes(bronze_key), "Bronze object is empty or unavailable")
+    _assert(bool(store.get_bytes(bronze_key)), "Bronze object is empty or unavailable")
 
     registration = dict(
         data_lake_uri=data_lake_uri,

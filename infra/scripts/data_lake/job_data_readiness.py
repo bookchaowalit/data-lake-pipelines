@@ -28,7 +28,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = ROOT / "infra" / "scripts"
@@ -77,7 +77,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _non_negative_int(value: Any) -> bool:
+def _non_negative_int(value: Any) -> TypeGuard[int]:
     return not isinstance(value, bool) and isinstance(value, int) and value >= 0
 
 
@@ -124,7 +124,7 @@ def _verify_object(
     label: str,
 ) -> tuple[bytes | None, dict[str, Any], list[str]]:
     """Download and verify one immutable object without exposing its payload."""
-    checks = {
+    checks: dict[str, Any] = {
         "reference_shape": isinstance(ref, dict),
         "checksum": False,
         "byte_count": False,
@@ -471,7 +471,7 @@ def _reconcile_manifest(
 
     metrics: dict[str, int] = {key: 0 for key in _METRIC_KEYS}
     if bronze_payload is not None:
-        expected = {
+        expected_row = {
             "source": source,
             "domain": domain,
             "dataset": dataset,
@@ -486,7 +486,7 @@ def _reconcile_manifest(
             "ingest_run_id": str(run_id),
         }
         try:
-            metrics = _query_bronze_metrics(bronze_payload, expected)
+            metrics = _query_bronze_metrics(bronze_payload, expected_row)
         except DuckDBUnavailable:
             errors.append("duckdb_unavailable")
         except Exception:  # noqa: BLE001 - Parquet/provider errors are redacted

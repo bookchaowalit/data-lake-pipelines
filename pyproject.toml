@@ -1,0 +1,61 @@
+# Dependency lock and tool config for the data-lake scripts (not an installable package).
+# `dependencies` must match infra/requirements-data-lake.txt line for line; the scripts'
+# error messages point users at that file. infra/tests/data_lake/dependency_manifest_test.py
+# fails when the two drift.
+[project]
+name = "data-lake-pipelines"
+version = "0.1.0"
+description = "Lake-first data pipelines: Bronze/Silver ingestion, scheduled captures, dbt projection."
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.5.5",
+    "httpx>=0.27.0",
+    "feedparser>=6.0.0",
+    "beautifulsoup4>=4.12.0",
+    "jsonschema==4.26.0",
+    "fastavro>=1.12.2",
+    "kafka-python-ng>=2.2.3",
+    "pyarrow>=25.0.1",
+    "pyiceberg[sql-sqlite,s3fs]>=0.12.0",
+    "psycopg[binary]>=3.3.5",
+    "clickhouse-connect>=1.8.0",
+    "chdb>=4.4.0; sys_platform != \"win32\"",
+    "dbt-duckdb>=1.11.0",
+    "anyio>=4.14.2",
+    "dbt-common>=1.37.3",
+    "deepdiff>=8.6.2",
+    "idna>=3.15",
+    "protobuf>=6.33.5",
+    "sqlparse>=0.6.0",
+]
+
+[project.optional-dependencies]
+# Opt-in error reporting for the scheduled capture runners; inert unless SENTRY_DSN is set
+# (infra/scripts/data_lake/observability.py).
+sentry = ["sentry-sdk>=2.20,<3"]
+
+[dependency-groups]
+dev = ["mypy>=1.13", "ruff>=0.8", "types-jsonschema", "types-PyYAML"]
+
+[tool.uv]
+package = false
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "infra/scripts"
+# Typed and passing today. Follow-up (not yet clean): infra/scripts/utils (vendored, 15 errors),
+# infra/scripts/sync (2 errors), infra/scripts/cli and the dbt/test scripts.
+files = ["infra/scripts/data_lake", "infra/scripts/discovery", "infra/scripts/opportunities"]
+explicit_package_bases = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+# Third-party packages without type information.
+module = ["feedparser", "pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Sibling scripts reached through sys.path at run time (utils/_env, the alerts adapter, the
+# direct-execution fallback of data_lake.storage) and the separate book-job-data product repo.
+module = ["_env", "alerts", "job_client", "storage", "book_job_data"]
+ignore_missing_imports = true

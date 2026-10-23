@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+from typing import Any
 from dataclasses import dataclass
 
 
@@ -173,7 +174,7 @@ def _configured(names: tuple[str, ...]) -> bool:
     return all(bool(os.environ.get(name, "").strip()) for name in names)
 
 
-def readiness_report() -> dict[str, object]:
+def readiness_report() -> dict[str, Any]:
     rows: list[dict[str, object]] = []
     for spec in INTEGRATIONS:
         matched = next((group for group in spec.required_any if _configured(group)), None)

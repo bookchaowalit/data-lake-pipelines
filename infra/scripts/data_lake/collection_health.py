@@ -67,7 +67,7 @@ def _safe_gaps(report: dict[str, Any]) -> list[dict[str, Any]]:
 def build_health_report(report: dict[str, Any], *, source_report: str) -> dict[str, Any]:
     if report.get("contract") != COVERAGE_SCHEMA_VERSION:
         raise CollectionHealthError("unsupported coverage audit contract")
-    generated_at = report.get("generated_at")
+    generated_at: Any = report.get("generated_at")
     try:
         generated = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError):
@@ -92,7 +92,7 @@ def build_health_report(report: dict[str, Any], *, source_report: str) -> dict[s
     percentage = summary.get("end_to_end_ready_pct")
     if (
         type(percentage) not in (int, float)
-        or not math.isfinite(percentage)
+        or not math.isfinite(percentage)  # type: ignore[arg-type]  # narrowed by the type() check above
         or percentage != round(end_to_end_ready / required * 100, 1)
     ):
         raise CollectionHealthError("coverage audit readiness percentage is inconsistent")

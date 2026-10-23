@@ -164,6 +164,7 @@ def _write_poison_csv(config: ModuleType, data_dir: Path) -> None:
 
 
 def _run_product(name: str, lake_uri: str, workspace: Path) -> dict[str, Any]:
+    config: Any
     config, _lake, store = _load_product(name)
     config.DATA_LAKE_URI = lake_uri
     config.DATA_DIR = workspace / "data"

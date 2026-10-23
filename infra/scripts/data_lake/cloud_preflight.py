@@ -17,12 +17,13 @@ import argparse
 import json
 import os
 import sys
+from typing import Any
 from urllib.parse import urlparse
 
 try:
     from .storage import ObjectStore, StorageError
 except ImportError:  # direct ``python path/to/cloud_preflight.py`` execution
-    from storage import ObjectStore, StorageError
+    from storage import ObjectStore, StorageError  # type: ignore[no-redef]
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -96,7 +97,7 @@ def validate_config(
     data_lake_uri: str,
     catalog_uri: str | None = None,
     require_cloud_write: bool = False,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Return a redacted validation report for local or hosted lake settings."""
     parsed = urlparse(data_lake_uri)
     scheme = parsed.scheme.lower() or "file"

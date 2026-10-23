@@ -87,6 +87,8 @@ class ObjectStore:
 
     def __init__(self, uri: str):
         self.uri = uri
+        self.root: Path | None
+        self.bucket: str | None
         if (
             os.name == "nt"
             and len(uri) >= 3

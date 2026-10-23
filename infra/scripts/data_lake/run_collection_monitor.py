@@ -141,4 +141,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from data_lake.observability import run_with_reporting
+
+    raise SystemExit(run_with_reporting("collection-monitor", main))

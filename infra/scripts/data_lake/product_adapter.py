@@ -376,7 +376,7 @@ def write_lineage(
         except (json.JSONDecodeError, OSError):
             previous = {}
 
-    datasets = previous.get("datasets") if isinstance(previous.get("datasets"), dict) else {}
+    datasets: dict[str, Any] = previous["datasets"] if isinstance(previous.get("datasets"), dict) else {}
     datasets[dataset] = {
         "run_id": result.get("run_id"),
         "record_count": result.get("record_count"),
@@ -428,7 +428,7 @@ def read_bronze_rows(
     )
     if remote:
         if committed_keys is not None:
-            paths = [f"{uri.rstrip('/')}/{key}" for key in sorted(committed_keys)]
+            paths: str | list[str] = [f"{uri.rstrip('/')}/{key}" for key in sorted(committed_keys)]
             if not paths:
                 return []
         else:

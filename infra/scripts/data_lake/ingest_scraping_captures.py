@@ -399,7 +399,7 @@ def _map_records(spec: CaptureSpec, records: list[dict[str, Any]]) -> list[dict[
             title = str(row.get("title") or "").strip()
             url = str(row.get("url") or "").strip()
             source = str(row.get("source") or "").strip()
-            observed_at = str(row.get(spec.event_time_field) or "").strip()
+            observed_at = str(row.get(spec.event_time_field or "") or "").strip()
             item.update(
                 {
                     "headline": title,
@@ -415,7 +415,7 @@ def _map_records(spec: CaptureSpec, records: list[dict[str, Any]]) -> list[dict[
         return mapped
     if spec.product != "seo":
         return records
-    mapped: list[dict[str, Any]] = []
+    mapped = []
     for row in records:
         status_raw = str(row.get("http_status") or "").strip()
         try:
@@ -434,7 +434,7 @@ def _map_records(spec: CaptureSpec, records: list[dict[str, Any]]) -> list[dict[
         location = str(row.get("location") or "global").strip() or "global"
         device = str(row.get("device") or "desktop").strip() or "desktop"
         provider = str(row.get("provider") or row.get("source") or "public_page_check").strip()
-        observed_at = str(row.get(spec.event_time_field) or "").strip()
+        observed_at = str(row.get(spec.event_time_field or "") or "").strip()
         item = dict(row)
         item.update(
             {
