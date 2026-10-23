@@ -204,7 +204,7 @@ def parse_freeze_yaml() -> dict:
                     prod[key] = val.strip("'\"")
             products.append(prod)
 
-    if len(products) != len(EXPECTED_PRODUCTS):
+    if not products:
         products = [dict(p) for p in EXPECTED_PRODUCTS]
 
     # Envelope keys

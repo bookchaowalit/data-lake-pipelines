@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import io
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -37,6 +39,22 @@ class DataProductContractsV3Tests(unittest.TestCase):
         errors: list[str] = []
         guard.check_freeze_file(errors, freeze)
         self.assertEqual(errors, [])
+
+    def test_guard_rejects_a_freeze_that_re_adds_the_retired_row(self) -> None:
+        text = guard.FREEZE_PATH.read_text(encoding="utf-8")
+        row = (
+            "  - id: ai_tools\n    port: 8107\n    schema_version: ai_tools.v1\n"
+            "    repository: book-ai-tools-data\n    package: book_ai_tools\n    role: domain_source\n"
+        )
+        text = text.replace("\nconsumers:\n", "\n" + row + "consumers:\n", 1)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "data-product-contracts-v3.yaml"
+            path.write_text(text, encoding="utf-8")
+            with patch.object(guard, "FREEZE_PATH", path):
+                freeze = guard.parse_freeze_yaml()
+                errors: list[str] = []
+                guard.check_freeze_file(errors, freeze)
+        self.assertTrue(any("8107" in error for error in errors), errors)
 
     def test_guard_mirror_and_consumer_ports_drop_8107(self) -> None:
         self.assertEqual([p["id"] for p in guard.EXPECTED_PRODUCTS], V3_IDS)
