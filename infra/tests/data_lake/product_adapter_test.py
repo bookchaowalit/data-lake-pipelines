@@ -243,5 +243,97 @@ class ProductAdapterTests(unittest.TestCase):
             self.assertEqual(len(all_parts), 2)
 
 
+class _FakeRemoteStore:
+    """In-memory stand-in for an s3:// ObjectStore that records reads and overlap."""
+
+    manifests: dict[str, bytes] = {}
+    missing: set[str] = set()
+    broken: set[str] = set()
+    reads: list[str] = []
+    active = 0
+    peak = 0
+    lock = __import__("threading").Lock()
+
+    def __init__(self, uri: str):
+        self.uri = uri
+
+    def list_keys(self, prefix: str) -> list[str]:
+        return sorted(key for key in self.manifests if key.startswith(prefix))
+
+    def get_bytes(self, key: str) -> bytes:
+        from data_lake.storage import ObjectNotFound, StorageError
+
+        cls = type(self)
+        with cls.lock:
+            cls.reads.append(key)
+            cls.active += 1
+            cls.peak = max(cls.peak, cls.active)
+        try:
+            __import__("time").sleep(0.01)
+            if key in cls.missing:
+                raise ObjectNotFound(key)
+            if key in cls.broken:
+                raise StorageError(key)
+            return cls.manifests[key]
+        finally:
+            with cls.lock:
+                cls.active -= 1
+
+
+class CommittedManifestReadTests(unittest.TestCase):
+    """Remote lakes keep one manifest per ingest, so reads must not grow one process at a time."""
+
+    contract = LakeProductContract(
+        source="book-news-scraping", domain="news", product_schema_version="news.v1", project_root=ROOT
+    )
+
+    def setUp(self) -> None:
+        from data_lake import product_adapter
+
+        product_adapter._MANIFEST_CACHE.clear()
+        _FakeRemoteStore.manifests = {}
+        _FakeRemoteStore.missing = set()
+        _FakeRemoteStore.broken = set()
+        _FakeRemoteStore.reads = []
+        _FakeRemoteStore.peak = 0
+        for index in range(20):
+            for dataset in ("articles", "articles_history"):
+                key = f"control/manifests/source=book-news-scraping/{dataset}-{index}.json"
+                _FakeRemoteStore.manifests[key] = json.dumps({
+                    "source": "book-news-scraping", "domain": "news", "schema_version": "1", "dataset": dataset,
+                    "bronze": {"key": f"bronze/domain=news/dataset={dataset}/schema_version=1/part-{index}.parquet"},
+                }).encode()
+
+    def committed(self, dataset: str, uri: str = "s3://bucket/lake") -> set[str]:
+        from data_lake.product_adapter import _committed_bronze_keys
+
+        with patch("data_lake.product_adapter.ObjectStore", _FakeRemoteStore):
+            return _committed_bronze_keys(self.contract, dataset, data_lake_uri=uri)
+
+    def test_reads_run_in_parallel_and_each_manifest_is_read_once_per_lake(self) -> None:
+        articles = self.committed("articles")
+        history = self.committed("articles_history")
+        self.assertEqual(len(articles), 20)
+        self.assertEqual(len(history), 20)
+        self.assertTrue(all("dataset=articles/" in key for key in articles))
+        self.assertEqual(len(_FakeRemoteStore.reads), 40)  # the second dataset reuses the cached manifests
+        self.assertGreater(_FakeRemoteStore.peak, 1)
+
+    def test_cache_is_per_lake(self) -> None:
+        self.committed("articles", "s3://bucket/lake-a")
+        self.committed("articles", "s3://bucket/lake-b")
+        self.assertEqual(len(_FakeRemoteStore.reads), 80)
+
+    def test_missing_manifest_is_skipped_and_broken_one_fails_closed(self) -> None:
+        from data_lake.product_adapter import LakeIngestError
+
+        first = "control/manifests/source=book-news-scraping/articles-0.json"
+        _FakeRemoteStore.missing = {first}
+        self.assertEqual(len(self.committed("articles")), 19)
+        _FakeRemoteStore.broken = {"control/manifests/source=book-news-scraping/articles-1.json"}
+        with self.assertRaises(LakeIngestError):
+            self.committed("articles", "s3://bucket/other")
+
+
 if __name__ == "__main__":
     unittest.main()

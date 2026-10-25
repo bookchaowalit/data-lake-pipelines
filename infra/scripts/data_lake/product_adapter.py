@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -238,6 +240,39 @@ def list_bronze_parquet_files(
     return sorted(path for path in base.rglob("*.parquet") if path.is_file())
 
 
+# Each remote read starts one `aws` process (data_lake/storage.py), about a second apiece, and
+# every ingest adds a manifest. Reading them in parallel and caching them keeps a remote read
+# from growing one process per ingest. Manifests are write-once, so a cached body never goes stale.
+MANIFEST_READ_WORKERS = 16
+_MANIFEST_CACHE: dict[tuple[str, str], bytes] = {}
+_MANIFEST_CACHE_LOCK = threading.Lock()
+
+
+def _read_manifests(store: ObjectStore, lake_uri: str, keys: Sequence[str]) -> list[tuple[str, bytes | Exception]]:
+    """Read manifest bodies in listing order; a failed read is returned as its exception."""
+    remote = is_remote_lake_uri(lake_uri)
+
+    def read(key: str) -> bytes | Exception:
+        if remote:
+            with _MANIFEST_CACHE_LOCK:
+                cached = _MANIFEST_CACHE.get((lake_uri, key))
+            if cached is not None:
+                return cached
+        try:
+            body = store.get_bytes(key)
+        except (ObjectNotFound, StorageError) as exc:
+            return exc
+        if remote:
+            with _MANIFEST_CACHE_LOCK:
+                _MANIFEST_CACHE[(lake_uri, key)] = body
+        return body
+
+    if not remote or len(keys) < 2:
+        return [(key, read(key)) for key in keys]
+    with ThreadPoolExecutor(max_workers=MANIFEST_READ_WORKERS) as pool:
+        return list(zip(keys, pool.map(read, keys)))
+
+
 def _committed_bronze_keys(
     contract: LakeProductContract,
     dataset: str,
@@ -266,11 +301,11 @@ def _committed_bronze_keys(
             manifest_keys.extend(store.list_keys(manifest_prefix))
         except StorageError as exc:
             raise LakeIngestError(f"Cannot list Bronze commit manifests for {dataset}") from exc
-    for manifest_key in manifest_keys:
-        if not manifest_key.endswith(".json"):
-            continue
+    json_keys = [key for key in manifest_keys if key.endswith(".json")]
+    for manifest_key, body in _read_manifests(store, data_lake_uri, json_keys):
         try:
-            body = store.get_bytes(manifest_key)
+            if isinstance(body, Exception):
+                raise body
             manifest = json.loads(body.decode("utf-8"))
         except ObjectNotFound:
             # A concurrent cleanup or eventually consistent listing is not a
