@@ -243,7 +243,9 @@ def list_bronze_parquet_files(
 # Each remote read starts one `aws` process (data_lake/storage.py), about a second apiece, and
 # every ingest adds a manifest. Reading them in parallel and caching them keeps a remote read
 # from growing one process per ingest. Manifests are write-once, so a cached body never goes stale.
-MANIFEST_READ_WORKERS = 16
+# Each `aws` process also holds 65-90 MB, so 16 at once overran a 1 GB cron container (SIGKILL);
+# 4 keeps the burst near 400 MB. DATA_LAKE_MANIFEST_READ_WORKERS overrides it for bigger hosts.
+MANIFEST_READ_WORKERS = max(1, int(os.environ.get("DATA_LAKE_MANIFEST_READ_WORKERS", "4")))
 _MANIFEST_CACHE: dict[tuple[str, str], bytes] = {}
 _MANIFEST_CACHE_LOCK = threading.Lock()
 
