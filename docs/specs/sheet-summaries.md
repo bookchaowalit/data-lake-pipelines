@@ -1,6 +1,6 @@
 # Spec: daily AI summaries for the "Chief Findings Warehouse" sheet
 
-Status: proposed (2026-10-26). Standard: ADR-0004 (spec, then failing test, then code).
+Status: accepted (2026-10-26); batches and merge added 2026-10-26. Standard: ADR-0004 (spec, then failing test, then code).
 Code: `infra/scripts/sync/sheet_summaries.py`. Tests: `infra/tests/data_lake/sheet_summaries_test.py`.
 Operator docs: [`docs/sheet-summaries.md`](../sheet-summaries.md).
 
@@ -37,8 +37,17 @@ X pull (~17:30 Asia/Bangkok), through the owner's own AI gateway and with no new
 6. **Input cap.** At most 200 rows per tab and 500 characters per cell. The prompt must also fit the
    gateway's live limits from `GET /api/ai/status` (`limits.max_context_chars`,
    `limits.max_token_budget` minus the output reservation; the gateway counts input tokens as UTF-8
-   bytes + 32 per message). Over the cap, keep the highest `top` then `score` rows for `X Feed` and
-   the newest rows elsewhere.
+   bytes + 32 per message). Rows are taken in priority order: the highest `top` then `score` rows
+   for `X Feed`, the newest rows elsewhere.
+6a. **Batches and merge.** A tab whose rows do not fit one request is split into at most 8 batches
+   (batch 1 holds the highest-priority rows); rows left over once 8 batches are full are not sent and
+   the window still moves past them. Each batch answer is validated on its own (item 9) and asks for
+   a short partial. Merge calls (`prompt_version=sheet-summaries-merge-v1`) then combine the
+   validated partials, as many per call as fit, round after round until one answer is left; the
+   merge sees only partials, never raw rows, and its links must appear in the partials it merged. A
+   batch whose answer is invalid, truncated, has an invented link or a client term is dropped and
+   never written; a merge with a malformed answer is tried once more; a failing merge fails the tab.
+   `rows_considered`, tokens and cost cover every call; `run_id` is the last call's.
 7. **Gateway call** (`solo-empire.ai-gateway.v1`, unchanged): `POST /api/ai/generate` with
    `route=sheet-summaries`, `prompt_version=sheet-summaries-v1`, `profile=fast`,
    `privacy_class=internal`, `response_format=json_object`, a `token_budget` and
@@ -79,6 +88,9 @@ X pull (~17:30 Asia/Bangkok), through the owner's own AI gateway and with no new
 | A7 | Preflight aborts when `budget.decision != allow` with no generate call |
 | A8 | Logs carry no prompt, answer, token or cell text |
 | A9 | X Feed over the cap keeps the highest `top`/`score` rows |
+| A10 | A tab over one request is split into ≤ 8 batches and merged (in rounds when needed) into one row |
+| A11 | A merge answer with a link not in its partials is rejected; a malformed one is retried once |
+| A12 | A bad or client-term batch answer is dropped and never written; a client term in the merge fails the tab |
 
 ## Out of scope
 

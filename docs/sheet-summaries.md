@@ -78,10 +78,16 @@ The `window` column is `after_row=<a>;to_row=<b>` (sheet row numbers); the next 
 newest `to_row` with status `ok`, `budget_exceeded` or `no_change`. Error rows do not move it, so a
 failed day is retried the next day. If a tab shrinks below its watermark, it starts over at the last
 7 days. Each request fits the live limits from `GET /api/ai/status`: at most 200 rows, 500 characters
-per cell, and input counted as UTF-8 bytes (Thai is 3 bytes per character). With the gateway's
-default `max_token_budget` of 4096 only a handful of rows fit per tab; set the gateway variable
-`AI_GATEWAY_MAX_TOKEN_BUDGET=32768` to summarize a full day. Over the cap, `X Feed` keeps the `top`
-then highest `score` rows, other tabs the newest rows.
+per cell, and input counted as UTF-8 bytes (Thai is 3 bytes per character). Rows go in priority
+order: `X Feed` the `top` then highest `score` rows, other tabs the newest rows.
+
+A tab too large for one request (X Feed gets ~1,400 rows a day, ~230 of them `top`) is split into up
+to 8 batches, each summarized as a short partial, then merged into one answer by merge calls that see
+only the validated partials. With the gateway's `max_token_budget` of 24,576 a batch holds ~25 X Feed
+rows, so a day covers ~170 of the highest-priority rows (measured 2026-10-26); rows past the 8th
+batch are skipped. A partial that fails validation or mentions a client term is dropped (never
+written) and the rest are merged; a malformed merge is retried once. Raising the gateway's
+`AI_GATEWAY_MAX_TOKEN_BUDGET` fits more rows per batch.
 
 ## Cost estimate (GPT-6 Luna: $0.10 / 1M input, $0.50 / 1M output)
 
@@ -90,6 +96,7 @@ then highest `score` rows, other tabs the newest rows.
 | Typical day (~3K input, ~600 output tokens) | $0.0006 | $0.008 | ~$0.25 |
 | Every tab at the 32K ceiling (~28K in, 2K out) | $0.0038 | $0.053 | ~$1.60 |
 | Default 4K gateway budget | ≤ $0.0006 | ≤ $0.008 | ≤ $0.25 |
+| X Feed in 8 batches + merges (measured 2026-10-26: ~58K in, ~11K out) | ~$0.011 | — | ~$0.35 |
 
 `no_change` tabs make no call. The gateway's monthly budget guard still applies: the run checks
 `budget.decision == "allow"` first and stops on a budget denial.

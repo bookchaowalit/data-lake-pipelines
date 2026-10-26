@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acceptance tests A1-A9 for the daily sheet summaries (docs/specs/sheet-summaries.md).
+"""Acceptance tests A1-A12 for the daily sheet summaries (docs/specs/sheet-summaries.md).
 
 The sheet is the in-memory ``MemorySheets``; the gateway is a stateful fake served through
 httpx.MockTransport behind the real ``GatewayClient``. Rows, handles and links are fake test data.
@@ -25,6 +25,9 @@ sys.path.insert(0, str(ROOT / "infra" / "scripts"))
 
 from sync.sheet_summaries import (  # noqa: E402
     LATEST_TAB,
+    MAX_BATCHES,
+    MERGE_PROMPT_VERSION,
+    SHORT_NOTE,
     OUTPUT_HEADER,
     OUTPUT_TAB,
     DenylistError,
@@ -87,13 +90,17 @@ class FakeGateway:
 
     def __init__(self, *, decision: str = "allow", invent: bool = False, answer_text: str | None = None,
                  failures: list[httpx.Response] | None = None, generate_status: str = "success",
-                 finish_reason: str = "stop") -> None:
+                 finish_reason: str = "stop", merge_answer: str | None = None,
+                 answers_by_call: dict[int, str] | None = None, summary: str | None = None) -> None:
         self.decision = decision
         self.invent = invent
         self.answer_text = answer_text
         self.failures = list(failures or [])
         self.generate_status = generate_status
         self.finish_reason = finish_reason
+        self.merge_answer = merge_answer
+        self.summary = summary
+        self.answers_by_call = dict(answers_by_call or {})
         self.generate_bodies: list[dict[str, Any]] = []
         self.status_calls = 0
 
@@ -114,7 +121,11 @@ class FakeGateway:
         prompt = "\n".join(m["content"] for m in body["messages"])
         links = ["https://invented.example/nowhere"] if self.invent else sorted(
             set(re.findall(r'https://[^\s"]+', prompt)))
-        content = self.answer_text if self.answer_text is not None else model_answer(links)
+        content = self.answer_text if self.answer_text is not None else (
+            model_answer(links, summary=self.summary) if self.summary else model_answer(links))
+        if body["prompt_version"] == MERGE_PROMPT_VERSION and self.merge_answer is not None:
+            content = self.merge_answer
+        content = self.answers_by_call.get(len(self.generate_bodies), content)
         return httpx.Response(200, json={
             "contract": "solo-empire.ai-gateway.v1", "run_id": f"run-{len(self.generate_bodies)}",
             "status": self.generate_status, "model": "gpt-6-luna", "content": content,
@@ -435,6 +446,164 @@ class CapTests(unittest.TestCase):
         quiet_run(sheets, client(fake), DENYLIST, now=NOW)
         sent = "".join(b["messages"][1]["content"] for b in fake.generate_bodies)
         self.assertNotIn("https://example.test/old", sent)
+
+
+def long_x_feed(n: int) -> MemorySheets:
+    """An X Feed far larger than one request; Chief Property has no rows, so every call is X Feed."""
+
+    return sheet(**{"X Feed": [X_HEADER] + [x_row(i, score=i % 9, text="ยาว" * 40) for i in range(n)],
+                    "Chief Property": finding_rows(0)})
+
+
+def x_calls(fake: FakeGateway) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    bodies = [b for b in fake.generate_bodies if "Tab: X Feed" in b["messages"][1]["content"]]
+    batches = [b for b in bodies if b["prompt_version"] != MERGE_PROMPT_VERSION]
+    merges = [b for b in bodies if b["prompt_version"] == MERGE_PROMPT_VERSION]
+    return batches, merges
+
+
+class BatchTests(unittest.TestCase):
+    def test_large_tab_is_split_into_batches_and_merged(self) -> None:  # A10
+        sheets = long_x_feed(200)
+        fake = FakeGateway()
+        result = quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 0)
+        batches, merges = x_calls(fake)
+        self.assertGreater(len(batches), 1)
+        self.assertLessEqual(len(batches), MAX_BATCHES)
+        self.assertEqual(len(merges), 1)
+        self.assertIs(fake.generate_bodies[-1], merges[0])
+        # The merge sees only the validated batch answers, never the raw rows.
+        self.assertNotIn("ยาวยาว", merges[0]["messages"][1]["content"])
+        for body in fake.generate_bodies:
+            estimated = sum(len(m["content"].encode("utf-8")) + 32 for m in body["messages"])
+            self.assertLessEqual(estimated + body["max_output_tokens"], body["token_budget"])
+        rows = [r for r in output_rows(sheets) if r["tab"] == "X Feed"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertEqual(rows[0]["rows_considered"], "200")
+        self.assertEqual(rows[0]["window"], "after_row=1;to_row=201")
+        calls = len(batches) + 1
+        self.assertEqual(rows[0]["tokens_in"], str(1200 * calls))
+        self.assertEqual(rows[0]["cost_usd"], f"{0.00027 * calls:.6f}")
+        self.assertEqual(rows[0]["run_id"], f"run-{calls}")
+        # Batches run in priority order: the first holds the top-scored rows.
+        first = batches[0]["messages"][1]["content"]
+        self.assertIn('"score": "8"', first)
+        self.assertNotIn('"score": "0"', first)
+
+    def test_batches_are_capped(self) -> None:  # A10
+        fake = FakeGateway()
+        original = fake.handle
+
+        def small_limits(request: httpx.Request) -> httpx.Response:
+            response = original(request)
+            if request.url.path == "/api/ai/status":
+                data = response.json()
+                data["limits"]["max_token_budget"] = 8192
+                return httpx.Response(200, json=data)
+            return response
+
+        sheets = long_x_feed(200)
+        http = httpx.Client(transport=httpx.MockTransport(small_limits), base_url="https://gateway.test")
+        result = quiet_run(sheets, GatewayClient(http, TOKEN, sleep=lambda _s: None), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 0)
+        batches, merges = x_calls(fake)
+        self.assertEqual(len(batches), MAX_BATCHES)
+        self.assertGreaterEqual(len(merges), 1)
+        row = [r for r in output_rows(sheets) if r["tab"] == "X Feed"][0]
+        self.assertLess(int(row["rows_considered"]), 200)
+        self.assertEqual(row["window"], "after_row=1;to_row=201")
+
+    def test_answers_too_large_for_one_merge_are_merged_in_rounds(self) -> None:  # A10
+        sheets = long_x_feed(200)
+        fake = FakeGateway(summary="สรุปยาว" * 280)  # ~6 KB per answer: one merge holds about four
+        result = quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 0)
+        batches, merges = x_calls(fake)
+        self.assertGreater(len(merges), 1)
+        self.assertIs(fake.generate_bodies[-1], merges[-1])
+        for body in merges:
+            estimated = sum(len(m["content"].encode("utf-8")) + 32 for m in body["messages"])
+            self.assertLessEqual(estimated + body["max_output_tokens"], body["token_budget"])
+        row = [r for r in output_rows(sheets) if r["tab"] == "X Feed"][0]
+        self.assertEqual(row["status"], "ok")
+        self.assertEqual(row["rows_considered"], "200")
+        self.assertEqual(row["tokens_in"], str(1200 * (len(batches) + len(merges))))
+
+    def test_a_malformed_merge_answer_is_retried_once(self) -> None:  # A11
+        sheets = long_x_feed(200)
+        probe = FakeGateway()
+        quiet_run(long_x_feed(200), client(probe), DENYLIST, now=NOW)
+        merge_call = len(probe.generate_bodies)  # the single merge comes last
+        fake = FakeGateway(answers_by_call={merge_call: "not json"})
+        result = quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 0)
+        _batches, merges = x_calls(fake)
+        self.assertEqual(len(merges), 2)
+        row = [r for r in output_rows(sheets) if r["tab"] == "X Feed"][0]
+        self.assertEqual(row["status"], "ok")
+        self.assertEqual(row["tokens_in"], str(1200 * len(fake.generate_bodies)))  # the failed try counts
+
+    def test_merge_with_an_invented_link_is_rejected(self) -> None:  # A11
+        sheets = long_x_feed(200)
+        fake = FakeGateway(merge_answer=model_answer(["https://invented.example/nowhere"]))
+        result = quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(len(x_calls(fake)[1]), 2)  # tried twice, then the tab fails
+        row = [r for r in output_rows(sheets) if r["tab"] == "X Feed"][0]
+        self.assertEqual((row["status"], row["error"]), ("error", "invented_link"))
+        self.assertEqual(row["summary_th"], "")
+
+    def test_a_bad_batch_is_dropped_and_the_rest_merged(self) -> None:  # A12
+        sheets = long_x_feed(200)
+        fake = FakeGateway(answers_by_call={2: "not json"})
+        result = quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 0)
+        batches, merges = x_calls(fake)
+        self.assertEqual(len(merges), 1)
+        dropped = batches[1]["messages"][1]["content"]
+        merged = merges[0]["messages"][1]["content"]
+        dropped_links = set(re.findall(r'https://[^\s"]+', dropped))
+        self.assertTrue(dropped_links)
+        self.assertFalse(dropped_links & set(re.findall(r'https://[^\s"]+', merged)))
+        row = [r for r in output_rows(sheets) if r["tab"] == "X Feed"][0]
+        self.assertEqual(row["status"], "ok")
+        self.assertLess(int(row["rows_considered"]), 200)
+
+    def test_a_client_term_in_a_batch_answer_is_never_written(self) -> None:  # A12
+        sheets = long_x_feed(200)
+        leak = model_answer([], summary="สรุปที่มีชื่อ OakClientCo หลุดมา")
+        fake = FakeGateway(answers_by_call={2: leak})
+        result = quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 0)
+        _batches, merges = x_calls(fake)
+        self.assertTrue(merges)
+        self.assertNotIn("OakClientCo", "".join(m["messages"][1]["content"] for m in merges))
+        self.assertNotIn("OakClientCo", json.dumps(sheets.tabs, ensure_ascii=False))
+
+    def test_a_client_term_in_the_merge_answer_fails_the_tab(self) -> None:  # A12
+        sheets = long_x_feed(200)
+        fake = FakeGateway(merge_answer=model_answer([], summary="สรุปที่มีชื่อ OakClientCo หลุดมา"))
+        result = quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 1)
+        row = [r for r in output_rows(sheets) if r["tab"] == "X Feed"][0]
+        self.assertEqual((row["status"], row["error"]), ("error", "client_term_in_output"))
+        self.assertNotIn("OakClientCo", json.dumps(sheets.tabs, ensure_ascii=False))
+
+    def test_partials_ask_for_short_answers_and_the_final_merge_does_not(self) -> None:  # A10
+        sheets = long_x_feed(200)
+        fake = FakeGateway(summary="สรุปยาว" * 280)
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        batches, merges = x_calls(fake)
+        self.assertTrue(all(b["messages"][0]["content"].endswith(SHORT_NOTE) for b in batches + merges[:-1]))
+        self.assertFalse(merges[-1]["messages"][0]["content"].endswith(SHORT_NOTE))
+
+    def test_a_single_batch_keeps_the_plain_prompt(self) -> None:
+        fake = FakeGateway()
+        quiet_run(sheet(), client(fake), DENYLIST, now=NOW)
+        self.assertTrue(all(not b["messages"][0]["content"].endswith(SHORT_NOTE) for b in fake.generate_bodies))
+        self.assertTrue(all(b["prompt_version"] != MERGE_PROMPT_VERSION for b in fake.generate_bodies))
 
 
 class GoogleAuthTests(unittest.TestCase):
