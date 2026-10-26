@@ -51,3 +51,41 @@ models:
       - name: label_count
         tests:
           - not_null
+  - name: stg_x_feed
+    description: >
+      One row per deduplicated X post sighting (pull, post, query, chief) from
+      domain=social/dataset=x_feed, exported from the intake cell. post_text is
+      untrusted user content. privacy_class=private; local/offline use only.
+    columns:
+      - name: event_id
+        tests:
+          - unique
+          - not_null
+      - name: sighting_key
+        tests:
+          - unique
+          - not_null
+      - name: post_id
+        tests:
+          - not_null
+      - name: requesting_chief
+        tests:
+          - not_null
+      - name: collected_at
+        tests:
+          - not_null
+      - name: domain
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["social"]
+      - name: dataset
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["x_feed"]
+      - name: privacy_class
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["private"]
