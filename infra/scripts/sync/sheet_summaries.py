@@ -453,11 +453,29 @@ def _score(value: str) -> float:
         return 0.0
 
 
+def _chiefs(value: str) -> list[str]:
+    return [name.strip() for name in re.split(r"[;,]", value) if name.strip()]
+
+
 def _priority(tab: str, rows: list[Row]) -> list[Row]:
-    if tab == "X Feed":
-        return sorted(rows, key=lambda r: (_is_true(r.cells.get("top", "")), _score(r.cells.get("score", "")), r.number),
-                      reverse=True)
-    return sorted(rows, key=lambda r: r.number, reverse=True)
+    """X Feed: every ``top`` row before any other; within each group the requesting Chiefs (first one
+    named on the row) take turns, best ``score`` first, so one busy Chief cannot fill the request.
+    Other tabs: newest rows first."""
+
+    if tab != "X Feed":
+        return sorted(rows, key=lambda r: r.number, reverse=True)
+    ordered: list[Row] = []
+    for top in (True, False):
+        queues: dict[str, list[Row]] = {}
+        for row in sorted((r for r in rows if _is_true(r.cells.get("top", "")) == top),
+                          key=lambda r: (_score(r.cells.get("score", "")), r.number), reverse=True):
+            queues.setdefault((_chiefs(row.cells.get("requesting_chief", "")) or [""])[0], []).append(row)
+        while queues:
+            for chief in list(queues):
+                ordered.append(queues[chief].pop(0))
+                if not queues[chief]:
+                    del queues[chief]
+    return ordered
 
 
 def _row_line(row: Row) -> str:
@@ -465,8 +483,15 @@ def _row_line(row: Row) -> str:
     return json.dumps({"row": row.number, **cells}, ensure_ascii=False)
 
 
-def _user_message(tab: str, lines: list[str]) -> str:
-    return f"Tab: {tab}\nNew rows ({len(lines)}), one JSON object per line:\n" + "\n".join(lines)
+def _owners_line(owners: Sequence[str]) -> str:
+    if not owners:
+        return ""
+    return "suggested_owner_role must be exactly one of: " + " | ".join(owners) + "\n"
+
+
+def _user_message(tab: str, lines: list[str], owners: Sequence[str] = ()) -> str:
+    return (f"Tab: {tab}\n{_owners_line(owners)}New rows ({len(lines)}), one JSON object per line:\n"
+            + "\n".join(lines))
 
 
 def _bytes(text: str) -> int:
@@ -517,7 +542,8 @@ def _room(limits: Limits) -> tuple[int, int]:
             limits.max_context_chars - GATEWAY_OVERHEAD_BYTES)
 
 
-def build_batches(tab: str, rows: list[Row], limits: Limits) -> list[tuple[dict[str, Any], list[Row]]]:
+def build_batches(tab: str, rows: list[Row], limits: Limits,
+                  owners: Sequence[str] = ()) -> list[tuple[dict[str, Any], list[Row]]]:
     """Pack the highest-priority rows into at most MAX_BATCHES requests that fit the gateway limits.
 
     Batch 1 holds the most important rows. A row that does not fit the current batch opens the next
@@ -526,8 +552,8 @@ def build_batches(tab: str, rows: list[Row], limits: Limits) -> list[tuple[dict[
 
     byte_room, char_room = _room(limits)
     system = SYSTEM_PROMPT + SHORT_NOTE  # sized for the longer prompt; a single batch drops the note
-    base_bytes = _bytes(system) + _bytes(_user_message(tab, []))
-    base_chars = len(system) + len(_user_message(tab, []))
+    base_bytes = _bytes(system) + _bytes(_user_message(tab, [], owners))
+    base_chars = len(system) + len(_user_message(tab, [], owners))
     batches: list[list[Row]] = []
     used_bytes = used_chars = 0
     for row in _priority(tab, rows)[:MAX_ROWS]:
@@ -549,7 +575,7 @@ def build_batches(tab: str, rows: list[Row], limits: Limits) -> list[tuple[dict[
     system = SYSTEM_PROMPT if len(batches) == 1 else system
     for chosen in batches:
         chosen.sort(key=lambda r: r.number)
-        user = _user_message(tab, [_row_line(r) for r in chosen])
+        user = _user_message(tab, [_row_line(r) for r in chosen], owners)
         result.append((_body(system, user, PROMPT_VERSION, limits), chosen))
     return result
 
@@ -566,7 +592,7 @@ def _answer_links(answer: dict[str, Any]) -> set[str]:
 
 
 def build_merge(tab: str, answers: list[dict[str, Any]], limits: Limits,
-                *, first: bool = True) -> tuple[dict[str, Any] | None, int]:
+                *, first: bool = True, owners: Sequence[str] = ()) -> tuple[dict[str, Any] | None, int]:
     """One merge request holding as many answers as fit, from the first; returns the body and that
     count; (None, 1) when not even the first two fit together. Only a merge of every answer starting
     from the first is final (full length); any other merge is asked for a short answer."""
@@ -574,7 +600,8 @@ def build_merge(tab: str, answers: list[dict[str, Any]], limits: Limits,
     byte_room, char_room = _room(limits)
     for count in range(len(answers), 1, -1):
         lines = [json.dumps(a, ensure_ascii=False) for a in answers[:count]]
-        user = f"Tab: {tab}\nPartial summaries ({count}), one JSON object per line:\n" + "\n".join(lines)
+        user = (f"Tab: {tab}\n{_owners_line(owners)}Partial summaries ({count}), one JSON object per line:\n"
+                + "\n".join(lines))
         system = MERGE_PROMPT if first and count == len(answers) else MERGE_PROMPT + SHORT_NOTE
         body = _body(system, user, MERGE_PROMPT_VERSION, limits)
         if (sum(_bytes(m["content"]) for m in body["messages"]) <= byte_room
@@ -684,8 +711,8 @@ def _call(body: dict[str, Any], allowed: set[str], gateway: Gateway, denylist: S
     return validate_answer(str(response.get("content", "")), allowed, denylist)
 
 
-def _summarize(tab: str, rows: list[Row], limits: Limits, gateway: Gateway,
-               denylist: Sequence[str]) -> tuple[dict[str, Any], dict[str, Any], int]:
+def _summarize(tab: str, rows: list[Row], limits: Limits, gateway: Gateway, denylist: Sequence[str],
+               owners: Sequence[str] = ()) -> tuple[dict[str, Any], dict[str, Any], int]:
     """One answer for the tab: a single call, or batch calls plus merge calls.
 
     A batch whose answer is invalid, truncated, has an invented link or a client term is dropped and
@@ -697,7 +724,7 @@ def _summarize(tab: str, rows: list[Row], limits: Limits, gateway: Gateway,
     answers: list[tuple[dict[str, Any], int]] = []
     responses: list[dict[str, Any]] = []
     first_error: TabError | None = None
-    for body, sent in build_batches(tab, rows, limits):
+    for body, sent in build_batches(tab, rows, limits, owners):
         allowed = {link for r in sent for v in r.cells.values() for link in URL_RE.findall(v)}
         try:
             answer = _call(body, allowed, gateway, denylist, responses)
@@ -715,7 +742,8 @@ def _summarize(tab: str, rows: list[Row], limits: Limits, gateway: Gateway,
         merged_round: list[tuple[dict[str, Any], int]] = []
         i = 0
         while i < len(answers):
-            merge_body, count = build_merge(tab, [a for a, _n in answers[i:]], limits, first=i == 0)
+            merge_body, count = build_merge(tab, [a for a, _n in answers[i:]], limits, first=i == 0,
+                                           owners=owners)
             if merge_body is None:
                 merged_round.append(answers[i])
                 i += 1
@@ -744,6 +772,24 @@ def _summarize(tab: str, rows: list[Row], limits: Limits, gateway: Gateway,
     return answer, combined, covered
 
 
+def assign_owners(answer: dict[str, Any], tab: str, owners: Sequence[str], rows: list[Row]) -> dict[str, Any]:
+    """Make every ``suggested_owner_role`` a real Chief tab name; the model sometimes invents a job
+    title. Keep a listed Chief (the first one when it names several); else the Chief that requested
+    the task's linked row; else the tab itself when it is a Chief tab; else "" (unassigned)."""
+
+    known = set(owners)
+    by_link: dict[str, list[str]] = {}
+    for row in rows:
+        chiefs = _chiefs(row.cells.get("requesting_chief", "") or row.cells.get("Source Chief", ""))
+        for value in row.cells.values():
+            for link in URL_RE.findall(value):
+                by_link.setdefault(link, chiefs)
+    for task in answer["candidate_tasks"]:
+        candidates = _chiefs(task.get("suggested_owner_role", "")) + by_link.get(task.get("link") or "", []) + [tab]
+        task["suggested_owner_role"] = next((c for c in candidates if c in known), "")
+    return answer
+
+
 def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datetime,
         dry_run: bool = False, only_tabs: Sequence[str] = ()) -> RunResult:
     denylist = tuple(normalize_text(term) for term in denylist if normalize_text(term))
@@ -751,6 +797,7 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
         raise DenylistError("client denylist has no terms")
     titles = sheets.titles()
     tabs = [t for t in select_tabs(titles) if (not only_tabs or t in only_tabs) and not _contains_term(t, denylist)]
+    owners = sorted(t for t in titles if t.startswith("Chief ") and not _contains_term(t, denylist))
     history = sheets.read([OUTPUT_TAB])[OUTPUT_TAB] if OUTPUT_TAB in titles else []
     marks = _watermarks(history)
     result = RunResult()
@@ -790,7 +837,8 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
                 continue
             started = time.monotonic()
             try:
-                answer, response, sent = _summarize(tab, safe, limits, gateway, denylist)
+                answer, response, sent = _summarize(tab, safe, limits, gateway, denylist, owners)
+                answer = assign_owners(answer, tab, owners, safe)
             except GatewayStop as stop:
                 stop_all(tabs[index:], f"gateway_stop:{stop.code}")
                 break

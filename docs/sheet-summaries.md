@@ -10,7 +10,8 @@ Once a day it reads each Chief tab, `All Findings`, `Datasets` and `X Feed` of t
 run: last 7 days) to the AI gateway (`POST https://api.bookchaowalit.com/api/ai/generate`, route
 `sheet-summaries`, profile `fast` = GPT-6 Luna) and appends one row per tab to `AI Summaries`:
 a 3–6 sentence Thai summary, up to 5 top items (with `x_post` / `website` link source), up to 5
-candidate tasks for the tasks-api backlog (suggestions only, nothing is written to tasks-api) and any
+candidate tasks for the tasks-api backlog (suggestions only, nothing is written to tasks-api; each
+`suggested_owner_role` is a real `Chief *` tab name or empty, never a made-up title) and any
 dated deadlines. `AI Summaries Latest` holds the newest row per tab. Source tabs are never written.
 
 Safety: rows matching the client denylist (Oak, freelance-hub clients) are dropped before the call,
@@ -79,7 +80,7 @@ newest `to_row` with status `ok`, `budget_exceeded` or `no_change`. Error rows d
 failed day is retried the next day. If a tab shrinks below its watermark, it starts over at the last
 7 days. Each request fits the live limits from `GET /api/ai/status`: at most 200 rows, 500 characters
 per cell, and input counted as UTF-8 bytes (Thai is 3 bytes per character). Rows go in priority
-order: `X Feed` the `top` then highest `score` rows, other tabs the newest rows.
+order: `X Feed` every `top` row first, the requesting Chiefs taking turns (best `score` first), other tabs the newest rows.
 
 A tab too large for one request (X Feed gets ~1,400 rows a day, ~230 of them `top`) is split into up
 to 8 batches, each summarized as a short partial, then merged into one answer by merge calls that see

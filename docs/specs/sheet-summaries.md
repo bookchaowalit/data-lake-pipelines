@@ -37,8 +37,9 @@ X pull (~17:30 Asia/Bangkok), through the owner's own AI gateway and with no new
 6. **Input cap.** At most 200 rows per tab and 500 characters per cell. The prompt must also fit the
    gateway's live limits from `GET /api/ai/status` (`limits.max_context_chars`,
    `limits.max_token_budget` minus the output reservation; the gateway counts input tokens as UTF-8
-   bytes + 32 per message). Rows are taken in priority order: the highest `top` then `score` rows
-   for `X Feed`, the newest rows elsewhere.
+   bytes + 32 per message). Rows are taken in priority order: for `X Feed` every `top` row before any
+   other, and within each group the requesting Chiefs (the first named in `requesting_chief`) take
+   turns, highest `score` first, so one busy Chief cannot fill the request; the newest rows elsewhere.
 6a. **Batches and merge.** A tab whose rows do not fit one request is split into at most 8 batches
    (batch 1 holds the highest-priority rows); rows left over once 8 batches are full are not sent and
    the window still moves past them. Each batch answer is validated on its own (item 9) and asks for
@@ -64,6 +65,11 @@ X pull (~17:30 Asia/Bangkok), through the owner's own AI gateway and with no new
    `{date, what, link|null}`. Every link must appear in the tab's input rows; an invented link
    rejects the answer. `link_source` is recomputed from the URL (`x_post` for x.com / twitter.com
    `/status/` URLs, else `website`).
+9a. **Owners.** Every prompt lists the sheet's `Chief *` tab names as the only allowed
+   `suggested_owner_role` values. After validation each task's owner is set to a listed Chief: the
+   model's choice when it names one (the first when it names several), else the Chief that requested
+   the task's linked row (`requesting_chief` / `Source Chief`), else the tab itself when it is a Chief
+   tab, else `""` (unassigned). An invented job title is never written.
 10. **Write-back.** Create `AI Summaries` if missing with the header
     `tab, summary_date, window, rows_considered, summary_th, top_items, candidate_tasks, deadlines,
     model, run_id, tokens_in, tokens_out, cost_usd, status, error` and append one row per tab per run.
@@ -87,10 +93,12 @@ X pull (~17:30 Asia/Bangkok), through the owner's own AI gateway and with no new
 | A6 | `budget_exceeded` is a result; 429 / 5xx / budget deny stop the run with one retry at most |
 | A7 | Preflight aborts when `budget.decision != allow` with no generate call |
 | A8 | Logs carry no prompt, answer, token or cell text |
-| A9 | X Feed over the cap keeps the highest `top`/`score` rows |
+| A9 | X Feed over the cap keeps the `top` rows (A13 sets their order) |
 | A10 | A tab over one request is split into ≤ 8 batches and merged (in rounds when needed) into one row |
 | A11 | A merge answer with a link not in its partials is rejected; a malformed one is retried once |
 | A12 | A bad or client-term batch answer is dropped and never written; a client term in the merge fails the tab |
+| A13 | X Feed sends every `top` row before any other and rotates the requesting Chiefs within each group |
+| A14 | Prompts list the Chief tabs as owners; an invented owner title becomes a real Chief or `""` |
 
 ## Out of scope
 

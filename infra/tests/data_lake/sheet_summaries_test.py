@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acceptance tests A1-A12 for the daily sheet summaries (docs/specs/sheet-summaries.md).
+"""Acceptance tests A1-A14 for the daily sheet summaries (docs/specs/sheet-summaries.md).
 
 The sheet is the in-memory ``MemorySheets``; the gateway is a stateful fake served through
 httpx.MockTransport behind the real ``GatewayClient``. Rows, handles and links are fake test data.
@@ -33,6 +33,7 @@ from sync.sheet_summaries import (  # noqa: E402
     DenylistError,
     GatewayClient,
     MemorySheets,
+    _priority,
     _service_account,
     google_access_token,
     link_source,
@@ -49,8 +50,9 @@ X_HEADER = ["collected_at", "requesting_chief", "watch_type", "watch_value", "po
             "query_id", "score", "top"]
 
 
-def x_row(i: int, *, score: int = 1, top: str = "", text: str = "โพสต์ทดสอบ") -> list[str]:
-    return ["2026-10-26T10:30:00Z", "Chief Property", "keyword", "คอนโด", f"9{i:04d}",
+def x_row(i: int, *, score: int = 1, top: str = "", text: str = "โพสต์ทดสอบ",
+          chief: str = "Chief Property") -> list[str]:
+    return ["2026-10-26T10:30:00Z", chief, "keyword", "คอนโด", f"9{i:04d}",
             f"https://x.com/fake_user/status/9{i:04d}", "@fake_user", "2026-10-26T09:00:00Z",
             f"{text} {i}", "1", "0", "0", "10", "property", "q1", str(score), top]
 
@@ -168,7 +170,7 @@ class TabSelectionTests(unittest.TestCase):
         fake = FakeGateway()
         result = quiet_run(sheets, client(fake), DENYLIST, now=NOW)
         self.assertEqual(result.exit_code, 0)
-        legal = [b for b in fake.generate_bodies if "Chief Legal & Trust" in b["messages"][1]["content"]]
+        legal = [b for b in fake.generate_bodies if "Tab: Chief Legal & Trust" in b["messages"][1]["content"]]
         self.assertEqual(len(legal), 1)
         prompt = legal[0]["messages"][1]["content"]
         self.assertIn('"url": "https://example.test/odd/1"', prompt)
@@ -604,6 +606,61 @@ class BatchTests(unittest.TestCase):
         quiet_run(sheet(), client(fake), DENYLIST, now=NOW)
         self.assertTrue(all(not b["messages"][0]["content"].endswith(SHORT_NOTE) for b in fake.generate_bodies))
         self.assertTrue(all(b["prompt_version"] != MERGE_PROMPT_VERSION for b in fake.generate_bodies))
+
+
+def owner_answer(tasks: list[tuple[str, str | None]]) -> str:
+    """An answer whose candidate tasks carry these (suggested_owner_role, link) pairs."""
+
+    return json.dumps({
+        "summary_th": "สรุปภาษาไทยสั้น ๆ สำหรับแท็บนี้ มีรายการใหม่ที่ควรดู", "top_items": [], "deadlines": [],
+        "candidate_tasks": [{"title": f"งาน {i}", "value": "สูง", "deadline": None, "link": link,
+                             "suggested_owner_role": role} for i, (role, link) in enumerate(tasks)],
+    }, ensure_ascii=False)
+
+
+class PriorityTests(unittest.TestCase):
+    def test_x_feed_takes_top_rows_first_and_rotates_requesting_chiefs(self) -> None:  # A13
+        header, rows = X_HEADER, [x_row(i, score=100, top="TRUE", chief="Chief Social Media") for i in range(6)]
+        rows += [x_row(10 + i, score=1, top="TRUE", chief="Chief Property; Chief Social Media") for i in range(2)]
+        rows += [x_row(20 + i, score=999, top="FALSE", chief="Chief Finance") for i in range(3)]
+        from sync.sheet_summaries import parse_rows
+        _header, parsed = parse_rows([header] + rows)
+        order = [r.cells["post_id"] for r in _priority("X Feed", parsed)]
+        self.assertEqual(set(order[:8]), {f"9{i:04d}" for i in [*range(6), 10, 11]})  # every top row first
+        self.assertEqual(order[:2], ["90005", "90011"])  # one row per Chief a round, best score first
+        self.assertEqual(order[2:4], ["90004", "90010"])
+        self.assertEqual(order[8:], ["90022", "90021", "90020"])  # ties: newest first
+
+
+class OwnerRoleTests(unittest.TestCase):
+    def owners(self, tab_rows: dict[str, list[list[str]]], answer: str) -> tuple[list[dict[str, Any]], FakeGateway]:
+        sheets = sheet(**{"Chief Finance": finding_rows(0), "Chief Property": finding_rows(0), **tab_rows})
+        fake = FakeGateway(answer_text=answer)
+        result = quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 0)
+        written = [r for r in output_rows(sheets) if r["status"] == "ok"]
+        self.assertEqual(len(written), 1)
+        return json.loads(written[0]["candidate_tasks"]), fake
+
+    def test_prompt_lists_the_chief_tabs_as_owners(self) -> None:  # A14
+        _tasks, fake = self.owners({"X Feed": [X_HEADER, x_row(1)]}, owner_answer([("Chief Property", None)]))
+        user = fake.generate_bodies[0]["messages"][1]["content"]
+        self.assertIn("suggested_owner_role", user)
+        self.assertIn("Chief Finance | Chief Property", user)
+
+    def test_invented_owner_titles_become_real_chiefs(self) -> None:  # A14
+        link = "https://x.com/fake_user/status/90001"
+        tasks, _fake = self.owners(
+            {"X Feed": [X_HEADER, x_row(1, chief="Chief Finance; Chief Social Media"), x_row(2)]},
+            owner_answer([("ผู้จัดการโซเชียลมีเดีย", link), ("Chief Property; Chief Finance", None),
+                          ("Chief Finance", None), ("ผู้จัดการทั่วไป", None)]))
+        self.assertEqual([t["suggested_owner_role"] for t in tasks],
+                         ["Chief Finance", "Chief Property", "Chief Finance", ""])
+
+    def test_a_chief_tab_owns_its_unmatched_tasks(self) -> None:  # A14
+        tasks, _fake = self.owners({"Chief Property": finding_rows(2), "X Feed": [X_HEADER]},
+                                   owner_answer([("นักลงทุน", None)]))
+        self.assertEqual(tasks[0]["suggested_owner_role"], "Chief Property")
 
 
 class GoogleAuthTests(unittest.TestCase):
