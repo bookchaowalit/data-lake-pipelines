@@ -52,7 +52,11 @@ SKIP_TABS = frozenset({"README", "X Watchlist", "X Query Plan", "Retired Bots Ar
 
 ROUTE = "sheet-summaries"
 PROMPT_VERSION = "sheet-summaries-v1"
+MERGE_PROMPT_VERSION = "sheet-summaries-merge-v1"
 MAX_ROWS = 200
+# A tab larger than one request is summarized in up to this many batches (highest priority rows
+# first), then one merge call combines the validated batch answers. X Feed gets ~1,400 rows a day.
+MAX_BATCHES = 8
 MAX_CELL_CHARS = 500
 FIRST_RUN_DAYS = 7
 MAX_OUTPUT_TOKENS = 4096
@@ -77,6 +81,23 @@ Reply with one JSON object only, no prose, with exactly these keys:
  "deadlines": [{"date": "YYYY-MM-DD", "what": "", "link": "url or null"}]}
 top_items: at most 5, each link copied exactly from a row. candidate_tasks: at most 5 suggestions for the owner's backlog.
 deadlines: only dated items found in the rows; use [] when there are none."""
+
+MERGE_PROMPT = """You merge partial summaries of one tab of a research spreadsheet into one summary for its owner.
+Each partial covers a different batch of the tab's new rows; the first partials cover the most important rows.
+Write in Thai. Use only facts and links that appear in the partial summaries; never invent a link, name or number.
+Reply with one JSON object only, no prose, with exactly these keys (every item keeps all of its fields):
+{"summary_th": "3-6 Thai sentences covering all partials",
+ "top_items": [{"title": "", "why": "", "link": "", "link_source": "x_post|website"}],
+ "candidate_tasks": [{"title": "", "value": "", "deadline": "YYYY-MM-DD or null", "link": "url or null", "suggested_owner_role": ""}],
+ "deadlines": [{"date": "YYYY-MM-DD", "what": "", "link": "url or null"}]}
+top_items and candidate_tasks: at most 5 each, links copied exactly from the partials. deadlines: [] when there are none."""
+
+# Appended to batch calls and to merges that are not the last one, so the partial answers stay small
+# enough for several to share one merge call (Thai is 3 bytes a character against a byte budget).
+RETRY_MERGE_CODES = frozenset({"invalid_output", "output_truncated", "invented_link"})
+SHORT_NOTE = """
+This answer is a partial that will be merged with others: keep it short. summary_th at most 3 sentences;
+every title, why, value and what at most 15 words."""
 
 _STR = {"type": "string"}
 _NULLABLE_STR = {"type": ["string", "null"]}
@@ -432,11 +453,29 @@ def _score(value: str) -> float:
         return 0.0
 
 
+def _chiefs(value: str) -> list[str]:
+    return [name.strip() for name in re.split(r"[;,]", value) if name.strip()]
+
+
 def _priority(tab: str, rows: list[Row]) -> list[Row]:
-    if tab == "X Feed":
-        return sorted(rows, key=lambda r: (_is_true(r.cells.get("top", "")), _score(r.cells.get("score", "")), r.number),
-                      reverse=True)
-    return sorted(rows, key=lambda r: r.number, reverse=True)
+    """X Feed: every ``top`` row before any other; within each group the requesting Chiefs (first one
+    named on the row) take turns, best ``score`` first, so one busy Chief cannot fill the request.
+    Other tabs: newest rows first."""
+
+    if tab != "X Feed":
+        return sorted(rows, key=lambda r: r.number, reverse=True)
+    ordered: list[Row] = []
+    for top in (True, False):
+        queues: dict[str, list[Row]] = {}
+        for row in sorted((r for r in rows if _is_true(r.cells.get("top", "")) == top),
+                          key=lambda r: (_score(r.cells.get("score", "")), r.number), reverse=True):
+            queues.setdefault((_chiefs(row.cells.get("requesting_chief", "")) or [""])[0], []).append(row)
+        while queues:
+            for chief in list(queues):
+                ordered.append(queues[chief].pop(0))
+                if not queues[chief]:
+                    del queues[chief]
+    return ordered
 
 
 def _row_line(row: Row) -> str:
@@ -444,8 +483,15 @@ def _row_line(row: Row) -> str:
     return json.dumps({"row": row.number, **cells}, ensure_ascii=False)
 
 
-def _user_message(tab: str, lines: list[str]) -> str:
-    return f"Tab: {tab}\nNew rows ({len(lines)}), one JSON object per line:\n" + "\n".join(lines)
+def _owners_line(owners: Sequence[str]) -> str:
+    if not owners:
+        return ""
+    return "suggested_owner_role must be exactly one of: " + " | ".join(owners) + "\n"
+
+
+def _user_message(tab: str, lines: list[str], owners: Sequence[str] = ()) -> str:
+    return (f"Tab: {tab}\n{_owners_line(owners)}New rows ({len(lines)}), one JSON object per line:\n"
+            + "\n".join(lines))
 
 
 def _bytes(text: str) -> int:
@@ -472,35 +518,13 @@ class Limits:
         return max(256, min(MAX_OUTPUT_TOKENS, self.max_output_tokens, self.max_token_budget // 4))
 
 
-def build_request(tab: str, rows: list[Row], limits: Limits) -> tuple[dict[str, Any], list[Row]]:
-    """Fit the highest-priority rows into the gateway limits; returns the body and the rows sent."""
-
+def _body(system: str, user: str, prompt_version: str, limits: Limits) -> dict[str, Any]:
     output = limits.output_tokens
-    input_room = limits.max_token_budget - output - GATEWAY_OVERHEAD_BYTES
-    char_room = limits.max_context_chars - GATEWAY_OVERHEAD_BYTES
-    system_cost = _bytes(SYSTEM_PROMPT)
-    chosen: list[Row] = []
-    used_bytes = system_cost + _bytes(_user_message(tab, []))
-    used_chars = len(SYSTEM_PROMPT) + len(_user_message(tab, []))
-    for row in _priority(tab, rows)[:MAX_ROWS]:
-        line = _row_line(row)
-        cost = len(line.encode("utf-8")) + 1
-        if used_bytes + cost > input_room or used_chars + len(line) + 1 > char_room:
-            continue
-        chosen.append(row)
-        used_bytes += cost
-        used_chars += len(line) + 1
-    if not chosen:
-        raise TabError("row_too_large")
-    chosen.sort(key=lambda r: r.number)
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": _user_message(tab, [_row_line(r) for r in chosen])},
-    ]
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     estimated = sum(_bytes(m["content"]) for m in messages)
-    body = {
+    return {
         "route": ROUTE,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": prompt_version,
         "profile": "fast",
         "privacy_class": "internal",
         "response_format": {"type": "json_object"},
@@ -509,7 +533,81 @@ def build_request(tab: str, rows: list[Row], limits: Limits) -> tuple[dict[str, 
         "token_budget": min(limits.max_token_budget, max(256, estimated + output + GATEWAY_OVERHEAD_BYTES)),
         "messages": messages,
     }
-    return body, chosen
+
+
+def _room(limits: Limits) -> tuple[int, int]:
+    """Input bytes and characters one request may use, gateway overhead and output reserved."""
+
+    return (limits.max_token_budget - limits.output_tokens - GATEWAY_OVERHEAD_BYTES,
+            limits.max_context_chars - GATEWAY_OVERHEAD_BYTES)
+
+
+def build_batches(tab: str, rows: list[Row], limits: Limits,
+                  owners: Sequence[str] = ()) -> list[tuple[dict[str, Any], list[Row]]]:
+    """Pack the highest-priority rows into at most MAX_BATCHES requests that fit the gateway limits.
+
+    Batch 1 holds the most important rows. A row that does not fit the current batch opens the next
+    one; rows left over once every batch is full are not sent.
+    """
+
+    byte_room, char_room = _room(limits)
+    system = SYSTEM_PROMPT + SHORT_NOTE  # sized for the longer prompt; a single batch drops the note
+    base_bytes = _bytes(system) + _bytes(_user_message(tab, [], owners))
+    base_chars = len(system) + len(_user_message(tab, [], owners))
+    batches: list[list[Row]] = []
+    used_bytes = used_chars = 0
+    for row in _priority(tab, rows)[:MAX_ROWS]:
+        line = _row_line(row)
+        cost, chars = len(line.encode("utf-8")) + 1, len(line) + 1
+        if base_bytes + cost > byte_room or base_chars + chars > char_room:
+            continue  # too large even alone
+        if not batches or used_bytes + cost > byte_room or used_chars + chars > char_room:
+            if len(batches) == MAX_BATCHES:
+                continue  # a smaller row may still fit the last batch
+            batches.append([])
+            used_bytes, used_chars = base_bytes, base_chars
+        batches[-1].append(row)
+        used_bytes += cost
+        used_chars += chars
+    if not batches:
+        raise TabError("row_too_large")
+    result = []
+    system = SYSTEM_PROMPT if len(batches) == 1 else system
+    for chosen in batches:
+        chosen.sort(key=lambda r: r.number)
+        user = _user_message(tab, [_row_line(r) for r in chosen], owners)
+        result.append((_body(system, user, PROMPT_VERSION, limits), chosen))
+    return result
+
+
+def build_request(tab: str, rows: list[Row], limits: Limits) -> tuple[dict[str, Any], list[Row]]:
+    """The first (highest-priority) batch only."""
+
+    return build_batches(tab, rows, limits)[0]
+
+
+def _answer_links(answer: dict[str, Any]) -> set[str]:
+    links = {item["link"] for item in answer["top_items"]}
+    return links | {item["link"] for item in answer["candidate_tasks"] + answer["deadlines"] if item.get("link")}
+
+
+def build_merge(tab: str, answers: list[dict[str, Any]], limits: Limits,
+                *, first: bool = True, owners: Sequence[str] = ()) -> tuple[dict[str, Any] | None, int]:
+    """One merge request holding as many answers as fit, from the first; returns the body and that
+    count; (None, 1) when not even the first two fit together. Only a merge of every answer starting
+    from the first is final (full length); any other merge is asked for a short answer."""
+
+    byte_room, char_room = _room(limits)
+    for count in range(len(answers), 1, -1):
+        lines = [json.dumps(a, ensure_ascii=False) for a in answers[:count]]
+        user = (f"Tab: {tab}\n{_owners_line(owners)}Partial summaries ({count}), one JSON object per line:\n"
+                + "\n".join(lines))
+        system = MERGE_PROMPT if first and count == len(answers) else MERGE_PROMPT + SHORT_NOTE
+        body = _body(system, user, MERGE_PROMPT_VERSION, limits)
+        if (sum(_bytes(m["content"]) for m in body["messages"]) <= byte_room
+                and sum(len(m["content"]) for m in body["messages"]) <= char_room):
+            return body, count
+    return None, 1
 
 
 def link_source(url: str) -> str:
@@ -600,6 +698,98 @@ def _output_row(tab: str, now: datetime, window: str, considered: int, status: s
     ]
 
 
+def _call(body: dict[str, Any], allowed: set[str], gateway: Gateway, denylist: Sequence[str],
+          spent: list[dict[str, Any]]) -> dict[str, Any]:
+    """One validated answer; every response, kept or not, is added to ``spent`` for usage and cost."""
+
+    if any(_contains_term(m["content"], denylist) for m in body["messages"]):
+        raise TabError("client_term_in_input")
+    response = gateway.generate(body)
+    spent.append(response)
+    if response.get("finish_reason") == "length":
+        raise TabError("output_truncated")
+    return validate_answer(str(response.get("content", "")), allowed, denylist)
+
+
+def _summarize(tab: str, rows: list[Row], limits: Limits, gateway: Gateway, denylist: Sequence[str],
+               owners: Sequence[str] = ()) -> tuple[dict[str, Any], dict[str, Any], int]:
+    """One answer for the tab: a single call, or batch calls plus merge calls.
+
+    A batch whose answer is invalid, truncated, has an invented link or a client term is dropped and
+    never written. A merge with a malformed answer is tried once more; a failing merge fails the
+    tab. Returns the answer, the combined response (usage and cost of every call) and the rows it
+    covers.
+    """
+
+    answers: list[tuple[dict[str, Any], int]] = []
+    responses: list[dict[str, Any]] = []
+    first_error: TabError | None = None
+    for body, sent in build_batches(tab, rows, limits, owners):
+        allowed = {link for r in sent for v in r.cells.values() for link in URL_RE.findall(v)}
+        try:
+            answer = _call(body, allowed, gateway, denylist, responses)
+        except TabError as error:
+            if error.code == "client_term_in_input":
+                raise
+            first_error = first_error or error
+            continue
+        answers.append((answer, len(sent)))
+    if not answers:
+        raise first_error or TabError("invalid_output")
+    # Merge in rounds: each merge call takes as many answers as fit, most important first, until
+    # one answer is left. Answers that cannot share a call with any other are dropped from the end.
+    while len(answers) > 1:
+        merged_round: list[tuple[dict[str, Any], int]] = []
+        i = 0
+        while i < len(answers):
+            merge_body, count = build_merge(tab, [a for a, _n in answers[i:]], limits, first=i == 0,
+                                           owners=owners)
+            if merge_body is None:
+                merged_round.append(answers[i])
+                i += 1
+                continue
+            group = answers[i:i + count]
+            allowed = set().union(*(_answer_links(a) for a, _n in group))
+            try:
+                answer = _call(merge_body, allowed, gateway, denylist, responses)
+            except TabError as error:
+                # One more try for a malformed merge answer; a client term is never retried.
+                if error.code not in RETRY_MERGE_CODES:
+                    raise
+                answer = _call(merge_body, allowed, gateway, denylist, responses)
+            merged_round.append((answer, sum(n for _a, n in group)))
+            i += count
+        answers = merged_round if len(merged_round) < len(answers) else answers[:-1]
+    answer, covered = answers[0]
+    if len(responses) == 1:
+        return answer, responses[0], covered
+    combined = dict(responses[-1])
+    combined["usage"] = {key: sum(int(((r.get("usage") or {}).get(key)) or 0) for r in responses)
+                         for key in ("input_tokens", "output_tokens")}
+    combined["estimated_cost_usd"] = sum(float(r.get("estimated_cost_usd") or 0) for r in responses)
+    if any(r.get("status") == "budget_exceeded" for r in responses):
+        combined["status"] = "budget_exceeded"
+    return answer, combined, covered
+
+
+def assign_owners(answer: dict[str, Any], tab: str, owners: Sequence[str], rows: list[Row]) -> dict[str, Any]:
+    """Make every ``suggested_owner_role`` a real Chief tab name; the model sometimes invents a job
+    title. Keep a listed Chief (the first one when it names several); else the Chief that requested
+    the task's linked row; else the tab itself when it is a Chief tab; else "" (unassigned)."""
+
+    known = set(owners)
+    by_link: dict[str, list[str]] = {}
+    for row in rows:
+        chiefs = _chiefs(row.cells.get("requesting_chief", "") or row.cells.get("Source Chief", ""))
+        for value in row.cells.values():
+            for link in URL_RE.findall(value):
+                by_link.setdefault(link, chiefs)
+    for task in answer["candidate_tasks"]:
+        candidates = _chiefs(task.get("suggested_owner_role", "")) + by_link.get(task.get("link") or "", []) + [tab]
+        task["suggested_owner_role"] = next((c for c in candidates if c in known), "")
+    return answer
+
+
 def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datetime,
         dry_run: bool = False, only_tabs: Sequence[str] = ()) -> RunResult:
     denylist = tuple(normalize_text(term) for term in denylist if normalize_text(term))
@@ -607,6 +797,7 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
         raise DenylistError("client denylist has no terms")
     titles = sheets.titles()
     tabs = [t for t in select_tabs(titles) if (not only_tabs or t in only_tabs) and not _contains_term(t, denylist)]
+    owners = sorted(t for t in titles if t.startswith("Chief ") and not _contains_term(t, denylist))
     history = sheets.read([OUTPUT_TAB])[OUTPUT_TAB] if OUTPUT_TAB in titles else []
     marks = _watermarks(history)
     result = RunResult()
@@ -646,14 +837,8 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
                 continue
             started = time.monotonic()
             try:
-                body, sent = build_request(tab, safe, limits)
-                if any(_contains_term(m["content"], denylist) for m in body["messages"]):
-                    raise TabError("client_term_in_input")
-                allowed = {link for r in sent for v in r.cells.values() for link in URL_RE.findall(v)}
-                response = gateway.generate(body)
-                if response.get("finish_reason") == "length":
-                    raise TabError("output_truncated")
-                answer = validate_answer(str(response.get("content", "")), allowed, denylist)
+                answer, response, sent = _summarize(tab, safe, limits, gateway, denylist, owners)
+                answer = assign_owners(answer, tab, owners, safe)
             except GatewayStop as stop:
                 stop_all(tabs[index:], f"gateway_stop:{stop.code}")
                 break
@@ -663,7 +848,7 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
                 result.exit_code = 1
                 continue
             row_status = "budget_exceeded" if response.get("status") == "budget_exceeded" else "ok"
-            row = _output_row(tab, now, window, len(sent), row_status, answer=answer, response=response)
+            row = _output_row(tab, now, window, sent, row_status, answer=answer, response=response)
             result.rows.append(row)
             _log(event="tab", run_id=row[9], tab=tab, status=row_status, tokens_in=row[10], tokens_out=row[11],
                  cost_usd=row[12], latency_ms=round((time.monotonic() - started) * 1000))
