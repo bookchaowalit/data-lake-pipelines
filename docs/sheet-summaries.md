@@ -31,6 +31,7 @@ local only, so the job runs as a Railway cron service next to `news-capture` in 
 | Image | `deploy/sheet-summaries/Dockerfile` (build runs a fake-gateway dry run as its smoke test) |
 | Cron | `0 12 * * *` UTC = 19:00 Asia/Bangkok, after the last X pull (~17:30) |
 | Restart policy | NEVER (one run per schedule, no loop) |
+| Deploy | CLI upload: `railway up` of a clean `git archive <commit>` (Railway refuses `serviceConnect` to this repo for the CLI user, as for news-capture). First deploy 2026-10-26: d7ddc9d. A push to `main` does **not** redeploy; repeat the upload for a new commit |
 | Heartbeat | posts to `/heartbeat/sheet-summaries` on the uptime Worker when `HEARTBEAT_TOKEN` is set; the Worker needs a `sheet-summaries` entry (e.g. alert after 26 h) before it alerts |
 | Sentry | static "capture run failed" event, scrubbed (`data_lake/observability.py`) |
 
