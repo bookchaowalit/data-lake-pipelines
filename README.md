@@ -7,6 +7,7 @@ repo นี้คงโครงสร้าง `infra/...` เดิมไว�
 
 - `infra/scripts/data_lake/` — 47 modules (ingest/storage/query/silver/product_adapter ฯลฯ + run_* capture + cron setup)
 - `infra/scripts/{discovery,opportunities}/`, `infra/scripts/sync/{sync_brave_bookmarks,brave_bookmark_workflow,organize_brave_bookmarks,telegram_channels,telegram_personal}.py`, `infra/scripts/cli/diary-intake-cli.py`
+- `infra/scripts/sync/sheet_summaries.py` — สรุปภาษาไทยรายวันของชีต "Chief Findings Warehouse" ผ่าน AI gateway (Railway cron `sheet-summaries`, 19:00 เวลาไทย) ดู [`docs/sheet-summaries.md`](docs/sheet-summaries.md)
 - `infra/scripts/utils/` — สำเนา vendored ของ utils ที่โค้ดข้างบนต้องใช้ (`_env`, `cell_store`, `task_store`, `secret_resolver`, `job_client`, `data_product_contract_guard`, …)
 - `infra/dbt/` — dbt projection (`dbt_lake_test.py`)
 - `infra/tests/` — test ทั้งหมดของโค้ดข้างต้น

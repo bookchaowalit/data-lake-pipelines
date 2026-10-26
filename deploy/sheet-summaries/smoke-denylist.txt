@@ -1,0 +1,2 @@
+# Fake client term for the build-time dry run only; the real list is CLIENT_DENYLIST on Railway.
+ExampleClientCo
