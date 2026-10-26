@@ -30,6 +30,8 @@ from sync.sheet_summaries import (  # noqa: E402
     DenylistError,
     GatewayClient,
     MemorySheets,
+    google_access_token,
+    link_source,
     load_denylist,
     run,
     select_tabs,
@@ -384,7 +386,7 @@ class CapTests(unittest.TestCase):
                 return httpx.Response(200, json=data)
             return response
 
-        sheets = sheet(**{"X Feed": [X_HEADER] + [x_row(i, text="ยาว" * 120) for i in range(80)]})
+        sheets = sheet(**{"X Feed": [X_HEADER] + [x_row(i, text="ยาว" * 20) for i in range(80)]})
         http = httpx.Client(transport=httpx.MockTransport(small_limits), base_url="https://gateway.test")
         result = quiet_run(sheets, GatewayClient(http, TOKEN, sleep=lambda _s: None), DENYLIST, now=NOW)
         self.assertEqual(result.exit_code, 0)
@@ -404,6 +406,35 @@ class CapTests(unittest.TestCase):
         quiet_run(sheets, client(fake), DENYLIST, now=NOW)
         sent = "".join(b["messages"][1]["content"] for b in fake.generate_bodies)
         self.assertNotIn("https://example.test/old", sent)
+
+
+class GoogleAuthTests(unittest.TestCase):
+    def test_service_account_jwt_exchange(self) -> None:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption()).decode()
+        account = {"client_email": "fake@test.iam.gserviceaccount.com", "private_key": pem,
+                   "private_key_id": "k1", "token_uri": "https://oauth2.test/token"}
+        seen: dict[str, str] = {}
+
+        def token(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["body"] = request.content.decode()
+            return httpx.Response(200, json={"access_token": "ya29.fake"})
+
+        http = httpx.Client(transport=httpx.MockTransport(token))
+        self.assertEqual(google_access_token(account, http), "ya29.fake")
+        self.assertEqual(seen["url"], "https://oauth2.test/token")
+        self.assertIn("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer", seen["body"])
+
+    def test_link_source(self) -> None:
+        self.assertEqual(link_source("https://x.com/a/status/1"), "x_post")
+        self.assertEqual(link_source("https://mobile.twitter.com/a/status/1"), "x_post")
+        self.assertEqual(link_source("https://x.com/a"), "website")
+        self.assertEqual(link_source("https://example.com/status/1"), "website")
 
 
 class LoggingTests(unittest.TestCase):

@@ -1,0 +1,155 @@
+{
+ "README": [
+  [
+   "about"
+  ],
+  [
+   "ไม่สรุปแท็บนี้"
+  ]
+ ],
+ "X Watchlist": [
+  [
+   "chief",
+   "keyword"
+  ],
+  [
+   "Chief Property",
+   "คอนโดราคาต่ำ"
+  ]
+ ],
+ "Chief Property": [
+  [
+   "found_at",
+   "title",
+   "summary",
+   "source_url"
+  ],
+  [
+   "2026-10-25",
+   "ตัวอย่าง: ทรัพย์ NPA รอบใหม่",
+   "ข้อมูลสมมติสำหรับ dry run",
+   "https://example.com/npa-sample"
+  ],
+  [
+   "2026-10-26",
+   "ตัวอย่าง: ดอกเบี้ยบ้านปรับ",
+   "ข้อมูลสมมติสำหรับ dry run",
+   "https://example.com/rate-sample"
+  ],
+  [
+   "2026-10-26",
+   "ตัวอย่าง: งานของ ExampleClientCo",
+   "แถวนี้ต้องถูกกรองออก",
+   "https://example.com/client-sample"
+  ]
+ ],
+ "Chief Legal & Trust": [
+  [
+   "date",
+   "topic",
+   "link"
+  ],
+  [
+   "2026-10-26",
+   "ตัวอย่าง: PDPA guideline draft",
+   "https://example.com/pdpa-sample"
+  ]
+ ],
+ "X Feed": [
+  [
+   "collected_at",
+   "requesting_chief",
+   "watch_type",
+   "watch_value",
+   "post_id",
+   "post_url",
+   "author_handle",
+   "posted_at",
+   "text",
+   "likes",
+   "reposts",
+   "replies",
+   "views",
+   "tag",
+   "query_id",
+   "score",
+   "top"
+  ],
+  [
+   "2026-10-26T10:30:00Z",
+   "Chief Business Builder",
+   "keyword",
+   "n8n automation",
+   "100",
+   "https://x.com/example_user/status/100",
+   "@example_user",
+   "2026-10-26T09:00:00Z",
+   "Sample post 0: looking for an n8n developer",
+   "3",
+   "1",
+   "0",
+   "120",
+   "leads",
+   "q-bb-1",
+   "0",
+   ""
+  ],
+  [
+   "2026-10-26T10:30:00Z",
+   "Chief Business Builder",
+   "keyword",
+   "n8n automation",
+   "101",
+   "https://x.com/example_user/status/101",
+   "@example_user",
+   "2026-10-26T09:00:00Z",
+   "Sample post 1: looking for an n8n developer",
+   "3",
+   "1",
+   "0",
+   "120",
+   "leads",
+   "q-bb-1",
+   "1",
+   ""
+  ],
+  [
+   "2026-10-26T10:30:00Z",
+   "Chief Business Builder",
+   "keyword",
+   "n8n automation",
+   "102",
+   "https://x.com/example_user/status/102",
+   "@example_user",
+   "2026-10-26T09:00:00Z",
+   "Sample post 2: looking for an n8n developer",
+   "3",
+   "1",
+   "0",
+   "120",
+   "leads",
+   "q-bb-1",
+   "2",
+   "TRUE"
+  ],
+  [
+   "2026-10-26T10:30:00Z",
+   "Chief Business Builder",
+   "keyword",
+   "n8n automation",
+   "103",
+   "https://x.com/example_user/status/103",
+   "@example_user",
+   "2026-10-26T09:00:00Z",
+   "Sample post 3: looking for an n8n developer",
+   "3",
+   "1",
+   "0",
+   "120",
+   "leads",
+   "q-bb-1",
+   "3",
+   ""
+  ]
+ ]
+}

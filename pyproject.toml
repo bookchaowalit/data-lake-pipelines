@@ -34,6 +34,8 @@ dependencies = [
 # Opt-in error reporting for the scheduled capture runners; inert unless SENTRY_DSN is set
 # (infra/scripts/data_lake/observability.py).
 sentry = ["sentry-sdk>=2.20,<3"]
+# Google service-account auth for the daily sheet summaries (infra/scripts/sync/sheet_summaries.py).
+sheets = ["google-auth>=2.40,<3"]
 
 [dependency-groups]
 dev = ["mypy>=1.13", "ruff>=0.8", "types-jsonschema", "types-PyYAML"]
@@ -46,13 +48,13 @@ python_version = "3.12"
 mypy_path = "infra/scripts"
 # Typed and passing today. Follow-up (not yet clean): infra/scripts/utils (vendored, 15 errors),
 # infra/scripts/sync (2 errors), infra/scripts/cli and the dbt/test scripts.
-files = ["infra/scripts/data_lake", "infra/scripts/discovery", "infra/scripts/opportunities"]
+files = ["infra/scripts/data_lake", "infra/scripts/discovery", "infra/scripts/opportunities", "infra/scripts/sync/sheet_summaries.py"]
 explicit_package_bases = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
 # Third-party packages without type information.
-module = ["feedparser", "pyarrow", "pyarrow.*"]
+module = ["feedparser", "pyarrow", "pyarrow.*", "google.auth", "google.auth.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
