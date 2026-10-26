@@ -29,7 +29,8 @@ X pull (~17:30 Asia/Bangkok), through the owner's own AI gateway and with no new
 4. **No new rows** → write a `no_change` row (same `to_row`) and make no gateway call.
 5. **Client guard (hard).** Load the denylist from `CLIENT_DENYLIST_PATH` (one term per line, `#`
    comments). Missing path, missing file or no terms → the run fails before reading any tab. Terms
-   and text are compared after NFKC, zero-width removal and case folding. A row whose serialized form
+   and text match if either the NFKC case-folded form or the letters-and-digits skeleton (NFKD, no
+   format, combining, invisible or punctuation characters) contains the term. A row whose serialized form
    (header names and cells) contains a term is dropped before it reaches the model; a tab whose name
    contains a term is skipped; the final prompt is checked again; a model answer that contains a
    term is rejected and not written. A malformed service-account value never appears in an error.

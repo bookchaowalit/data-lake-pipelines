@@ -274,12 +274,16 @@ class DenylistTests(unittest.TestCase):
     def test_lookalike_and_header_matches_are_filtered(self) -> None:
         rows = finding_rows(1)
         rows.append(["2026-10-25", "งานของ Oak\u200bClient\uff23o", "x", "https://example.test/zw", ""])
+        rows.append(["2026-10-25", "งาน Oak\u034fClient\ufe0fCo\U000e0041", "x", "https://example.test/ignorable", ""])
+        rows.append(["2026-10-25", "งาน OakClientCo\u0301 ต่อ", "x", "https://example.test/combining", ""])
         header_tab = [["found_at", "OakClientCo notes"], ["2026-10-25", "ข้อมูล"]]
         sheets = sheet(**{"Chief Property": rows, "Chief Career": header_tab, "Chief OakClientCo": finding_rows(1)})
         fake = FakeGateway()
         quiet_run(sheets, client(fake), DENYLIST, now=NOW)
         sent = "".join(b["messages"][1]["content"] for b in fake.generate_bodies)
         self.assertNotIn("https://example.test/zw", sent)
+        self.assertNotIn("https://example.test/ignorable", sent)
+        self.assertNotIn("https://example.test/combining", sent)
         self.assertNotIn("OakClientCo", sent)
         self.assertNotIn("Chief OakClientCo", {row["tab"] for row in output_rows(sheets)})
         career = [r for r in output_rows(sheets) if r["tab"] == "Chief Career"][0]

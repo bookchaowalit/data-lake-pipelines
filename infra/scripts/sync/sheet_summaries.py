@@ -63,7 +63,6 @@ SUCCESS_STATUSES = frozenset({"ok", "budget_exceeded", "no_change"})
 STOP_CODES_NO_RETRY = frozenset({"monthly_budget_exceeded", "budget_unavailable", "budget_not_configured"})
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 TRUE_VALUES = frozenset({"true", "1", "yes", "y", "top", "✓", "x"})
-ZERO_WIDTH_RE = re.compile("[\u200b-\u200f\u2060-\u2064\ufeff\u00ad]")
 LOG_KEYS = ("event", "run_id", "tab", "status", "tokens_in", "tokens_out", "cost_usd", "latency_ms", "error")
 
 SYSTEM_PROMPT = """You summarize one tab of a research spreadsheet for its owner.
@@ -361,14 +360,26 @@ def load_denylist(path: str | None) -> tuple[str, ...]:
 
 
 def normalize_text(text: str) -> str:
-    """NFKC, no zero-width characters, case-folded: how terms and text are compared."""
+    """Case-folded NFKC form of a term or text (the plain comparison)."""
 
-    return ZERO_WIDTH_RE.sub("", unicodedata.normalize("NFKC", text)).casefold().strip()
+    return unicodedata.normalize("NFKC", text).casefold().strip()
+
+
+def skeleton(text: str) -> str:
+    """Letters and digits only, after NFKD and case folding.
+
+    Drops every format, combining, invisible, space and punctuation character on both sides, so
+    zero-width joiners, variation selectors, combining marks or NFKC composition cannot split or
+    merge a client term. It is stricter (more rows match), never looser, than the plain form.
+    """
+
+    return "".join(c for c in unicodedata.normalize("NFKD", text.casefold()) if c.isalnum())
 
 
 def _contains_term(text: str, denylist: Sequence[str]) -> bool:
-    folded = normalize_text(text)
-    return any(term in folded for term in denylist)
+    plain = normalize_text(text)
+    bare = skeleton(text)
+    return any(term in plain or (skeleton(term) and skeleton(term) in bare) for term in denylist)
 
 
 @dataclass(frozen=True)
