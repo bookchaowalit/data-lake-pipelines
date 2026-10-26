@@ -55,7 +55,10 @@ PROMPT_VERSION = "sheet-summaries-v1"
 MAX_ROWS = 200
 MAX_CELL_CHARS = 500
 FIRST_RUN_DAYS = 7
-MAX_OUTPUT_TOKENS = 2048
+MAX_OUTPUT_TOKENS = 4096
+# GPT-6 Luna reasons before it answers; at the default effort it spent a 2048-token cap on
+# reasoning and returned no content (finish_reason=length). "low" keeps the answer within the cap.
+REASONING_EFFORT = "low"
 # The gateway appends its Thai language policy (~650 bytes UTF-8) to the system message.
 GATEWAY_OVERHEAD_BYTES = 768
 DATE_COLUMNS = ("collected_at", "posted_at", "found_at", "date", "created_at", "updated_at", "timestamp")
@@ -501,6 +504,7 @@ def build_request(tab: str, rows: list[Row], limits: Limits) -> tuple[dict[str, 
         "profile": "fast",
         "privacy_class": "internal",
         "response_format": {"type": "json_object"},
+        "reasoning_effort": REASONING_EFFORT,
         "max_output_tokens": output,
         "token_budget": min(limits.max_token_budget, max(256, estimated + output + GATEWAY_OVERHEAD_BYTES)),
         "messages": messages,
@@ -647,6 +651,8 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
                     raise TabError("client_term_in_input")
                 allowed = {link for r in sent for v in r.cells.values() for link in URL_RE.findall(v)}
                 response = gateway.generate(body)
+                if response.get("finish_reason") == "length":
+                    raise TabError("output_truncated")
                 answer = validate_answer(str(response.get("content", "")), allowed, denylist)
             except GatewayStop as stop:
                 stop_all(tabs[index:], f"gateway_stop:{stop.code}")

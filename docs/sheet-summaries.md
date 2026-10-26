@@ -96,7 +96,7 @@ then highest `score` rows, other tabs the newest rows.
 ## Status values
 
 `ok`, `budget_exceeded` (answer written; the gateway flagged the budget), `no_change` (no call),
-`error` with `error` = `invented_link`, `invalid_output`, `client_term_in_output`, `row_too_large`,
+`error` with `error` = `invented_link`, `invalid_output`, `output_truncated`, `client_term_in_output`, `row_too_large`,
 `gateway_400:<code>`, `gateway_stop:<code>` (429 / 5xx / auth / network after at most one retry) or
 `budget_<decision>` (preflight).
 

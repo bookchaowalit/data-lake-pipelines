@@ -86,12 +86,14 @@ class FakeGateway:
     """Answers with links taken from the request (or ``invent`` links); records every call."""
 
     def __init__(self, *, decision: str = "allow", invent: bool = False, answer_text: str | None = None,
-                 failures: list[httpx.Response] | None = None, generate_status: str = "success") -> None:
+                 failures: list[httpx.Response] | None = None, generate_status: str = "success",
+                 finish_reason: str = "stop") -> None:
         self.decision = decision
         self.invent = invent
         self.answer_text = answer_text
         self.failures = list(failures or [])
         self.generate_status = generate_status
+        self.finish_reason = finish_reason
         self.generate_bodies: list[dict[str, Any]] = []
         self.status_calls = 0
 
@@ -116,6 +118,7 @@ class FakeGateway:
         return httpx.Response(200, json={
             "contract": "solo-empire.ai-gateway.v1", "run_id": f"run-{len(self.generate_bodies)}",
             "status": self.generate_status, "model": "gpt-6-luna", "content": content,
+            "finish_reason": self.finish_reason,
             "usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500, "source": "provider"},
             "estimated_cost_usd": 0.00027,
         })
@@ -244,6 +247,12 @@ class LinkValidationTests(unittest.TestCase):
         result = quiet_run(sheets, client(FakeGateway(answer_text=bad)), DENYLIST, now=NOW)
         self.assertEqual(result.exit_code, 1)
         self.assertEqual({row["error"] for row in output_rows(sheets)}, {"invalid_output"})
+
+    def test_truncated_answer_is_reported(self) -> None:
+        sheets = sheet()
+        result = quiet_run(sheets, client(FakeGateway(answer_text="", finish_reason="length")), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual({row["error"] for row in output_rows(sheets)}, {"output_truncated"})
 
     def test_non_json_is_rejected(self) -> None:
         sheets = sheet()
@@ -377,6 +386,7 @@ class GatewayErrorTests(unittest.TestCase):
         self.assertEqual(body["profile"], "fast")
         self.assertEqual(body["privacy_class"], "internal")
         self.assertEqual(body["response_format"], {"type": "json_object"})
+        self.assertEqual(body["reasoning_effort"], "low")
         estimated = sum(len(m["content"].encode("utf-8")) + 32 for m in body["messages"])
         self.assertLessEqual(estimated + body["max_output_tokens"], body["token_budget"])
         self.assertLessEqual(body["token_budget"], 32768)
