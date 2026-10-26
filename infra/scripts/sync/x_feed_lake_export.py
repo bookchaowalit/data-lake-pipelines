@@ -31,6 +31,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import sys
 import urllib.parse
 from pathlib import Path
@@ -55,6 +56,8 @@ LAKE_DATASET = "x_feed"
 LAKE_TABLE = "bronze/domain=social/dataset=x_feed/schema_version=1"
 CONTRACT = "x_feed.v1"
 PAGE = 100
+# intake-api's own pull_id rule; anything else is refused before it reaches a URL path.
+PULL_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._:-]{0,79}$")
 
 
 class ExportError(RuntimeError):
@@ -105,7 +108,12 @@ def pending_pulls(client: httpx.Client) -> list[dict[str, Any]]:
 
 def export_pull(client: httpx.Client, intake: dict[str, Any], data_lake_uri: str) -> dict[str, Any]:
     pull_id = str(intake["pull_id"])
-    export = _json(client.get(f"/v1/x-feed/pulls/{pull_id}/rows"), f"read pull {pull_id}")
+    if not PULL_ID.match(pull_id):
+        raise ExportError("refused a pull_id outside intake-api's pattern")
+    path = f"/v1/x-feed/pulls/{urllib.parse.quote(pull_id, safe='')}"
+    export = _json(client.get(f"{path}/rows"), f"read pull {pull_id}")
+    if export.get("pull_id") != pull_id:
+        raise ExportError(f"read pull {pull_id}: the answer is for another pull")
     rows = export["items"]
     lake = ingest_records(
         rows,
@@ -121,7 +129,7 @@ def export_pull(client: httpx.Client, intake: dict[str, Any], data_lake_uri: str
         retention_class="x-feed-history",
     )
     marked = client.post(
-        f"/v1/x-feed/pulls/{pull_id}/exported",
+        f"{path}/exported",
         json={
             "record_count": export["record_count"],
             "lake_run_id": lake["run_id"],

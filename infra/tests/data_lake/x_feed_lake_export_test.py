@@ -145,6 +145,17 @@ def test_a_failing_pull_does_not_stop_the_others() -> None:
         assert failed["error"] == "read pull test-pull-gone: HTTP 404 not_found"
 
 
+def test_a_pull_id_that_could_change_the_url_path_is_refused() -> None:
+    fake = FakeIntake({})
+    for bad in ("..", "a/../../v1/sources", "a?x=1"):
+        fake.status[bad] = "landed"
+    with tempfile.TemporaryDirectory() as tmp:
+        result = export_pending(client_for(fake), data_lake_uri=str(Path(tmp) / "lake"))
+        assert result["status"] == "failed"
+        assert all(r["error"] == "refused a pull_id outside intake-api's pattern" for r in result["runs"])
+        assert fake.marks == []
+
+
 def test_dry_run_writes_nothing() -> None:
     fake = FakeIntake({"test-pull-f": x_feed_rows("test-pull-f", 2)})
     with tempfile.TemporaryDirectory() as tmp:
