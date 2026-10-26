@@ -19,6 +19,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ SUCCESS_STATUSES = frozenset({"ok", "budget_exceeded", "no_change"})
 STOP_CODES_NO_RETRY = frozenset({"monthly_budget_exceeded", "budget_unavailable", "budget_not_configured"})
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 TRUE_VALUES = frozenset({"true", "1", "yes", "y", "top", "✓", "x"})
+ZERO_WIDTH_RE = re.compile("[\u200b-\u200f\u2060-\u2064\ufeff\u00ad]")
 LOG_KEYS = ("event", "run_id", "tab", "status", "tokens_in", "tokens_out", "cost_usd", "latency_ms", "error")
 
 SYSTEM_PROMPT = """You summarize one tab of a research spreadsheet for its owner.
@@ -349,7 +351,7 @@ def load_denylist(path: str | None) -> tuple[str, ...]:
     if not file.is_file():
         raise DenylistError("client denylist file is missing")
     terms = tuple(
-        line.strip().lower()
+        normalize_text(line)
         for line in file.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     )
@@ -358,9 +360,15 @@ def load_denylist(path: str | None) -> tuple[str, ...]:
     return terms
 
 
+def normalize_text(text: str) -> str:
+    """NFKC, no zero-width characters, case-folded: how terms and text are compared."""
+
+    return ZERO_WIDTH_RE.sub("", unicodedata.normalize("NFKC", text)).casefold().strip()
+
+
 def _contains_term(text: str, denylist: Sequence[str]) -> bool:
-    lowered = text.lower()
-    return any(term in lowered for term in denylist)
+    folded = normalize_text(text)
+    return any(term in folded for term in denylist)
 
 
 @dataclass(frozen=True)
@@ -579,11 +587,11 @@ def _output_row(tab: str, now: datetime, window: str, considered: int, status: s
 
 def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datetime,
         dry_run: bool = False, only_tabs: Sequence[str] = ()) -> RunResult:
-    denylist = tuple(term.strip().lower() for term in denylist if term.strip())
+    denylist = tuple(normalize_text(term) for term in denylist if normalize_text(term))
     if not denylist:
         raise DenylistError("client denylist has no terms")
     titles = sheets.titles()
-    tabs = [t for t in select_tabs(titles) if not only_tabs or t in only_tabs]
+    tabs = [t for t in select_tabs(titles) if (not only_tabs or t in only_tabs) and not _contains_term(t, denylist)]
     history = sheets.read([OUTPUT_TAB])[OUTPUT_TAB] if OUTPUT_TAB in titles else []
     marks = _watermarks(history)
     result = RunResult()
@@ -614,7 +622,8 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
             after, window_rows = _window_rows(header, rows, marks.get(tab), now)
             last = max([after] + [r.number for r in rows])
             window = f"after_row={after};to_row={last}"
-            safe = [r for r in window_rows if not _contains_term(" ".join(r.cells.values()), denylist)]
+            # Check each row as it would be sent (header names included), not only the cell values.
+            safe = [r for r in window_rows if not _contains_term(_row_line(r), denylist)]
             if not safe:
                 result.rows.append(_output_row(tab, now, f"after_row={last};to_row={last}" if after == last else window,
                                                0, "no_change"))
@@ -623,6 +632,8 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
             started = time.monotonic()
             try:
                 body, sent = build_request(tab, safe, limits)
+                if any(_contains_term(m["content"], denylist) for m in body["messages"]):
+                    raise TabError("client_term_in_input")
                 allowed = {link for r in sent for v in r.cells.values() for link in URL_RE.findall(v)}
                 response = gateway.generate(body)
                 answer = validate_answer(str(response.get("content", "")), allowed, denylist)
@@ -660,10 +671,20 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
 
 
 def _service_account(raw: str) -> dict[str, Any]:
-    text = raw.strip()
-    if not text.startswith("{"):
-        text = Path(text).read_text(encoding="utf-8")
-    return json.loads(text)
+    """Key JSON inline or a path to it; errors never echo the value (it holds a private key)."""
+
+    text = raw.strip().lstrip("\ufeff")
+    try:
+        if not text.startswith("{"):
+            if len(text) > 1024 or not os.path.isfile(text):
+                raise ValueError
+            text = Path(text).read_text(encoding="utf-8")
+        account = json.loads(text)
+        if not isinstance(account, dict) or "client_email" not in account or "private_key" not in account:
+            raise ValueError
+        return account
+    except (OSError, ValueError):
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not valid key JSON or a readable file") from None
 
 
 def _post_heartbeat(ok: bool) -> None:

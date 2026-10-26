@@ -28,9 +28,11 @@ X pull (~17:30 Asia/Bangkok), through the owner's own AI gateway and with no new
    newest rows.
 4. **No new rows** → write a `no_change` row (same `to_row`) and make no gateway call.
 5. **Client guard (hard).** Load the denylist from `CLIENT_DENYLIST_PATH` (one term per line, `#`
-   comments). Missing path, missing file or no terms → the run fails before reading any tab. A row
-   whose any cell contains a term (case-insensitive) is dropped before it reaches the model; a model
-   answer that contains a term is rejected and not written.
+   comments). Missing path, missing file or no terms → the run fails before reading any tab. Terms
+   and text are compared after NFKC, zero-width removal and case folding. A row whose serialized form
+   (header names and cells) contains a term is dropped before it reaches the model; a tab whose name
+   contains a term is skipped; the final prompt is checked again; a model answer that contains a
+   term is rejected and not written. A malformed service-account value never appears in an error.
 6. **Input cap.** At most 200 rows per tab and 500 characters per cell. The prompt must also fit the
    gateway's live limits from `GET /api/ai/status` (`limits.max_context_chars`,
    `limits.max_token_budget` minus the output reservation; the gateway counts input tokens as UTF-8

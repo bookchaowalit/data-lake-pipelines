@@ -30,6 +30,7 @@ from sync.sheet_summaries import (  # noqa: E402
     DenylistError,
     GatewayClient,
     MemorySheets,
+    _service_account,
     google_access_token,
     link_source,
     load_denylist,
@@ -270,6 +271,20 @@ class DenylistTests(unittest.TestCase):
         self.assertNotIn("OakClientCo", json.dumps(sheets.tabs[OUTPUT_TAB], ensure_ascii=False))
         self.assertEqual({row["error"] for row in output_rows(sheets)}, {"client_term_in_output"})
 
+    def test_lookalike_and_header_matches_are_filtered(self) -> None:
+        rows = finding_rows(1)
+        rows.append(["2026-10-25", "งานของ Oak\u200bClient\uff23o", "x", "https://example.test/zw", ""])
+        header_tab = [["found_at", "OakClientCo notes"], ["2026-10-25", "ข้อมูล"]]
+        sheets = sheet(**{"Chief Property": rows, "Chief Career": header_tab, "Chief OakClientCo": finding_rows(1)})
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        sent = "".join(b["messages"][1]["content"] for b in fake.generate_bodies)
+        self.assertNotIn("https://example.test/zw", sent)
+        self.assertNotIn("OakClientCo", sent)
+        self.assertNotIn("Chief OakClientCo", {row["tab"] for row in output_rows(sheets)})
+        career = [r for r in output_rows(sheets) if r["tab"] == "Chief Career"][0]
+        self.assertEqual(career["status"], "no_change")
+
     def test_missing_or_empty_denylist_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             empty = Path(tmp) / "denylist.txt"
@@ -429,6 +444,15 @@ class GoogleAuthTests(unittest.TestCase):
         self.assertEqual(google_access_token(account, http), "ya29.fake")
         self.assertEqual(seen["url"], "https://oauth2.test/token")
         self.assertIn("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer", seen["body"])
+
+    def test_bad_service_account_value_is_never_echoed(self) -> None:
+        secret = "-----BEGIN PRIVATE KEY-----MIIEsecretmaterial"
+        for raw in (secret, '{"private_key": "' + secret + '"', "\ufeff not-json " + secret):
+            with self.assertRaises(RuntimeError) as caught:
+                _service_account(raw)
+            self.assertNotIn("secretmaterial", str(caught.exception))
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertTrue(caught.exception.__suppress_context__)
 
     def test_link_source(self) -> None:
         self.assertEqual(link_source("https://x.com/a/status/1"), "x_post")
