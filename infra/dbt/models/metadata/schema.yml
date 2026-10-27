@@ -113,3 +113,43 @@ models:
           - accepted_values:
               arguments:
                 values: ["missing", "partial", "served"]
+  - name: stg_meta_value_streams
+    description: The 8 EOS value streams from solo-empire business-capabilities.yaml.
+    columns:
+      - name: value_stream_id
+        tests: [unique, not_null]
+  - name: stg_meta_value_stream_stages
+    description: Ordered value-stream stages with the systems doing each step (empty list = broken step).
+    columns:
+      - name: stage_id
+        tests: [unique, not_null]
+      - name: value_stream_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_meta_value_streams')
+                field: value_stream_id
+  - name: meta_value_stream_stage_systems
+    description: One row per (stage, system) pair.
+    columns:
+      - name: stage_system_id
+        tests: [unique, not_null]
+      - name: system_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_meta_systems')
+                field: system_id
+  - name: meta_value_stream_coverage
+    description: >
+      One row per EOS value stream: stages, stages served by a running system,
+      broken stages and flow_status (flowing / partial / missing).
+    columns:
+      - name: value_stream_id
+        tests: [unique, not_null]
+      - name: flow_status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["flowing", "partial", "missing"]

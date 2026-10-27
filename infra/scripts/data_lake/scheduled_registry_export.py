@@ -5,16 +5,20 @@ Fetches only the five source files from GitHub (`main` of the private solo-empir
 architecture-docs repositories) with a read-only token, writes them to a temporary
 directory and exports them to SOLO_EMPIRE_DATA_LAKE_URI. Prints dataset counts only,
 reports a failed run to Sentry (opt-in) and posts the `registry-export` heartbeat to the
-uptime Worker. Exit code 0 = exported (or nothing new), 1 = failed.
+uptime Worker. After the export it renders the system landscape page (system_landscape.py) and,
+when it differs from architecture-docs main, commits it there through the GitHub Contents API with
+LANDSCAPE_COMMIT_TOKEN (contents:write on architecture-docs only); without that token the page
+step reports "skipped". Exit code 0 = exported (or nothing new), 1 = failed.
 
 Environment: GITHUB_TOKEN (contents:read on both repositories), SOLO_EMPIRE_DATA_LAKE_URI,
-REGISTRY_REF (default main), HEARTBEAT_TOKEN (optional), plus the R2 variables that
+REGISTRY_REF (default main), HEARTBEAT_TOKEN (optional), LANDSCAPE_COMMIT_TOKEN (optional), plus the R2 variables that
 data_lake/storage.py needs for s3:// URIs.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -31,7 +35,8 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from data_lake.observability import run_with_reporting  # noqa: E402
-from data_lake.registry_lake_export import export  # noqa: E402
+from data_lake.registry_lake_export import export, load_records  # noqa: E402
+from data_lake.system_landscape import build, render  # noqa: E402
 
 OWNER = "bookchaowalit"
 # name -> (repository, directory, files); names match the export() arguments
@@ -39,11 +44,16 @@ SOURCES = {
     "registries": ("solo-empire", "repository-catalog/registries", ("data-sources.yaml", "online-systems.yaml", "business-capabilities.yaml")),
     "catalog": ("architecture-docs", "systems/ai-data/metadata-catalog", ("catalog.yaml", "lineage.yaml")),
 }
+LANDSCAPE_REPO = "architecture-docs"
+LANDSCAPE_PATH = "operations/platform/SYSTEM-LANDSCAPE-GENERATED.md"
+LANDSCAPE_MESSAGE = "docs(landscape): regenerate from registries (registry-export cron)"
 HEARTBEAT_URL = "https://solo-empire-monitor.bookchaowalit.workers.dev/heartbeat/registry-export"
 # Cloudflare answers 403 to default client User-Agents on workers.dev.
 USER_AGENT = "registry-export/1"
 
 Fetch = Callable[[str, str, str, str], bytes]
+# publish(text, ref, env) -> "unchanged" | "committed" | "skipped"; raises FetchError on failure
+Publish = Callable[[str, str, Mapping[str, str]], str]
 
 
 class FetchError(RuntimeError):
@@ -65,6 +75,44 @@ def github_fetch(repo: str, path: str, ref: str, token: str) -> bytes:
     if response.status_code != 200:
         raise FetchError(f"{repo}:{path} HTTP {response.status_code}")
     return response.content
+
+
+def _github_headers(token: str) -> dict[str, str]:
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": USER_AGENT,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def github_publish(text: str, ref: str, env: Mapping[str, str]) -> str:
+    """Commit the landscape page to architecture-docs when it changed."""
+    url = f"https://api.github.com/repos/{OWNER}/{LANDSCAPE_REPO}/contents/{urllib.parse.quote(LANDSCAPE_PATH)}"
+    read_token = env.get("GITHUB_TOKEN", "").strip()
+    try:
+        current = httpx.get(url, params={"ref": ref}, headers=_github_headers(read_token), timeout=30)
+    except httpx.HTTPError as error:
+        raise FetchError(f"{LANDSCAPE_REPO}:{LANDSCAPE_PATH} {type(error).__name__}") from None
+    if current.status_code not in (200, 404):
+        raise FetchError(f"{LANDSCAPE_REPO}:{LANDSCAPE_PATH} HTTP {current.status_code}")
+    body = current.json() if current.status_code == 200 else {}
+    if body and base64.b64decode(body.get("content", "")).decode("utf-8") == text:
+        return "unchanged"
+    write_token = env.get("LANDSCAPE_COMMIT_TOKEN", "").strip()
+    if not write_token:
+        return "skipped"
+    payload = {"message": LANDSCAPE_MESSAGE, "branch": ref,
+               "content": base64.b64encode(text.encode("utf-8")).decode("ascii")}
+    if body.get("sha"):
+        payload["sha"] = body["sha"]
+    try:
+        response = httpx.put(url, json=payload, headers=_github_headers(write_token), timeout=30)
+    except httpx.HTTPError as error:
+        raise FetchError(f"commit {LANDSCAPE_PATH} {type(error).__name__}") from None
+    if response.status_code not in (200, 201):
+        raise FetchError(f"commit {LANDSCAPE_PATH} HTTP {response.status_code}")
+    return "committed"
 
 
 def post_heartbeat(ok: bool) -> None:
@@ -94,6 +142,7 @@ def run(
     env: Mapping[str, str],
     fetch: Fetch = github_fetch,
     heartbeat: Callable[[bool], None] = post_heartbeat,
+    publish: Publish = github_publish,
 ) -> int:
     parser = argparse.ArgumentParser(description="Hosted registry export into the lake.")
     parser.add_argument("--dry-run", action="store_true", help="fetch and count; write nothing, no heartbeat")
@@ -119,13 +168,15 @@ def run(
             else:
                 dirs = _download(Path(temp_dir), fetch, env.get("REGISTRY_REF", "main"), token)
             report = export(dirs["registries"], dirs["catalog"], lake_uri, dry_run=args.dry_run)
+            page = render(build(load_records(dirs["registries"], dirs["catalog"])))
+            landscape = "dry-run" if args.dry_run else "local" if local else publish(page, env.get("REGISTRY_REF", "main"), env)
     except (FetchError, ValueError, OSError) as error:
         print(json.dumps({"status": "failed", "error": type(error).__name__, "detail": str(error)[:200]}))
         beat(False)
         return 1
 
     counts = {name: {k: v for k, v in result.items() if k in ("records", "new")} for name, result in report["datasets"].items()}
-    print(json.dumps({"status": report["status"], "datasets": counts}, sort_keys=True))
+    print(json.dumps({"status": report["status"], "datasets": counts, "landscape": landscape}, sort_keys=True))
     beat(True)
     return 0
 

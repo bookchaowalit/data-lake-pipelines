@@ -58,6 +58,10 @@ METADATA_MODELS = (
     "stg_meta_system_capabilities",
     "meta_system_landscape",
     "meta_capability_coverage",
+    "stg_meta_value_streams",
+    "stg_meta_value_stream_stages",
+    "meta_value_stream_stage_systems",
+    "meta_value_stream_coverage",
 )
 
 
@@ -97,8 +101,8 @@ def check_metadata_outputs(target_dir: Path) -> list[str]:
         datasets = con.execute(
             "select count(*) from meta_lake_datasets where domain = 'metadata'"
         ).fetchone()
-        if datasets is None or datasets[0] != 6:
-            problems.append(f"meta_lake_datasets: expected 6 metadata datasets, got {datasets}")
+        if datasets is None or datasets[0] != 8:
+            problems.append(f"meta_lake_datasets: expected 8 metadata datasets, got {datasets}")
         landscape = con.execute(
             "select system_id, primary_domain, domains, automated_flows, catalog_assets, consumers "
             "from meta_system_landscape order by system_id"
@@ -120,6 +124,16 @@ def check_metadata_outputs(target_dir: Path) -> list[str]:
         ]
         if coverage != expected_coverage:
             problems.append(f"meta_capability_coverage: expected {expected_coverage}, got {coverage}")
+        streams = con.execute(
+            "select value_stream_id, stages, served_stages, broken_stages, flow_status "
+            "from meta_value_stream_coverage order by value_stream_number"
+        ).fetchall()
+        expected_streams = [
+            ("lead-to-customer", 2, 1, ["Send proposal"], "partial"),
+            ("record-to-report", 1, 1, [], "flowing"),
+        ]
+        if streams != expected_streams:
+            problems.append(f"meta_value_stream_coverage: expected {expected_streams}, got {streams}")
     return problems
 
 

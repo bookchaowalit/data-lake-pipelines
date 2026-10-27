@@ -67,6 +67,13 @@ class LoadRecordsTests(unittest.TestCase):
         self.assertEqual(caps["book-job-data:data-knowledge"]["rank"], 2)
         self.assertFalse(caps["book-job-data:data-knowledge"]["is_primary"])
 
+    def test_value_stream_rows(self):
+        streams = {row["id"]: row for row in self.records["value_streams"]}
+        self.assertEqual(streams["lead-to-customer"]["stage_count"], 2)
+        stages = {row["id"]: row for row in self.records["value_stream_stages"]}
+        self.assertEqual(stages["lead-to-customer:2"]["name"], "Send proposal")
+        self.assertEqual(stages["lead-to-customer:2"]["systems"], [])
+
     def test_empty_capability_list_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             registries = Path(temp_dir)

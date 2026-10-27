@@ -7,3 +7,15 @@ domains:
 systems:
   book-job-data: [market-intelligence, data-knowledge]
   data-lake: [data-knowledge]
+value_streams:
+  - id: lead-to-customer
+    number: 1
+    name: Lead-to-Customer
+    stages:
+      - {name: Find lead, systems: [book-job-data]}
+      - {name: Send proposal, systems: []}
+  - id: record-to-report
+    number: 2
+    name: Record-to-Report
+    stages:
+      - {name: Report, systems: [data-lake]}
