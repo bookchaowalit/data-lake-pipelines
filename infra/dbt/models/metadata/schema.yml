@@ -1,0 +1,61 @@
+version: 2
+
+models:
+  - name: stg_meta_data_sources
+    description: >
+      Inbound data flows from solo-empire repository-catalog/registries/data-sources.yaml,
+      latest export by data_lake/registry_lake_export.py. Structure only; notes stay in Git.
+    columns:
+      - name: source_id
+        tests: [unique, not_null]
+      - name: automation
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["automated", "manual", "not-captured"]
+  - name: stg_meta_systems
+    description: Systems from solo-empire online-systems.yaml (latest export).
+    columns:
+      - name: system_id
+        tests: [unique, not_null]
+  - name: stg_meta_catalog_assets
+    description: Assets from architecture-docs systems/ai-data/metadata-catalog/catalog.yaml.
+    columns:
+      - name: asset_id
+        tests: [unique, not_null]
+  - name: stg_meta_lineage_edges
+    description: Edges from architecture-docs systems/ai-data/metadata-catalog/lineage.yaml.
+    columns:
+      - name: edge_id
+        tests: [unique, not_null]
+      - name: from_asset
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_meta_catalog_assets')
+                field: asset_id
+      - name: to_asset
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_meta_catalog_assets')
+                field: asset_id
+  - name: meta_lake_datasets
+    description: Bronze datasets per source with committed manifests (what the lake holds).
+  - name: meta_source_lineage
+    description: Catalog assets reachable from each inbound flow (depth 0 = the flow's own assets).
+    columns:
+      - name: source_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_meta_data_sources')
+                field: source_id
+  - name: meta_source_coverage
+    description: >
+      One row per inbound flow with capture status, hosting and downstream reach;
+      answers which sources are still outside the platform.
+    columns:
+      - name: source_id
+        tests: [unique, not_null]

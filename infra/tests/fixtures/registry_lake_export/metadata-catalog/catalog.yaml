@@ -1,0 +1,5 @@
+# Synthetic fixture: shape of architecture-docs systems/ai-data/metadata-catalog/catalog.yaml
+catalog_id: fixture
+assets:
+  - {id: data-product.jobs, kind: data_product, name: Jobs, owner: data-engineering, status: pilot, data_classification: public_metadata, visibility: public, source_path: x.yaml, change_history: []}
+  - {id: consumer.portfolio-frontend, kind: consumer, name: Portfolio, owner: product, status: active, data_classification: public_metadata, visibility: public, source_path: y.md}

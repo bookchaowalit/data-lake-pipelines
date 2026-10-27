@@ -1,0 +1,34 @@
+# Synthetic fixture: shape of solo-empire repository-catalog/registries/data-sources.yaml
+schema_version: solo-empire.data-sources.v1
+updated: '2026-10-27'
+flows:
+  - id: job-capture
+    name: Job postings
+    channel: scraper
+    data: job postings
+    cadence: every 6 h
+    automation: automated
+    destination: {system: book-job-data, store: 'R2 fixture prefix'}
+    repo: bookchaowalit/book-job-data
+    catalog_assets: [data-product.jobs]
+    probes:
+      - {label: newest posting, heartbeat: fixture-job, max_age_hours: 8}
+    notes: fixture note that must not be exported
+  - id: health-checkin
+    name: Check-in replies
+    channel: telegram
+    data: daily answers
+    cadence: daily
+    automation: automated
+    destination: {cells: [health, diary]}
+    probes: []
+    notes: fixture
+  - id: bank-accounts
+    name: Bank accounts
+    channel: email
+    data: transactions
+    cadence: monthly
+    automation: not-captured
+    destination: {}
+    probes: []
+    notes: 'candidate from the 2026-10-27 source review, not confirmed in use'

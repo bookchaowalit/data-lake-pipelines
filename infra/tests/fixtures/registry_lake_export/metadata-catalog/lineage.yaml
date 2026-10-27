@@ -1,0 +1,4 @@
+# Synthetic fixture: shape of architecture-docs systems/ai-data/metadata-catalog/lineage.yaml
+lineage_id: fixture
+edges:
+  - {id: jobs-to-portfolio, from: data-product.jobs, to: consumer.portfolio-frontend, relationship: feeds, evidence: z.py}
