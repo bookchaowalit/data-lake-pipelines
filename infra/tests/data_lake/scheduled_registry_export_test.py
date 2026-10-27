@@ -7,8 +7,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import base64
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "infra" / "scripts"))
@@ -30,9 +32,14 @@ def fixture_fetch(repo: str, path: str, ref: str, token: str) -> bytes:
 class ScheduledRegistryExportTests(unittest.TestCase):
     def setUp(self):
         self.beats: list[bool] = []
+        self.pages: list[str] = []
+
+    def publish(self, text, ref, env):
+        self.pages.append(text)
+        return "committed"
 
     def run_job(self, env: dict[str, str], fetch=fixture_fetch, argv=None) -> int:
-        return job.run(argv or [], env=env, fetch=fetch, heartbeat=self.beats.append)
+        return job.run(argv or [], env=env, fetch=fetch, heartbeat=self.beats.append, publish=self.publish)
 
     def test_exports_and_reports_ok(self):
         try:
@@ -45,6 +52,8 @@ class ScheduledRegistryExportTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(self.beats, [True])
             self.assertEqual(len(list((lake / "control" / "manifests").rglob("*.json"))), len(DATASETS))
+            self.assertEqual(len(self.pages), 1)
+            self.assertIn("# Solo Empire — Generated System Landscape", self.pages[0])
 
     def test_fetches_only_the_five_source_files(self):
         seen: list[tuple[str, str]] = []
@@ -66,6 +75,22 @@ class ScheduledRegistryExportTests(unittest.TestCase):
         code = self.run_job({"GITHUB_TOKEN": "t", "SOLO_EMPIRE_DATA_LAKE_URI": "s3://unused"}, argv=["--dry-run"])
         self.assertEqual(code, 0)
         self.assertEqual(self.beats, [])
+        self.assertEqual(self.pages, [])
+
+    def test_publish_failure_fails_the_run(self):
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest("pyarrow not installed")
+
+        def broken_publish(text, ref, env):
+            raise job.FetchError("commit HTTP 403")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = {"GITHUB_TOKEN": "t", "SOLO_EMPIRE_DATA_LAKE_URI": (Path(temp_dir) / "lake").as_uri()}
+            code = job.run([], env=env, fetch=fixture_fetch, heartbeat=self.beats.append, publish=broken_publish)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.beats, [False])
 
     def test_missing_settings_fail_with_heartbeat(self):
         self.assertEqual(self.run_job({"SOLO_EMPIRE_DATA_LAKE_URI": "s3://x"}), 1)
@@ -87,6 +112,57 @@ class ScheduledRegistryExportTests(unittest.TestCase):
             argv=["--dry-run", "--registries", str(FIXTURE_DIRS["registries"]), "--catalog", str(FIXTURE_DIRS["catalog"])],
         )
         self.assertEqual(code, 0)
+
+
+class Response:
+    def __init__(self, status_code, body=None):
+        self.status_code = status_code
+        self._body = body or {}
+
+    def json(self):
+        return self._body
+
+
+def existing(text):
+    return Response(200, {"sha": "abc", "content": base64.b64encode(text.encode()).decode()})
+
+
+class GithubPublishTests(unittest.TestCase):
+    ENV = {"GITHUB_TOKEN": "read", "LANDSCAPE_COMMIT_TOKEN": "write"}
+
+    def test_unchanged_page_is_not_committed(self):
+        with mock.patch.object(job.httpx, "get", return_value=existing("same")), \
+                mock.patch.object(job.httpx, "put") as put:
+            self.assertEqual(job.github_publish("same", "main", self.ENV), "unchanged")
+        put.assert_not_called()
+
+    def test_changed_page_commits_with_sha_and_write_token(self):
+        with mock.patch.object(job.httpx, "get", return_value=existing("old")), \
+                mock.patch.object(job.httpx, "put", return_value=Response(200)) as put:
+            self.assertEqual(job.github_publish("new", "main", self.ENV), "committed")
+        payload = put.call_args.kwargs["json"]
+        self.assertEqual(payload["sha"], "abc")
+        self.assertEqual(payload["branch"], "main")
+        self.assertEqual(base64.b64decode(payload["content"]).decode(), "new")
+        self.assertEqual(put.call_args.kwargs["headers"]["Authorization"], "Bearer write")
+
+    def test_new_file_commits_without_sha(self):
+        with mock.patch.object(job.httpx, "get", return_value=Response(404)), \
+                mock.patch.object(job.httpx, "put", return_value=Response(201)) as put:
+            self.assertEqual(job.github_publish("new", "main", self.ENV), "committed")
+        self.assertNotIn("sha", put.call_args.kwargs["json"])
+
+    def test_no_write_token_skips(self):
+        with mock.patch.object(job.httpx, "get", return_value=existing("old")), \
+                mock.patch.object(job.httpx, "put") as put:
+            self.assertEqual(job.github_publish("new", "main", {"GITHUB_TOKEN": "read"}), "skipped")
+        put.assert_not_called()
+
+    def test_commit_error_raises(self):
+        with mock.patch.object(job.httpx, "get", return_value=existing("old")), \
+                mock.patch.object(job.httpx, "put", return_value=Response(409)):
+            with self.assertRaisesRegex(job.FetchError, "HTTP 409"):
+                job.github_publish("new", "main", self.ENV)
 
 
 class ImageFileSetTests(unittest.TestCase):

@@ -39,6 +39,12 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(coverage["offer-product"]["platform_coverage"], "missing")
         self.assertEqual(coverage["data-knowledge"]["system_ids"], ["book-job-data", "data-lake"])
 
+    def test_value_stream_flow(self):
+        streams = {v["id"]: v for v in landscape.build(self.records)["value_streams"]}
+        self.assertEqual(streams["lead-to-customer"]["flow_status"], "partial")
+        self.assertEqual(streams["lead-to-customer"]["broken_stages"], ["Send proposal"])
+        self.assertEqual(streams["record-to-report"]["flow_status"], "flowing")
+
     def test_partial_when_running_without_automated_flows(self):
         records = copy.deepcopy(self.records)
         records["system_capabilities"] = [r for r in records["system_capabilities"] if r["system_id"] == "data-lake"]

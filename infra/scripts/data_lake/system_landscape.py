@@ -88,9 +88,26 @@ def build(records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             "system_ids": sorted(s["id"] for s in serving),
             "platform_coverage": "missing" if not running else ("partial" if not automated else "served"),
         })
+    streams = []
+    for stream in sorted(records["value_streams"], key=lambda v: v["number"]):
+        stages = []
+        for stage in sorted((st for st in records["value_stream_stages"] if st["value_stream_id"] == stream["id"]),
+                            key=lambda st: st["position"]):
+            served = any(sid in by_id and by_id[sid]["status"] not in NOT_RUNNING for sid in stage["systems"])
+            stages.append({**stage, "served": served})
+        served_count = sum(st["served"] for st in stages)
+        streams.append({
+            **stream,
+            "stages": stages,
+            "served_stages": served_count,
+            "broken_stages": [st["name"] for st in stages if not st["served"]],
+            "flow_status": ("flowing" if served_count == len(stages)
+                            else "missing" if served_count == 0 else "partial"),
+        })
     unregistered = sorted({s["destination_system"] for s in records["data_sources"]
                            if s["destination_system"] and s["destination_system"] not in by_id})
-    return {"systems": systems, "coverage": coverage, "unregistered_destinations": unregistered,
+    return {"systems": systems, "coverage": coverage, "value_streams": streams,
+            "unregistered_destinations": unregistered,
             "flows": len(records["data_sources"]), "assets": len(records["catalog_assets"]),
             "edges": len(records["lineage_edges"])}
 
@@ -100,19 +117,23 @@ def _cell(value: object) -> str:
 
 
 def render(landscape: dict[str, Any]) -> str:
-    systems, coverage = landscape["systems"], landscape["coverage"]
+    systems, coverage, streams = landscape["systems"], landscape["coverage"], landscape["value_streams"]
     names = {d["id"]: d["name"] for d in coverage}
     unmapped = [s["id"] for s in systems if not s["domains"]]
     counts: defaultdict[str, int] = defaultdict(int)
     for row in coverage:
         counts[row["platform_coverage"]] += 1
+    flow_counts: defaultdict[str, int] = defaultdict(int)
+    for stream in streams:
+        flow_counts[stream["flow_status"]] += 1
     lines = [
         "---",
         'title: "Solo Empire — Generated System Landscape"',
         "status: current",
         "tags: [operations, enterprise-architecture, landscape, capability-map, generated]",
-        'description: "Every system in online-systems.yaml mapped to the 15 EOS capability domains, with inbound flows,'
-        ' catalog assets and consumers. Generated from the registries and the metadata catalog; do not edit."',
+        'description: "Every system in online-systems.yaml mapped to the 15 EOS capability domains and the stages of the'
+        ' 8 value streams, with inbound flows, catalog assets and consumers. Generated from the registries and the'
+        ' metadata catalog; do not edit."',
         "related: [./SYSTEM-LANDSCAPE.md, ../../docs/architecture/EOS-GAP-MAP.md, ../../systems/ai-data/metadata-catalog/README.md]",
         "---",
         "",
@@ -123,16 +144,20 @@ def render(landscape: dict[str, Any]) -> str:
         "",
         "Sources: `bookchaowalit/solo-empire:repository-catalog/registries/` (online-systems.yaml, data-sources.yaml,",
         "business-capabilities.yaml) and `bookchaowalit/architecture-docs:systems/ai-data/metadata-catalog/`",
-        "(catalog.yaml, lineage.yaml). The same rows are in the lake as dbt models `meta_system_landscape` and",
-        "`meta_capability_coverage`, refreshed daily by the `registry-export` cron.",
+        "(catalog.yaml, lineage.yaml). The same rows are in the lake as dbt models `meta_system_landscape`,",
+        "`meta_capability_coverage` and `meta_value_stream_coverage`; the `registry-export` cron refreshes the lake",
+        "and this page daily.",
         "",
         f"**Totals:** {len(systems)} systems · {len(coverage)} capability domains · {landscape['flows']} inbound flows · "
         f"{landscape['assets']} catalog assets · {landscape['edges']} lineage edges.",
         f"**Platform coverage:** served {counts['served']} · partial {counts['partial']} · missing {counts['missing']}"
         f" · systems without a capability: {len(unmapped)}.",
+        f"**Value streams:** flowing {flow_counts['flowing']} · partial {flow_counts['partial']}"
+        f" · missing {flow_counts['missing']}.",
         "",
         "Platform coverage is mechanical: *missing* = no running system serves the domain; *partial* = systems run",
-        "but no automated inbound flow lands in them; *served* = both. It is not the business judgement in",
+        "but no automated inbound flow lands in them; *served* = both. A value-stream stage is *served* when at least",
+        "one of its systems runs; a stream *flows* when every stage is served. Neither is the business judgement in",
         "`docs/architecture/EOS-GAP-MAP.md`.",
         "",
         "## 1. Capability coverage",
@@ -149,7 +174,21 @@ def render(landscape: dict[str, Any]) -> str:
             f"{row['running_systems']} | {row['automated_flows']} | {row['consumers']} | "
             f"{row['platform_coverage']} | {_cell(listed)} |")
     lines += ["", "Bold = the domain is the system's primary one.", "",
-              "## 2. Systems by primary domain", ""]
+              "## 2. Value streams", "",
+              "| # | Value stream | Stages served | Flow | Broken steps |",
+              "|---|---|---|---|---|"]
+    for stream in streams:
+        lines.append(f"| {stream['number']} | {_cell(stream['name'])} | {stream['served_stages']}/{len(stream['stages'])} | "
+                     f"{stream['flow_status']} | {_cell(', '.join(stream['broken_stages']))} |")
+    lines.append("")
+    for stream in streams:
+        lines += [f"### {stream['number']}. {stream['name']}", "", "| Step | Stage | Systems | Served |", "|---|---|---|---|"]
+        for stage in stream["stages"]:
+            listed = ", ".join(f"`{sid}`" for sid in stage["systems"])
+            lines.append(f"| {stage['position']} | {_cell(stage['name'])} | {_cell(listed)} | "
+                         f"{'yes' if stage['served'] else '**no**'} |")
+        lines.append("")
+    lines += ["## 3. Systems by primary domain", ""]
     for row in coverage:
         members = sorted((s for s in systems if s["primary_domain"] == row["id"]), key=lambda s: s["id"])
         if not members:
@@ -165,17 +204,21 @@ def render(landscape: dict[str, Any]) -> str:
                 f"{_cell(also)} | {s['inbound_flows']} ({s['automated_flows']}) | {s['catalog_assets']} | "
                 f"{s['consumers']} |")
         lines.append("")
-    lines += ["## 3. Gaps", ""]
+    lines += ["## 4. Gaps", ""]
     gaps = [r for r in coverage if r["platform_coverage"] != "served"]
     for row in gaps:
         lines.append(f"- **{row['name']}** — {row['platform_coverage']} "
                      f"({row['running_systems']} running systems, {row['automated_flows']} automated flows).")
+    for stream in streams:
+        if stream["broken_stages"]:
+            lines.append(f"- **{stream['name']}** — broken step(s): {', '.join(stream['broken_stages'])}.")
     if unmapped:
         lines.append(f"- Systems without a capability domain: {', '.join(f'`{s}`' for s in unmapped)}.")
     if landscape["unregistered_destinations"]:
         lines.append("- Inbound flows land in systems missing from online-systems.yaml: "
                      + ", ".join(f"`{s}`" for s in landscape["unregistered_destinations"]) + ".")
-    if not gaps and not unmapped and not landscape["unregistered_destinations"]:
+    if not gaps and not unmapped and not landscape["unregistered_destinations"] \
+            and not any(stream["broken_stages"] for stream in streams):
         lines.append("- None.")
     return "\n".join(lines) + "\n"
 

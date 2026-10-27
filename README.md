@@ -48,8 +48,9 @@ for t in $(find infra/tests -name '*_test.py' | sort); do .venv/bin/python "$t" 
 ## Metadata ใน lake
 
 ต้นฉบับยังอยู่ใน Git: registry ใน `solo-empire/repository-catalog/registries` และ catalog/lineage ใน
-`architecture-docs/systems/ai-data/metadata-catalog`. Exporter อ่านสอง checkout นี้แล้วเขียน Bronze 6 dataset
-(`data_sources`, `systems`, `catalog_assets`, `lineage_edges`, `capability_domains`, `system_capabilities`) ผ่าน ingest ปกติ. ส่งเฉพาะโครงสร้าง ไม่ส่ง `notes`.
+`architecture-docs/systems/ai-data/metadata-catalog`. Exporter อ่านสอง checkout นี้แล้วเขียน Bronze 8 dataset
+(`data_sources`, `systems`, `catalog_assets`, `lineage_edges`, `capability_domains`, `system_capabilities`,
+`value_streams`, `value_stream_stages`) ผ่าน ingest ปกติ. ส่งเฉพาะโครงสร้าง ไม่ส่ง `notes`.
 batch อิงเนื้อหา รันซ้ำบน registry เดิมจะไม่เขียนอะไรใหม่.
 
 ```bash
@@ -66,9 +67,12 @@ cd infra/dbt && ../../.venv/bin/dbt build --profiles-dir . --select path:models/
 - `meta_system_landscape` — หนึ่งแถวต่อ system: host, EOS capability domain (primary ก่อน), inbound flow, asset และ consumer ที่ไปถึง
 - `meta_capability_coverage` — หนึ่งแถวต่อ EOS domain (15 ตัว จาก `business-capabilities.yaml`): จำนวน system, ที่รันอยู่,
   automated flow, consumer และ `platform_coverage` (missing = ไม่มี system รัน, partial = รันแต่ไม่มี automated flow, served = มีทั้งสอง)
+- `meta_value_stream_coverage` — หนึ่งแถวต่อ value stream (8 ตัว): จำนวน stage, stage ที่มี system รันอยู่, broken step และ `flow_status`
+  (flowing = ทุก stage มี system, partial, missing)
 
-หน้า Markdown ของ landscape เดียวกันนี้ render จากไฟล์ต้นทางชุดเดียวกัน (ไม่ต้องมี lake) แล้ว commit ไว้ที่
-`architecture-docs/operations/platform/SYSTEM-LANDSCAPE-GENERATED.md`. ผลลัพธ์ไม่มี timestamp จึง diff ได้ และ `--check` บอกว่าไฟล์เก่าหรือไม่:
+หน้า Markdown ของ landscape เดียวกันนี้ render จากไฟล์ต้นทางชุดเดียวกัน (ไม่ต้องมี lake) ไว้ที่
+`architecture-docs/operations/platform/SYSTEM-LANDSCAPE-GENERATED.md`. cron `registry-export` render หน้าใหม่ทุกรอบ และ commit เข้า
+architecture-docs `main` เองเมื่อเนื้อหาเปลี่ยน (ต้องมี `LANDSCAPE_COMMIT_TOKEN`; ถ้าไม่มีจะรายงาน `"landscape": "skipped"` แต่ไม่ fail). ผลลัพธ์ไม่มี timestamp จึง diff ได้ และ `--check` บอกว่าไฟล์เก่าหรือไม่:
 
 ```bash
 .venv/bin/python infra/scripts/data_lake/system_landscape.py \
@@ -97,6 +101,7 @@ architecture-docs ผ่าน GitHub API แล้ว export เข้า R2 la
 | `DATA_LAKE_CLOUD_WRITE_ENABLED` | `true` |
 | `DATA_LAKE_S3_ENDPOINT`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION=auto` | R2 key ของ bucket `solo-empire-portfolio` จาก Infisical `/job-data` |
 | `HEARTBEAT_TOKEN` | Infisical `/monitoring` |
+| `LANDSCAPE_COMMIT_TOKEN` | optional: fine-grained token, Contents: read and write บน architecture-docs เท่านั้น (commit หน้า landscape) |
 
 Deploy: CLI upload (`railway up` ของ `git archive`, `RAILWAY_DOCKERFILE_PATH=deploy/registry-export/Dockerfile`) แบบเดียวกับ
 sheet-summaries; push ขึ้น main ไม่ redeploy เอง. image build รัน dry run บน fixture ถ้าพังจะ build ไม่ผ่าน.

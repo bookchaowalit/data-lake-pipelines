@@ -41,6 +41,8 @@ DATASETS = (
     "lineage_edges",
     "capability_domains",
     "system_capabilities",
+    "value_streams",
+    "value_stream_stages",
 )
 DEFAULT_LAKE_URI = str(ROOT / "data" / "lake")
 CANDIDATE_MARKER = "not confirmed in use"
@@ -141,8 +143,32 @@ def _system_capabilities(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _value_streams(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Value streams and their ordered stages; a stage with no systems is a broken step."""
+    streams = _rows(path, "value_streams")
+    stages: list[dict[str, Any]] = []
+    for stream in streams:
+        stream_stages = stream.get("stages") or []
+        if not isinstance(stream_stages, list) or not stream_stages:
+            raise ValueError(f"{path}: value stream {stream['id']} needs at least one stage")
+        for position, stage in enumerate(stream_stages, start=1):
+            if not isinstance(stage, dict) or not isinstance(stage.get("systems"), list):
+                raise ValueError(f"{path}: value stream {stream['id']} stage {position} needs a systems list")
+            stages.append({
+                "id": f"{stream['id']}:{position}",
+                "value_stream_id": stream["id"],
+                "position": position,
+                "name": stage.get("name"),
+                "systems": list(stage["systems"]),
+            })
+    rows = [{"id": s["id"], "number": s.get("number"), "name": s.get("name"), "stage_count": len(s.get("stages") or [])}
+            for s in streams]
+    return rows, stages
+
+
 def load_records(registries: Path, catalog: Path) -> dict[str, list[dict[str, Any]]]:
     """Return the export rows per dataset; raises ValueError on a malformed source."""
+    value_streams, value_stream_stages = _value_streams(registries / "business-capabilities.yaml")
     return {
         "data_sources": [_data_source(row) for row in _rows(registries / "data-sources.yaml", "flows")],
         "systems": [_system(row) for row in _rows(registries / "online-systems.yaml", "systems")],
@@ -150,6 +176,8 @@ def load_records(registries: Path, catalog: Path) -> dict[str, list[dict[str, An
         "lineage_edges": [_edge(row) for row in _rows(catalog / "lineage.yaml", "edges")],
         "capability_domains": [_domain(row) for row in _rows(registries / "business-capabilities.yaml", "domains")],
         "system_capabilities": _system_capabilities(registries / "business-capabilities.yaml"),
+        "value_streams": value_streams,
+        "value_stream_stages": value_stream_stages,
     }
 
 
