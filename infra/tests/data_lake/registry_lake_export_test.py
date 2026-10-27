@@ -59,6 +59,25 @@ class LoadRecordsTests(unittest.TestCase):
             {"from_asset": "data-product.jobs", "to_asset": "consumer.portfolio-frontend"},
         )
 
+    def test_capability_rows(self):
+        domains = [row["id"] for row in self.records["capability_domains"]]
+        self.assertEqual(domains, ["market-intelligence", "offer-product", "data-knowledge"])
+        caps = {row["id"]: row for row in self.records["system_capabilities"]}
+        self.assertTrue(caps["book-job-data:market-intelligence"]["is_primary"])
+        self.assertEqual(caps["book-job-data:data-knowledge"]["rank"], 2)
+        self.assertFalse(caps["book-job-data:data-knowledge"]["is_primary"])
+
+    def test_empty_capability_list_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registries = Path(temp_dir)
+            for path in REGISTRIES.iterdir():
+                (registries / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            caps = registries / "business-capabilities.yaml"
+            caps.write_text(caps.read_text(encoding="utf-8").replace("data-lake: [data-knowledge]", "data-lake: []"),
+                            encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-empty list"):
+                load_records(registries, CATALOG)
+
     def test_no_free_text_notes_leave_the_registry(self):
         # notes may hold operator detail; only structure is exported
         for row in self.records["data_sources"]:

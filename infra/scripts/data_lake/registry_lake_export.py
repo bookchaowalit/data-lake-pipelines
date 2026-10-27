@@ -3,7 +3,8 @@
 
 Reads two checkouts that stay the source of truth (Git):
 
-* ``solo-empire`` ``repository-catalog/registries`` (data-sources.yaml, online-systems.yaml);
+* ``solo-empire`` ``repository-catalog/registries`` (data-sources.yaml, online-systems.yaml,
+  business-capabilities.yaml);
 * ``architecture-docs`` ``systems/ai-data/metadata-catalog`` (catalog.yaml, lineage.yaml).
 
 Each becomes one Bronze dataset under ``domain=metadata`` through the normal ingest
@@ -33,7 +34,14 @@ from data_lake.ingest import ingest_records  # noqa: E402
 
 SOURCE = "solo-empire-registry"
 DOMAIN = "metadata"
-DATASETS = ("data_sources", "systems", "catalog_assets", "lineage_edges")
+DATASETS = (
+    "data_sources",
+    "systems",
+    "catalog_assets",
+    "lineage_edges",
+    "capability_domains",
+    "system_capabilities",
+)
 DEFAULT_LAKE_URI = str(ROOT / "data" / "lake")
 CANDIDATE_MARKER = "not confirmed in use"
 
@@ -109,6 +117,30 @@ def _edge(edge: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _domain(domain: dict[str, Any]) -> dict[str, Any]:
+    return {key: domain.get(key) for key in ("id", "number", "name")}
+
+
+def _system_capabilities(path: Path) -> list[dict[str, Any]]:
+    """One row per (system, domain); rank 1 is the system's primary domain."""
+    mapping = _load_yaml(path).get("systems") or {}
+    if not isinstance(mapping, dict):
+        raise ValueError(f"{path}: systems must map system id -> list of domain ids")
+    rows: list[dict[str, Any]] = []
+    for system_id, domains in mapping.items():
+        if not isinstance(domains, list) or not domains:
+            raise ValueError(f"{path}: systems.{system_id} needs a non-empty list of domains")
+        for rank, domain_id in enumerate(domains, start=1):
+            rows.append({
+                "id": f"{system_id}:{domain_id}",
+                "system_id": system_id,
+                "domain_id": domain_id,
+                "rank": rank,
+                "is_primary": rank == 1,
+            })
+    return rows
+
+
 def load_records(registries: Path, catalog: Path) -> dict[str, list[dict[str, Any]]]:
     """Return the export rows per dataset; raises ValueError on a malformed source."""
     return {
@@ -116,6 +148,8 @@ def load_records(registries: Path, catalog: Path) -> dict[str, list[dict[str, An
         "systems": [_system(row) for row in _rows(registries / "online-systems.yaml", "systems")],
         "catalog_assets": [_asset(row) for row in _rows(catalog / "catalog.yaml", "assets")],
         "lineage_edges": [_edge(row) for row in _rows(catalog / "lineage.yaml", "edges")],
+        "capability_domains": [_domain(row) for row in _rows(registries / "business-capabilities.yaml", "domains")],
+        "system_capabilities": _system_capabilities(registries / "business-capabilities.yaml"),
     }
 
 

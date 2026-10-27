@@ -59,3 +59,57 @@ models:
     columns:
       - name: source_id
         tests: [unique, not_null]
+  - name: stg_meta_capability_domains
+    description: The 15 EOS capability domains from solo-empire business-capabilities.yaml.
+    columns:
+      - name: domain_id
+        tests: [unique, not_null]
+      - name: domain_number
+        tests: [unique, not_null]
+  - name: stg_meta_system_capabilities
+    description: >
+      System to EOS capability domain mapping from business-capabilities.yaml;
+      domain_rank 1 (is_primary) is the system's primary domain.
+    columns:
+      - name: system_capability_id
+        tests: [unique, not_null]
+      - name: system_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_meta_systems')
+                field: system_id
+      - name: domain_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_meta_capability_domains')
+                field: domain_id
+  - name: meta_system_landscape
+    description: >
+      Generated system landscape: one row per system with hosting, EOS capability
+      domains (primary first), inbound flows, reachable catalog assets and consumers.
+    columns:
+      - name: system_id
+        tests: [unique, not_null]
+      - name: capability_mapped
+        description: false when a system has no business capability (the registry gate should prevent it).
+        tests:
+          - accepted_values:
+              arguments:
+                values: [true]
+  - name: meta_capability_coverage
+    description: >
+      One row per EOS capability domain with serving systems, running systems,
+      automated flows, consumers and a mechanical platform_coverage label.
+    columns:
+      - name: domain_id
+        tests: [unique, not_null]
+      - name: platform_coverage
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["missing", "partial", "served"]

@@ -1,0 +1,9 @@
+# Synthetic fixture: shape of solo-empire repository-catalog/registries/business-capabilities.yaml
+schema_version: fixture
+domains:
+  - {id: market-intelligence, number: 1, name: Market Intelligence}
+  - {id: offer-product, number: 2, name: Offer & Product}
+  - {id: data-knowledge, number: 3, name: Data & Knowledge}
+systems:
+  book-job-data: [market-intelligence, data-knowledge]
+  data-lake: [data-knowledge]
