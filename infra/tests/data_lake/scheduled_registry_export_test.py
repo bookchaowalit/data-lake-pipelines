@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -83,6 +85,30 @@ class ScheduledRegistryExportTests(unittest.TestCase):
             argv=["--dry-run", "--registries", str(FIXTURE_DIRS["registries"]), "--catalog", str(FIXTURE_DIRS["catalog"])],
         )
         self.assertEqual(code, 0)
+
+
+class ImageFileSetTests(unittest.TestCase):
+    def test_dry_run_works_with_only_the_files_the_dockerfile_copies(self):
+        dockerfile = ROOT / "deploy" / "registry-export" / "Dockerfile"
+        copies = [line.split()[1:3] for line in dockerfile.read_text(encoding="utf-8").splitlines()
+                  if line.startswith("COPY infra/scripts/")]
+        self.assertTrue(copies)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = Path(temp_dir)
+            for source, target in copies:
+                destination = app / target
+                if (ROOT / source).is_dir():
+                    shutil.copytree(ROOT / source, destination)
+                else:
+                    destination.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(ROOT / source, destination)
+            result = subprocess.run(
+                [sys.executable, str(app / "infra/scripts/data_lake/scheduled_registry_export.py"), "--dry-run",
+                 "--registries", str(FIXTURE_DIRS["registries"]), "--catalog", str(FIXTURE_DIRS["catalog"])],
+                capture_output=True, text=True, cwd=temp_dir,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr[-1000:])
+            self.assertIn('"status": "dry-run"', result.stdout)
 
 
 if __name__ == "__main__":

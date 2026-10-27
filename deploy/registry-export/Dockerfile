@@ -15,6 +15,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project --extra sentry
 COPY infra/scripts/data_lake infra/scripts/data_lake
+COPY infra/scripts/utils/_env.py infra/scripts/utils/
 COPY infra/tests/fixtures/registry_lake_export /app/smoke/
 
 # Build-time smoke test: a dry run on the fixture directories (no GitHub, no lake writes).
