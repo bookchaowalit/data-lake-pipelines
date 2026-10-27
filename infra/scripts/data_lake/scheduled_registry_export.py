@@ -19,11 +19,11 @@ import json
 import os
 import sys
 import tempfile
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+
+import httpx
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = ROOT / "infra" / "scripts"
@@ -40,7 +40,7 @@ SOURCES = {
     "catalog": ("architecture-docs", "systems/ai-data/metadata-catalog", ("catalog.yaml", "lineage.yaml")),
 }
 HEARTBEAT_URL = "https://solo-empire-monitor.bookchaowalit.workers.dev/heartbeat/registry-export"
-# Cloudflare answers 403 to the default Python-urllib User-Agent on workers.dev.
+# Cloudflare answers 403 to default client User-Agents on workers.dev.
 USER_AGENT = "registry-export/1"
 
 Fetch = Callable[[str, str, str, str], bytes]
@@ -51,35 +51,30 @@ class FetchError(RuntimeError):
 
 
 def github_fetch(repo: str, path: str, ref: str, token: str) -> bytes:
-    url = f"https://api.github.com/repos/{OWNER}/{repo}/contents/{urllib.parse.quote(path)}?ref={urllib.parse.quote(ref)}"
-    request = urllib.request.Request(url, headers={
+    url = f"https://api.github.com/repos/{OWNER}/{repo}/contents/{urllib.parse.quote(path)}"
+    headers = {
         "Accept": "application/vnd.github.raw",
         "Authorization": f"Bearer {token}",
         "User-Agent": USER_AGENT,
         "X-GitHub-Api-Version": "2022-11-28",
-    })
+    }
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return response.read()
-    except urllib.error.HTTPError as error:
-        raise FetchError(f"{repo}:{path} HTTP {error.code}") from None
-    except urllib.error.URLError as error:
-        raise FetchError(f"{repo}:{path} {error.reason}") from None
+        response = httpx.get(url, params={"ref": ref}, headers=headers, timeout=30)
+    except httpx.HTTPError as error:
+        raise FetchError(f"{repo}:{path} {type(error).__name__}") from None
+    if response.status_code != 200:
+        raise FetchError(f"{repo}:{path} HTTP {response.status_code}")
+    return response.content
 
 
 def post_heartbeat(ok: bool) -> None:
     token = os.environ.get("HEARTBEAT_TOKEN", "").strip()
     if not token:
         return
-    body = json.dumps({"ok": ok, "failed": [] if ok else ["registry-export"]}).encode()
-    request = urllib.request.Request(HEARTBEAT_URL, data=body, method="POST", headers={
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "User-Agent": USER_AGENT,
-    })
     try:
-        urllib.request.urlopen(request, timeout=15).close()
-    except (urllib.error.URLError, OSError):
+        httpx.post(HEARTBEAT_URL, timeout=15, json={"ok": ok, "failed": [] if ok else ["registry-export"]},
+                   headers={"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT})
+    except httpx.HTTPError:
         print(json.dumps({"event": "heartbeat", "status": "error"}))
 
 
