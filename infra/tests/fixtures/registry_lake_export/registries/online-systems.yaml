@@ -1,0 +1,7 @@
+# Synthetic fixture: shape of solo-empire repository-catalog/registries/online-systems.yaml
+schema_version: fixture
+systems:
+  - {id: book-job-data, name: Job data pipeline, kind: service, status: live, phase: 3, repo: {name: bookchaowalit/book-job-data, path: x}, host: {provider: railway, mode: serverless}, notes: fixture}
+  - {id: data-lake, name: Lake pipelines, kind: pipeline, status: exception, phase: none, repo: {name: bookchaowalit/data-lake-pipelines, path: y}, host: {provider: local, mode: local}}
+mcp_servers:
+  - {id: fixture-mcp, name: Fixture MCP}

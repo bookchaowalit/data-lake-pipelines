@@ -44,6 +44,60 @@ def resolve_dbt_bin() -> Path | None:
 
 DBT_BIN = resolve_dbt_bin()
 
+sys.path.insert(0, str(ROOT / "infra" / "scripts"))
+REGISTRY_FIXTURES = ROOT / "infra" / "tests" / "fixtures" / "registry_lake_export"
+METADATA_MODELS = (
+    "stg_meta_data_sources",
+    "stg_meta_systems",
+    "stg_meta_catalog_assets",
+    "stg_meta_lineage_edges",
+    "meta_lake_datasets",
+    "meta_source_lineage",
+    "meta_source_coverage",
+)
+
+
+def export_registry_fixture(lake_root: Path) -> None:
+    from data_lake.registry_lake_export import export
+
+    export(
+        REGISTRY_FIXTURES / "registries",
+        REGISTRY_FIXTURES / "metadata-catalog",
+        lake_root.as_uri(),
+        revisions={"registry": "fixture"},
+    )
+
+
+def check_metadata_outputs(target_dir: Path) -> list[str]:
+    """Problems with the metadata models' results and the generated dbt docs."""
+    import duckdb
+
+    problems: list[str] = []
+    manifest = json.loads((target_dir / "manifest.json").read_text(encoding="utf-8"))
+    built = {node["name"] for node in manifest["nodes"].values() if node["resource_type"] == "model"}
+    problems += [f"model {name} missing from dbt docs manifest" for name in METADATA_MODELS if name not in built]
+    if not (target_dir / "catalog.json").is_file():
+        problems.append("dbt docs generate wrote no catalog.json")
+
+    with duckdb.connect(str(DBT_PROJECT_DIR / "local.duckdb"), read_only=True) as con:
+        rows = con.execute(
+            "select source_id, automation, system_registered, catalog_assets, consumers "
+            "from meta_source_coverage order by source_id"
+        ).fetchall()
+        expected = [
+            ("bank-accounts", "not-captured", False, 0, 0),
+            ("health-checkin", "automated", False, 0, 0),
+            ("job-capture", "automated", True, 1, 1),
+        ]
+        if rows != expected:
+            problems.append(f"meta_source_coverage: expected {expected}, got {rows}")
+        datasets = con.execute(
+            "select count(*) from meta_lake_datasets where domain = 'metadata'"
+        ).fetchone()
+        if datasets is None or datasets[0] != 4:
+            problems.append(f"meta_lake_datasets: expected 4 metadata datasets, got {datasets}")
+    return problems
+
 
 def build_synthetic_bronze(root: Path) -> None:
     try:
@@ -150,6 +204,7 @@ def run() -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         bronze_root = Path(tmp) / "bronze"
         build_synthetic_bronze(bronze_root)
+        export_registry_fixture(Path(tmp))
         target_dir = Path(tmp) / "target"
         # dbt-duckdb does not create the target directory itself before
         # opening the database file there.
@@ -189,7 +244,43 @@ def run() -> bool:
             print("FAIL: dbt reported one or more model/test errors")
             return False
 
-        print("PASS: dbt build and quality tests succeeded against a synthetic Bronze fixture")
+        docs = subprocess.run(
+            [
+                str(DBT_BIN),
+                "docs",
+                "generate",
+                "--profiles-dir",
+                str(DBT_PROJECT_DIR),
+                "--project-dir",
+                str(DBT_PROJECT_DIR),
+                "--target-path",
+                str(target_dir),
+                "--vars",
+                json.dumps(
+                    {
+                        "bronze_root": str(bronze_root),
+                        "bronze_manifest_root": str(
+                            Path(tmp) / "control" / "manifests"
+                        ),
+                    }
+                ),
+            ],
+            cwd=str(DBT_PROJECT_DIR),
+            capture_output=True,
+            text=True,
+        )
+        if docs.returncode != 0:
+            print(docs.stdout[-2000:])
+            print("FAIL: dbt docs generate failed")
+            return False
+
+        problems = check_metadata_outputs(target_dir)
+        for problem in problems:
+            print(f"FAIL: {problem}")
+        if problems:
+            return False
+
+        print("PASS: dbt build, quality tests, metadata models and dbt docs succeeded against synthetic fixtures")
         return True
 
 

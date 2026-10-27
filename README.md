@@ -9,7 +9,8 @@ repo นี้คงโครงสร้าง `infra/...` เดิมไว�
 - `infra/scripts/{discovery,opportunities}/`, `infra/scripts/sync/{sync_brave_bookmarks,brave_bookmark_workflow,organize_brave_bookmarks,telegram_channels,telegram_personal}.py`, `infra/scripts/cli/diary-intake-cli.py`
 - `infra/scripts/sync/sheet_summaries.py` — สรุปภาษาไทยรายวันของชีต "Chief Findings Warehouse" ผ่าน AI gateway (Railway cron `sheet-summaries`, 19:00 เวลาไทย) ดู [`docs/sheet-summaries.md`](docs/sheet-summaries.md)
 - `infra/scripts/utils/` — สำเนา vendored ของ utils ที่โค้ดข้างบนต้องใช้ (`_env`, `cell_store`, `task_store`, `secret_resolver`, `job_client`, `data_product_contract_guard`, …)
-- `infra/dbt/` — dbt projection (`dbt_lake_test.py`)
+- `infra/dbt/` — dbt projection (`dbt_lake_test.py`) รวม metadata models ใน `models/metadata/` (`meta_source_coverage`, `meta_source_lineage`, `meta_lake_datasets`)
+- `infra/scripts/data_lake/registry_lake_export.py` — ส่ง registry ของ solo-empire (data-sources, online-systems) และ metadata catalog ของ architecture-docs (catalog, lineage) เข้า lake เป็น Bronze `domain=metadata` ดู [Metadata ใน lake](#metadata-ใน-lake)
 - `infra/tests/` — test ทั้งหมดของโค้ดข้างต้น
 - ผลิตภัณฑ์ข้อมูล `job.v1` (ผู้บริโภคคือ `book-job-data` และ `crm` job-radar) — `book-job-data` ยังเป็น repo ของตัวเอง; ที่นี่มีเฉพาะ adapter/readiness/e2e
 
@@ -43,3 +44,25 @@ for t in $(find infra/tests -name '*_test.py' | sort); do .venv/bin/python "$t" 
 
 ข้อจำกัดที่ทราบ: `news_scheduler_contract_test` สอง test ที่รัน `book-news-scraping/setup_cron.sh` จะ skip เพราะสคริปต์นั้นหา
 `run_news_capture.py` โดยไล่ขึ้นไปตาม ancestor ของตัวเอง (ตอนนี้ runner อยู่ใน repo นี้ ต้องแก้ฝั่ง book-news-scraping ให้รับ root จาก env).
+
+## Metadata ใน lake
+
+ต้นฉบับยังอยู่ใน Git: registry ใน `solo-empire/repository-catalog/registries` และ catalog/lineage ใน
+`architecture-docs/systems/ai-data/metadata-catalog`. Exporter อ่านสอง checkout นี้แล้วเขียน Bronze 4 dataset
+(`data_sources`, `systems`, `catalog_assets`, `lineage_edges`) ผ่าน ingest ปกติ. ส่งเฉพาะโครงสร้าง ไม่ส่ง `notes`.
+batch อิงเนื้อหา รันซ้ำบน registry เดิมจะไม่เขียนอะไรใหม่.
+
+```bash
+.venv/bin/python infra/scripts/data_lake/registry_lake_export.py \
+  --registries ~/solo-empire/repository-catalog/registries \
+  --catalog <architecture-docs>/systems/ai-data/metadata-catalog \
+  --revision registry=$(git -C ~/solo-empire rev-parse --short HEAD)
+cd infra/dbt && ../../.venv/bin/dbt build --profiles-dir . --select path:models/metadata
+../../.venv/bin/dbt docs generate --profiles-dir .   # lineage ของทุก model ใน target/
+```
+
+- `meta_source_coverage` — หนึ่งแถวต่อ flow: automation, system และ host, จำนวน catalog asset และ consumer ที่ไปถึง
+- `meta_source_lineage` — asset ทุกตัวที่ flow ไปถึง (จาก `catalog_assets` ของ flow แล้วตาม lineage edges)
+- `meta_lake_datasets` — dataset ที่ lake มีจริงตาม manifest
+
+metadata models อ่าน batch ล่าสุดเท่านั้น จึงต้อง export อย่างน้อยหนึ่งครั้งก่อน `dbt build`.
