@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "infra" / "scripts"))
 
 from data_lake import scheduled_registry_export as job  # noqa: E402
+from data_lake.registry_lake_export import DATASETS  # noqa: E402
 
 FIXTURES = ROOT / "infra" / "tests" / "fixtures" / "registry_lake_export"
 FIXTURE_DIRS = {"registries": FIXTURES / "registries", "catalog": FIXTURES / "metadata-catalog"}
@@ -43,9 +44,9 @@ class ScheduledRegistryExportTests(unittest.TestCase):
             code = self.run_job({"GITHUB_TOKEN": "t", "SOLO_EMPIRE_DATA_LAKE_URI": lake.as_uri()})
             self.assertEqual(code, 0)
             self.assertEqual(self.beats, [True])
-            self.assertEqual(len(list((lake / "control" / "manifests").rglob("*.json"))), 4)
+            self.assertEqual(len(list((lake / "control" / "manifests").rglob("*.json"))), len(DATASETS))
 
-    def test_fetches_only_the_four_source_files(self):
+    def test_fetches_only_the_five_source_files(self):
         seen: list[tuple[str, str]] = []
 
         def recording_fetch(repo, path, ref, token):
@@ -56,6 +57,7 @@ class ScheduledRegistryExportTests(unittest.TestCase):
         self.assertEqual(sorted(seen), [
             ("architecture-docs", "systems/ai-data/metadata-catalog/catalog.yaml"),
             ("architecture-docs", "systems/ai-data/metadata-catalog/lineage.yaml"),
+            ("solo-empire", "repository-catalog/registries/business-capabilities.yaml"),
             ("solo-empire", "repository-catalog/registries/data-sources.yaml"),
             ("solo-empire", "repository-catalog/registries/online-systems.yaml"),
         ])

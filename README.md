@@ -48,8 +48,8 @@ for t in $(find infra/tests -name '*_test.py' | sort); do .venv/bin/python "$t" 
 ## Metadata ใน lake
 
 ต้นฉบับยังอยู่ใน Git: registry ใน `solo-empire/repository-catalog/registries` และ catalog/lineage ใน
-`architecture-docs/systems/ai-data/metadata-catalog`. Exporter อ่านสอง checkout นี้แล้วเขียน Bronze 4 dataset
-(`data_sources`, `systems`, `catalog_assets`, `lineage_edges`) ผ่าน ingest ปกติ. ส่งเฉพาะโครงสร้าง ไม่ส่ง `notes`.
+`architecture-docs/systems/ai-data/metadata-catalog`. Exporter อ่านสอง checkout นี้แล้วเขียน Bronze 6 dataset
+(`data_sources`, `systems`, `catalog_assets`, `lineage_edges`, `capability_domains`, `system_capabilities`) ผ่าน ingest ปกติ. ส่งเฉพาะโครงสร้าง ไม่ส่ง `notes`.
 batch อิงเนื้อหา รันซ้ำบน registry เดิมจะไม่เขียนอะไรใหม่.
 
 ```bash
@@ -63,13 +63,29 @@ cd infra/dbt && ../../.venv/bin/dbt build --profiles-dir . --select path:models/
 - `meta_source_coverage` — หนึ่งแถวต่อ flow: automation, system และ host, จำนวน catalog asset และ consumer ที่ไปถึง
 - `meta_source_lineage` — asset ทุกตัวที่ flow ไปถึง (จาก `catalog_assets` ของ flow แล้วตาม lineage edges)
 - `meta_lake_datasets` — dataset ที่ lake มีจริงตาม manifest
+- `meta_system_landscape` — หนึ่งแถวต่อ system: host, EOS capability domain (primary ก่อน), inbound flow, asset และ consumer ที่ไปถึง
+- `meta_capability_coverage` — หนึ่งแถวต่อ EOS domain (15 ตัว จาก `business-capabilities.yaml`): จำนวน system, ที่รันอยู่,
+  automated flow, consumer และ `platform_coverage` (missing = ไม่มี system รัน, partial = รันแต่ไม่มี automated flow, served = มีทั้งสอง)
+
+หน้า Markdown ของ landscape เดียวกันนี้ render จากไฟล์ต้นทางชุดเดียวกัน (ไม่ต้องมี lake) แล้ว commit ไว้ที่
+`architecture-docs/operations/platform/SYSTEM-LANDSCAPE-GENERATED.md`. ผลลัพธ์ไม่มี timestamp จึง diff ได้ และ `--check` บอกว่าไฟล์เก่าหรือไม่:
+
+```bash
+.venv/bin/python infra/scripts/data_lake/system_landscape.py \
+  --registries ~/solo-empire/repository-catalog/registries \
+  --catalog <architecture-docs>/systems/ai-data/metadata-catalog \
+  --output <architecture-docs>/operations/platform/SYSTEM-LANDSCAPE-GENERATED.md   # เพิ่ม --check เพื่อตรวจอย่างเดียว
+```
+
+Gate: solo-empire `registry_check.py` (guard `business-capabilities`) fail ถ้ามี system ใน online-systems.yaml ที่ไม่ได้ map domain,
+และ dbt test `meta_system_landscape.capability_mapped` fail ถ้าข้อมูลใน lake มี system ที่ไม่มี domain.
 
 metadata models อ่าน batch ล่าสุดเท่านั้น จึงต้อง export อย่างน้อยหนึ่งครั้งก่อน `dbt build`.
 
 ### Export อัตโนมัติ (Railway cron `registry-export`)
 
 Railway project `data-schedules`, service `registry-export`, cron `40 23 * * *` UTC (06:40 เวลาไทย), restart NEVER.
-แต่ละรอบรัน `infra/scripts/data_lake/scheduled_registry_export.py`: ดึงไฟล์ต้นทาง 4 ไฟล์จาก `main` ของ solo-empire และ
+แต่ละรอบรัน `infra/scripts/data_lake/scheduled_registry_export.py`: ดึงไฟล์ต้นทาง 5 ไฟล์จาก `main` ของ solo-empire และ
 architecture-docs ผ่าน GitHub API แล้ว export เข้า R2 lake เดียวกับ news-capture (เขียนแค่ `bronze/domain=metadata`,
 `landing/source=solo-empire-registry`, `control/*/source=solo-empire-registry`) พิมพ์แค่จำนวนแถว และส่ง heartbeat `registry-export`
 ไปที่ uptime Worker (แจ้งเตือนถ้าเกิน 26 ชม. หรือรอบที่ล้มเหลว)

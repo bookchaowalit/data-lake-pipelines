@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hosted run of registry_lake_export (Railway cron `registry-export` in `data-schedules`).
 
-Fetches only the four source files from GitHub (`main` of the private solo-empire and
+Fetches only the five source files from GitHub (`main` of the private solo-empire and
 architecture-docs repositories) with a read-only token, writes them to a temporary
 directory and exports them to SOLO_EMPIRE_DATA_LAKE_URI. Prints dataset counts only,
 reports a failed run to Sentry (opt-in) and posts the `registry-export` heartbeat to the
@@ -36,7 +36,7 @@ from data_lake.registry_lake_export import export  # noqa: E402
 OWNER = "bookchaowalit"
 # name -> (repository, directory, files); names match the export() arguments
 SOURCES = {
-    "registries": ("solo-empire", "repository-catalog/registries", ("data-sources.yaml", "online-systems.yaml")),
+    "registries": ("solo-empire", "repository-catalog/registries", ("data-sources.yaml", "online-systems.yaml", "business-capabilities.yaml")),
     "catalog": ("architecture-docs", "systems/ai-data/metadata-catalog", ("catalog.yaml", "lineage.yaml")),
 }
 HEARTBEAT_URL = "https://solo-empire-monitor.bookchaowalit.workers.dev/heartbeat/registry-export"

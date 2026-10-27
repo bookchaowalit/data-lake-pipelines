@@ -54,6 +54,10 @@ METADATA_MODELS = (
     "meta_lake_datasets",
     "meta_source_lineage",
     "meta_source_coverage",
+    "stg_meta_capability_domains",
+    "stg_meta_system_capabilities",
+    "meta_system_landscape",
+    "meta_capability_coverage",
 )
 
 
@@ -93,8 +97,29 @@ def check_metadata_outputs(target_dir: Path) -> list[str]:
         datasets = con.execute(
             "select count(*) from meta_lake_datasets where domain = 'metadata'"
         ).fetchone()
-        if datasets is None or datasets[0] != 4:
-            problems.append(f"meta_lake_datasets: expected 4 metadata datasets, got {datasets}")
+        if datasets is None or datasets[0] != 6:
+            problems.append(f"meta_lake_datasets: expected 6 metadata datasets, got {datasets}")
+        landscape = con.execute(
+            "select system_id, primary_domain, domains, automated_flows, catalog_assets, consumers "
+            "from meta_system_landscape order by system_id"
+        ).fetchall()
+        expected_landscape = [
+            ("book-job-data", "market-intelligence", ["market-intelligence", "data-knowledge"], 1, 2, 1),
+            ("data-lake", "data-knowledge", ["data-knowledge"], 0, 0, 0),
+        ]
+        if landscape != expected_landscape:
+            problems.append(f"meta_system_landscape: expected {expected_landscape}, got {landscape}")
+        coverage = con.execute(
+            "select domain_id, systems, running_systems, platform_coverage "
+            "from meta_capability_coverage order by domain_number"
+        ).fetchall()
+        expected_coverage = [
+            ("market-intelligence", 1, 1, "served"),
+            ("offer-product", 0, 0, "missing"),
+            ("data-knowledge", 2, 2, "served"),
+        ]
+        if coverage != expected_coverage:
+            problems.append(f"meta_capability_coverage: expected {expected_coverage}, got {coverage}")
     return problems
 
 
