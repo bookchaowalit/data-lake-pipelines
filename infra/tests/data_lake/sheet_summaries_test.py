@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acceptance tests A1-A14 for the daily sheet summaries (docs/specs/sheet-summaries.md).
+"""Acceptance tests A1-A15 for the daily sheet summaries (docs/specs/sheet-summaries.md).
 
 The sheet is the in-memory ``MemorySheets``; the gateway is a stateful fake served through
 httpx.MockTransport behind the real ``GatewayClient``. Rows, handles and links are fake test data.
@@ -26,6 +26,8 @@ sys.path.insert(0, str(ROOT / "infra" / "scripts"))
 from sync.sheet_summaries import (  # noqa: E402
     LATEST_TAB,
     MAX_BATCHES,
+    MAX_SEEN,
+    MAX_WINDOW_CHARS,
     MERGE_PROMPT_VERSION,
     SHORT_NOTE,
     OUTPUT_HEADER,
@@ -33,12 +35,18 @@ from sync.sheet_summaries import (  # noqa: E402
     DenylistError,
     GatewayClient,
     MemorySheets,
+    Watermark,
     _priority,
     _service_account,
     google_access_token,
+    format_window,
     link_source,
     load_denylist,
+    parse_rows,
+    parse_window,
+    row_hash,
     run,
+    select_new_rows,
     select_tabs,
 )
 
@@ -51,8 +59,8 @@ X_HEADER = ["collected_at", "requesting_chief", "watch_type", "watch_value", "po
 
 
 def x_row(i: int, *, score: int = 1, top: str = "", text: str = "โพสต์ทดสอบ",
-          chief: str = "Chief Property") -> list[str]:
-    return ["2026-10-26T10:30:00Z", chief, "keyword", "คอนโด", f"9{i:04d}",
+          chief: str = "Chief Property", at: str = "2026-10-26T10:30:00Z") -> list[str]:
+    return [at, chief, "keyword", "คอนโด", f"9{i:04d}",
             f"https://x.com/fake_user/status/9{i:04d}", "@fake_user", "2026-10-26T09:00:00Z",
             f"{text} {i}", "1", "0", "0", "10", "property", "q1", str(score), top]
 
@@ -150,6 +158,12 @@ def output_rows(sheets: MemorySheets) -> list[dict[str, str]]:
 DENYLIST = ("OakClientCo", "freelance-client-x")
 
 
+def row_range(window: str) -> str:
+    """The informational ``after_row;to_row`` prefix of a window cell."""
+
+    return ";".join(window.split(";")[:2])
+
+
 def quiet_run(*args: Any, **kwargs: Any) -> Any:
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         return run(*args, **kwargs)
@@ -194,7 +208,7 @@ class WatermarkTests(unittest.TestCase):
         self.assertEqual(len(fake.generate_bodies), first_calls)
         latest = output_rows(sheets)[-2:]
         self.assertEqual({row["status"] for row in latest}, {"no_change"})
-        self.assertEqual({row["window"] for row in latest if row["tab"] == "X Feed"}, {"after_row=5;to_row=5"})
+        self.assertEqual({row_range(row["window"]) for row in latest if row["tab"] == "X Feed"}, {"after_row=5;to_row=5"})
 
     def test_only_new_rows_are_sent(self) -> None:
         sheets = sheet()
@@ -207,7 +221,7 @@ class WatermarkTests(unittest.TestCase):
         self.assertIn("status/90077", prompt)
         self.assertNotIn("status/90001", prompt)
         x_rows = [row for row in output_rows(sheets) if row["tab"] == "X Feed"]
-        self.assertEqual(x_rows[-1]["window"], "after_row=5;to_row=6")
+        self.assertEqual(row_range(x_rows[-1]["window"]), "after_row=5;to_row=6")
         self.assertEqual(x_rows[-1]["rows_considered"], "1")
 
     def test_source_tabs_are_never_written(self) -> None:
@@ -437,7 +451,7 @@ class CapTests(unittest.TestCase):
             self.assertLessEqual(estimated + body["max_output_tokens"], 4096)
         x_row_out = [r for r in output_rows(sheets) if r["tab"] == "X Feed"][0]
         self.assertLess(int(x_row_out["rows_considered"]), 80)
-        self.assertEqual(x_row_out["window"], "after_row=1;to_row=81")
+        self.assertEqual(row_range(x_row_out["window"]), "after_row=1;to_row=81")
 
     def test_first_run_uses_last_seven_days(self) -> None:
         old = ["2026-10-01", "เก่า", "เก่ามาก", "https://example.test/old", ""]
@@ -484,7 +498,7 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], "ok")
         self.assertEqual(rows[0]["rows_considered"], "200")
-        self.assertEqual(rows[0]["window"], "after_row=1;to_row=201")
+        self.assertEqual(row_range(rows[0]["window"]), "after_row=1;to_row=201")
         calls = len(batches) + 1
         self.assertEqual(rows[0]["tokens_in"], str(1200 * calls))
         self.assertEqual(rows[0]["cost_usd"], f"{0.00027 * calls:.6f}")
@@ -515,7 +529,7 @@ class BatchTests(unittest.TestCase):
         self.assertGreaterEqual(len(merges), 1)
         row = [r for r in output_rows(sheets) if r["tab"] == "X Feed"][0]
         self.assertLess(int(row["rows_considered"]), 200)
-        self.assertEqual(row["window"], "after_row=1;to_row=201")
+        self.assertEqual(row_range(row["window"]), "after_row=1;to_row=201")
 
     def test_answers_too_large_for_one_merge_are_merged_in_rounds(self) -> None:  # A10
         sheets = long_x_feed(200)
@@ -606,6 +620,296 @@ class BatchTests(unittest.TestCase):
         quiet_run(sheet(), client(fake), DENYLIST, now=NOW)
         self.assertTrue(all(not b["messages"][0]["content"].endswith(SHORT_NOTE) for b in fake.generate_bodies))
         self.assertTrue(all(b["prompt_version"] != MERGE_PROMPT_VERSION for b in fake.generate_bodies))
+
+
+CHIEF_HEADER = ["Finding ID", "Date Found", "Date Logged", "Source Chief", "Source Bot", "Category", "Title",
+                "Summary", "Key Numbers", "Link", "Confidence", "Status", "Outcome", "Tags", "Dedup Key", "Notes"]
+DATASETS_HEADER = ["Dataset Name", "Owner Bot", "Link", "Refresh Schedule", "Description", "Notes", "Analyst"]
+LEGACY_AT = "2026-10-26T19:01:00+07:00"
+
+
+def chief_row(i: int, logged: str, *, found: str | None = None, summary: str = "สรุปผลการค้นพบ") -> list[str]:
+    return [f"F-{i}", found or logged, logged, "Chief Property", "bot", "property", f"ผลการค้นพบ {i}",
+            f"{summary} {i}", "", f"https://example.test/f/{i}", "high", "new", "", "", f"k{i}", ""]
+
+
+def dataset_row(i: int, notes: str = "") -> list[str]:
+    return [f"dataset {i}", "bot", f"https://example.test/ds/{i}", "daily", "คำอธิบาย", notes, "Chief Finance"]
+
+
+def history(tab: str, window: str, *, summary_date: str = LEGACY_AT, status: str = "ok") -> list[list[str]]:
+    record = dict.fromkeys(OUTPUT_HEADER, "") | {"tab": tab, "summary_date": summary_date, "window": window,
+                                                  "status": status}
+    return [OUTPUT_HEADER, [record[name] for name in OUTPUT_HEADER]]
+
+
+def cursor_sheet(**tabs: list[list[str]]) -> MemorySheets:
+    """Only the tabs given (plus an empty Chief Property, so the owners list is not empty)."""
+
+    return MemorySheets({"Chief Property": [CHIEF_HEADER], **tabs})
+
+
+def sent(fake: FakeGateway, pattern: str, tab: str) -> set[str]:
+    """Every match of ``pattern`` in the raw-row prompts (not merges) sent for ``tab``."""
+
+    prompts = [b["messages"][1]["content"] for b in fake.generate_bodies
+               if b["prompt_version"] != MERGE_PROMPT_VERSION and f"Tab: {tab}\n" in b["messages"][1]["content"]]
+    return set(re.findall(pattern, "\n".join(prompts)))
+
+
+def post_ids(fake: FakeGateway) -> set[str]:
+    return sent(fake, r'"post_id": "(\d+)"', "X Feed")
+
+
+def ids(numbers: range | list[int]) -> set[str]:
+    return {f"9{i:04d}" for i in numbers}
+
+
+def latest_row(sheets: MemorySheets, tab: str) -> dict[str, str]:
+    return [r for r in output_rows(sheets) if r["tab"] == tab][-1]
+
+
+def latest_mark(sheets: MemorySheets, tab: str) -> Watermark:
+    mark = parse_window(latest_row(sheets, tab)["window"])
+    assert mark is not None
+    return mark
+
+
+def select(tab: str, values: list[list[str]], window: str) -> tuple[list[int], Watermark, str]:
+    """select_new_rows against a one-row history; returns the window row numbers, the next mark and logs."""
+
+    header, rows = parse_rows(values)
+    mark = parse_window(window, LEGACY_AT)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        window_rows, next_mark = select_new_rows(tab, header, rows, mark, NOW)
+    return [r.number for r in window_rows], next_mark, out.getvalue()
+
+
+class StableCursorTests(unittest.TestCase):
+    """A15: pruning, deleting or inserting rows anywhere never skips or repeats a summarized row."""
+
+    def test_x_feed_prune_sends_only_the_new_posts(self) -> None:  # 1
+        sheets = cursor_sheet(**{"X Feed": [X_HEADER] + [x_row(i) for i in range(100)]})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        del sheets.tabs["X Feed"][1:61]
+        sheets.tabs["X Feed"] += [x_row(i) for i in range(100, 120)]
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(post_ids(fake), ids(range(100, 120)))
+        self.assertEqual(latest_row(sheets, "X Feed")["rows_considered"], "20")
+        self.assertEqual(latest_mark(sheets, "X Feed").last_id, "90119")
+        again = FakeGateway()
+        quiet_run(sheets, client(again), DENYLIST, now=NOW)
+        self.assertEqual(again.generate_bodies, [])
+        self.assertEqual(latest_row(sheets, "X Feed")["status"], "no_change")
+
+    def test_prune_below_the_old_to_row_does_not_fall_back_to_seven_days(self) -> None:  # 2
+        sheets = cursor_sheet(**{"X Feed": [X_HEADER] + [x_row(i) for i in range(3000)]})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        del sheets.tabs["X Feed"][1:2501]
+        sheets.tabs["X Feed"] += [x_row(i) for i in range(3000, 3010)]
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(post_ids(fake), ids(range(3000, 3010)))
+        self.assertEqual(row_range(latest_row(sheets, "X Feed")["window"]), "after_row=501;to_row=511")
+
+    def test_rows_inserted_above_are_not_sent(self) -> None:  # 3
+        sheets = cursor_sheet(**{"X Feed": [X_HEADER] + [x_row(i, at="2026-10-26 10:00") for i in range(10)]})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        sheets.tabs["X Feed"][1:1] = [x_row(500 + i, at="2026-10-20 10:00") for i in range(5)]
+        sheets.tabs["X Feed"] += [x_row(i, at="2026-10-26 18:00") for i in range(10, 13)]
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(post_ids(fake), ids(range(10, 13)))
+
+    def test_a_deleted_anchor_falls_back_to_collected_at(self) -> None:  # 4
+        sheets = cursor_sheet(**{"X Feed": [X_HEADER] + [x_row(i, at="2026-10-26 10:00") for i in range(10)]})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        self.assertEqual(latest_mark(sheets, "X Feed").last_id, "90009")
+        tab = sheets.tabs["X Feed"]
+        tab.pop()  # the anchor row itself
+        tab.insert(4, x_row(600, at="not a time"))  # unreadable, among old rows: not new
+        tab += [x_row(i, at="2026-10-26 18:00") for i in range(20, 24)] + [x_row(601, at="")]
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(post_ids(fake), ids([20, 21, 22, 23, 601]))
+
+    def test_chief_tab_prune_and_same_day_rows(self) -> None:  # 5
+        day = "2026-10-25"
+        sheets = cursor_sheet(**{"Chief Finance": [CHIEF_HEADER] + [chief_row(i, day) for i in range(8)]})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        mark = latest_mark(sheets, "Chief Finance")
+        self.assertEqual((mark.kind, mark.date_col, mark.last_date, len(mark.seen)),
+                         ("date_hash", "Date Logged", day, 8))
+        del sheets.tabs["Chief Finance"][1:6]
+        # The D+1 finding was found long ago but logged today: Date Logged makes it new.
+        sheets.tabs["Chief Finance"] += [chief_row(8, day), chief_row(9, day),
+                                         chief_row(10, "2026-10-26", found="2026-10-01")]
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(sent(fake, r"example\.test/f/(\d+)", "Chief Finance"), {"8", "9", "10"})
+        self.assertEqual(latest_mark(sheets, "Chief Finance").last_date, "2026-10-26")
+
+    def test_in_place_edits(self) -> None:  # 6
+        values = [CHIEF_HEADER, chief_row(0, "2026-10-24")] + [chief_row(i, "2026-10-25") for i in range(1, 5)]
+        sheets = cursor_sheet(**{"Chief Finance": values})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        summary = CHIEF_HEADER.index("Summary")
+        sheets.tabs["Chief Finance"][3][summary] = "แก้ไขแล้ว"  # dated last_date: news, resent once
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(sent(fake, r"example\.test/f/(\d+)", "Chief Finance"), {"2"})
+        for _ in range(2):
+            quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+            self.assertEqual(latest_row(sheets, "Chief Finance")["status"], "no_change")
+            sheets.tabs["Chief Finance"][1][summary] = "แก้แถวเก่า"  # dated before last_date: not resent
+        self.assertEqual(len(fake.generate_bodies), 1)
+
+    def test_datasets_without_a_date_column(self) -> None:  # 7
+        sheets = cursor_sheet(Datasets=[DATASETS_HEADER] + [dataset_row(i) for i in range(3)])
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        self.assertEqual(latest_mark(sheets, "Datasets").kind, "hash")
+        steps: list[tuple[Any, set[str]]] = [
+            (lambda tab: tab.extend(dataset_row(i) for i in range(3, 8)), {str(i) for i in range(3, 8)}),
+            (lambda tab: tab[2].__setitem__(5, "แก้ไข"), {"1"}),
+            (lambda tab: tab.__delitem__(slice(1, 3)), set()),
+        ]
+        for change, expected in steps:
+            change(sheets.tabs["Datasets"])
+            fake = FakeGateway()
+            quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+            self.assertEqual(sent(fake, r"example\.test/ds/(\d+)", "Datasets"), expected)
+        self.assertEqual(latest_row(sheets, "Datasets")["status"], "no_change")
+
+    def test_error_rows_do_not_move_the_watermark(self) -> None:  # 9
+        sheets = cursor_sheet(**{"X Feed": [X_HEADER] + [x_row(i) for i in range(5)]})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        sheets.tabs["X Feed"] += [x_row(i) for i in range(5, 8)]
+        result = quiet_run(sheets, client(FakeGateway(invent=True)), DENYLIST, now=NOW)
+        self.assertEqual(result.exit_code, 1)
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(post_ids(fake), ids(range(5, 8)))
+
+    def test_no_change_carries_the_key_forward_unchanged(self) -> None:  # 9
+        sheets = cursor_sheet(**{"Chief Finance": [CHIEF_HEADER] + [chief_row(i, "2026-10-25") for i in range(4)]})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        before = latest_row(sheets, "Chief Finance")["window"].split(";")[2:]
+        del sheets.tabs["Chief Finance"][1:3]
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        row = latest_row(sheets, "Chief Finance")
+        self.assertEqual(row["status"], "no_change")
+        self.assertEqual(row["window"].split(";")[2:], before)
+
+    def test_output_contract(self) -> None:  # 10
+        self.assertEqual(OUTPUT_HEADER, [
+            "tab", "summary_date", "window", "rows_considered", "summary_th", "top_items", "candidate_tasks",
+            "deadlines", "model", "run_id", "tokens_in", "tokens_out", "cost_usd", "status", "error"])
+        dated = [chief_row(i, "2026-10-25") for i in range(400)] + [chief_row(400 + i, "") for i in range(400)]
+        sheets = cursor_sheet(Datasets=[DATASETS_HEADER] + [dataset_row(i) for i in range(400)],
+                              **{"Chief Finance": [CHIEF_HEADER] + dated})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        self.assertEqual({title for title, _ in sheets.writes}, {OUTPUT_TAB, LATEST_TAB})
+        for tab in ("Datasets", "Chief Finance"):
+            window = latest_row(sheets, tab)["window"]
+            self.assertLess(len(window), MAX_WINDOW_CHARS)
+            self.assertEqual(len(latest_mark(sheets, tab).seen), MAX_SEEN)
+        self.assertEqual(len(latest_mark(sheets, "Chief Finance").seen_nodate), MAX_SEEN)
+        huge = Watermark("hash", seen=tuple(f"{i:012x}" for i in range(5000)))
+        self.assertLessEqual(len(format_window(1, 5001, huge)), MAX_WINDOW_CHARS)
+
+    def test_window_values_survive_separators(self) -> None:
+        mark = Watermark("post_id", last_id="1;to_row=9=x", last_at="2026-10-26 10:00")
+        text = format_window(3, 9, mark)
+        self.assertTrue(text.startswith("after_row=3;to_row=9;kind=post_id;"))
+        self.assertEqual(parse_window(text), mark)
+        self.assertEqual(re.search(r"to_row=(\d+)", text).group(1), "9")  # what a rolled-back version reads
+
+    def test_row_hash_ignores_the_row_number(self) -> None:
+        _header, rows = parse_rows([DATASETS_HEADER, dataset_row(1), [], dataset_row(1)])
+        self.assertEqual([r.number for r in rows], [2, 4])
+        self.assertEqual(row_hash(rows[0]), row_hash(rows[1]))
+        self.assertRegex(row_hash(rows[0]), r"^[0-9a-f]{12}$")
+
+
+def legacy_x_feed(n_old: int, n_new: int) -> list[list[str]]:
+    return ([X_HEADER] + [x_row(i, at="2026-10-26 10:00") for i in range(n_old)]
+            + [x_row(n_old + i, at="2026-10-27 10:00") for i in range(n_new)])
+
+
+class LegacyMigrationTests(unittest.TestCase):
+    """8: an old ``after_row;to_row`` watermark is resolved once, then the new format is written."""
+
+    def test_x_feed_anchor_on_the_legacy_row(self) -> None:
+        values = legacy_x_feed(1480, 2579)  # sheet rows 2..1481 summarized, 1482..4060 newer
+        numbers, mark, logs = select("X Feed", values, "after_row=1;to_row=1481")
+        self.assertEqual(numbers, list(range(1482, 4061)))
+        self.assertEqual((mark.kind, mark.last_id), ("post_id", "94058"))
+        self.assertNotIn("migration_fallback", logs)
+        sheets = cursor_sheet(**{"X Feed": values, OUTPUT_TAB: history("X Feed", "after_row=1;to_row=1481")})
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertTrue(post_ids(fake))
+        self.assertFalse(post_ids(fake) & ids(range(1480)))
+        self.assertTrue(latest_row(sheets, "X Feed")["window"].startswith(
+            "after_row=1481;to_row=4060;kind=post_id;last_id=94058;"))
+
+    def test_x_feed_pruned_uses_the_summary_date(self) -> None:
+        values = legacy_x_feed(1480, 2579)
+        del values[1:1001]  # sheet row 1481 is now a row collected after the legacy run
+        numbers, _mark, logs = select("X Feed", values, "after_row=1;to_row=1481")
+        self.assertEqual(numbers, list(range(482, 3061)))
+        self.assertIn('"event": "migration_fallback"', logs)
+
+    def test_x_feed_shrunk_below_to_row_never_falls_back_to_seven_days(self) -> None:
+        values = legacy_x_feed(300, 20)
+        numbers, _mark, logs = select("X Feed", values, "after_row=1;to_row=1481")
+        self.assertEqual(numbers, list(range(302, 322)))  # the 300 old rows are within 7 days, not resent
+        self.assertIn("migration_fallback", logs)
+
+    def test_dated_tab_anchor_on_the_legacy_row(self) -> None:
+        values = [CHIEF_HEADER] + [chief_row(i, "2026-10-26") for i in range(8)]
+        values += [chief_row(8, "2026-10-26"), chief_row(9, "2026-10-27"), chief_row(10, "2026-10-27")]
+        numbers, mark, logs = select("All Findings", values, "after_row=1;to_row=9")
+        self.assertEqual(numbers, [10, 11, 12])
+        self.assertEqual((mark.kind, mark.last_date, len(mark.seen)), ("date_hash", "2026-10-27", 2))
+        self.assertNotIn("migration_fallback", logs)
+
+    def test_dated_tab_pruned_uses_the_summary_day(self) -> None:
+        values = [CHIEF_HEADER] + [chief_row(i, "2026-10-24") for i in range(4)]
+        values += [chief_row(i, "2026-10-26") for i in range(4, 8)] + [chief_row(i, "2026-10-27") for i in range(8, 12)]
+        del values[1:5]  # the four 10-24 rows; sheet row 9 is now a 10-27 row
+        numbers, _mark, logs = select("All Findings", values, "after_row=1;to_row=9")
+        self.assertEqual(numbers, list(range(2, 10)))  # same-day 10-26 rows repeat once, by design
+        self.assertIn("migration_fallback", logs)
+
+    def test_empty_chief_tab_legacy_row(self) -> None:
+        values = [CHIEF_HEADER, chief_row(1, "2026-10-26"), chief_row(2, "2026-10-20")]
+        numbers, _mark, _logs = select("Chief Career", values, "after_row=1;to_row=1")
+        self.assertEqual(numbers, [2])  # summary-day rows are kept; older ones were never new
+
+    def test_datasets_rows_appended_after_to_row(self) -> None:
+        values = [DATASETS_HEADER] + [dataset_row(i) for i in range(5)]
+        numbers, mark, _logs = select("Datasets", values, "after_row=1;to_row=4")
+        self.assertEqual(numbers, [5, 6])
+        self.assertEqual(len(mark.seen), 5)
+
+    def test_datasets_shorter_than_to_row_is_no_change_and_seeds(self) -> None:
+        sheets = cursor_sheet(Datasets=[DATASETS_HEADER, dataset_row(1), dataset_row(2)],
+                              **{OUTPUT_TAB: history("Datasets", "after_row=1;to_row=4")})
+        fake = FakeGateway()
+        quiet_run(sheets, client(fake), DENYLIST, now=NOW)
+        self.assertEqual(fake.generate_bodies, [])
+        row = latest_row(sheets, "Datasets")
+        self.assertEqual(row["status"], "no_change")
+        self.assertEqual(len(latest_mark(sheets, "Datasets").seen), 2)
+
+    def test_old_history_rows_are_never_rewritten(self) -> None:
+        old = history("Datasets", "after_row=1;to_row=4")
+        sheets = cursor_sheet(Datasets=[DATASETS_HEADER, dataset_row(1)], **{OUTPUT_TAB: [list(r) for r in old]})
+        quiet_run(sheets, client(FakeGateway()), DENYLIST, now=NOW)
+        self.assertEqual(sheets.tabs[OUTPUT_TAB][:2], old)
 
 
 def owner_answer(tasks: list[tuple[str, str | None]]) -> str:

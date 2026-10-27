@@ -151,5 +151,41 @@
    "3",
    ""
   ]
+ ],
+ "AI Summaries": [
+  [
+   "tab",
+   "summary_date",
+   "window",
+   "rows_considered",
+   "summary_th",
+   "top_items",
+   "candidate_tasks",
+   "deadlines",
+   "model",
+   "run_id",
+   "tokens_in",
+   "tokens_out",
+   "cost_usd",
+   "status",
+   "error"
+  ],
+  [
+   "X Feed",
+   "2026-10-25T19:01:00+07:00",
+   "after_row=1;to_row=40",
+   "39",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "ok",
+   ""
+  ]
  ]
 }

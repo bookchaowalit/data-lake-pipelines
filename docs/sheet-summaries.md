@@ -6,7 +6,7 @@ Spec: [`docs/specs/sheet-summaries.md`](specs/sheet-summaries.md). Code:
 ## What it does
 
 Once a day it reads each Chief tab, `All Findings`, `Datasets` and `X Feed` of the Google Sheet
-`1zajA2iEfa9TS5JNjV1Y7LOurrTmiqrP-8ygn9clvBdI`, sends only the rows added since its last run (first
+`1zajA2iEfa9TS5JNjV1Y7LOurrTmiqrP-8ygn9clvBdI`, sends only the rows it has not summarized yet (first
 run: last 7 days) to the AI gateway (`POST https://api.bookchaowalit.com/api/ai/generate`, route
 `sheet-summaries`, profile `fast` = GPT-6 Luna) and appends one row per tab to `AI Summaries`:
 a 3–6 sentence Thai summary, up to 5 top items (with `x_post` / `website` link source), up to 5
@@ -75,11 +75,25 @@ These run from the owner's machine with the same variables; the scheduled run st
 
 ## Window and limits
 
-The `window` column is `after_row=<a>;to_row=<b>` (sheet row numbers); the next run starts after the
-newest `to_row` with status `ok`, `budget_exceeded` or `no_change`. Error rows do not move it, so a
-failed day is retried the next day. If a tab shrinks below its watermark, it starts over at the last
-7 days. Each request fits the live limits from `GET /api/ai/status`: at most 200 rows, 500 characters
-per cell, and input counted as UTF-8 bytes (Thai is 3 bytes per character). Rows go in priority
+The `window` column holds the watermark: `after_row=<a>;to_row=<b>;kind=<kind>;<key fields>`. The
+row numbers are for reading only; the next run picks rows by the key (spec item 3), so the monthly
+X Feed prune, or deleting or inserting rows in any tab, never skips or repeats a row:
+
+| Tab | `kind` | Key | New rows |
+|---|---|---|---|
+| `X Feed` | `post_id` | `last_id`, `last_at` | after the row with `post_id == last_id`; if that row was pruned, `collected_at` after `last_at` |
+| `All Findings`, Chief tabs | `date_hash` | `date_col` (`Date Logged`), `last_date`, `seen`, `seen_nodate` | dated after `last_date`, or on it with a hash not in `seen` |
+| `Datasets` | `hash` | `seen` (last 300 row hashes) | hash not in `seen` |
+
+A row edited in place counts as new when it is dated on or after `last_date` (Chief tabs, `All
+Findings`) or always (`Datasets`); edits to older rows are not resent. The newest row with status
+`ok`, `budget_exceeded` or `no_change` holds the watermark; error rows do not move it, so a failed
+day is retried the next day. Old `after_row;to_row` windows (before 2026-10-27) are migrated once on
+the first run after deploy: by the row at `to_row` when it is still the old row, else by that run's
+`summary_date` (logged as `event=migration_fallback`).
+
+Each request fits the live limits from `GET /api/ai/status`: at most 200 rows, 500 characters per
+cell, and input counted as UTF-8 bytes (Thai is 3 bytes per character). Rows go in priority
 order: `X Feed` every `top` row first, the requesting Chiefs taking turns (best `score` first), other tabs the newest rows.
 
 A tab too large for one request (X Feed gets ~1,400 rows a day, ~230 of them `top`) is split into up
@@ -108,6 +122,34 @@ written) and the rest are merged; a malformed merge is retried once. Raising the
 `error` with `error` = `invented_link`, `invalid_output`, `output_truncated`, `client_term_in_output`, `row_too_large`,
 `gateway_400:<code>`, `gateway_stop:<code>` (429 / 5xx / auth / network after at most one retry) or
 `budget_<decision>` (preflight).
+
+## Deploying a new commit
+
+Merge, then upload the merged commit (a push to `main` does not redeploy):
+
+```bash
+git switch main && git pull --ff-only
+rm -rf /tmp/sheet-summaries-up && mkdir /tmp/sheet-summaries-up
+git archive "$(git rev-parse HEAD)" | tar -x -C /tmp/sheet-summaries-up
+cd /tmp/sheet-summaries-up && railway link --project data-schedules --service sheet-summaries
+railway up --detach
+```
+
+The service builds `deploy/sheet-summaries/Dockerfile` (service variable `RAILWAY_DOCKERFILE_PATH`);
+the build's fake-gateway dry run, which includes a pruned X Feed with a legacy watermark, is the
+smoke test.
+
+Before the upload, dry-run the merged code against the real sheet (writes nothing, a few cents at
+most) and check the `X Feed` window: it must start after the latest successful anchor
+(`after_row=<old to_row>` on the first run after the 2026-10-27 change):
+
+```bash
+infisical run -- uv run --extra sheets python infra/scripts/sync/sheet_summaries.py --dry-run --tab "X Feed"
+```
+
+Roll a release back by uploading the previously deployed commit (Railway's deployment history
+names it) the same way. A version from before 2026-10-27 reads only `to_row=(\d+)`, which still
+leads the new windows, so it keeps working with its old row-number behaviour.
 
 ## Rollback
 

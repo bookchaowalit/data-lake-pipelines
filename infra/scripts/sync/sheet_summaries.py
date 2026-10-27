@@ -3,7 +3,7 @@
 
 Spec: docs/specs/sheet-summaries.md. Operator docs: docs/sheet-summaries.md.
 
-Reads each Chief/data tab, sends only rows added since the last run (first run: last 7 days) to the
+Reads each Chief/data tab, sends only rows not yet summarized (first run: last 7 days) to the
 owner's AI gateway (``solo-empire.ai-gateway.v1``, route ``sheet-summaries``, profile ``fast`` =
 GPT-6 Luna), validates the JSON answer (schema + no invented links + no client terms) and appends
 one row per tab to ``AI Summaries``; ``AI Summaries Latest`` holds the newest row per tab. Source
@@ -14,6 +14,7 @@ closed without a denylist. Logs carry run id, tab, status, tokens, cost and late
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -22,11 +23,11 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 import jsonschema
@@ -65,8 +66,15 @@ MAX_OUTPUT_TOKENS = 4096
 REASONING_EFFORT = "low"
 # The gateway appends its Thai language policy (~650 bytes UTF-8) to the system message.
 GATEWAY_OVERHEAD_BYTES = 768
-DATE_COLUMNS = ("collected_at", "posted_at", "found_at", "date", "created_at", "updated_at", "timestamp")
+# "date logged" sits ahead of the generic "*date*" match so the Chief tabs order by Date Logged, not
+# Date Found: a finding logged late is still newer than the watermark.
+DATE_COLUMNS = ("collected_at", "posted_at", "found_at", "date", "created_at", "updated_at", "timestamp",
+                "date logged")
 SUCCESS_STATUSES = frozenset({"ok", "budget_exceeded", "no_change"})
+# A watermark keeps at most this many row hashes per list; the window cell must stay under the
+# 50,000-character Sheets cell limit with room to spare.
+MAX_SEEN = 300
+MAX_WINDOW_CHARS = 30000
 STOP_CODES_NO_RETRY = frozenset({"monthly_budget_exceeded", "budget_unavailable", "budget_not_configured"})
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 TRUE_VALUES = frozenset({"true", "1", "yes", "y", "top", "✓", "x"})
@@ -442,6 +450,19 @@ def _row_date(value: str) -> datetime | None:
         return None
 
 
+def _row_time(value: str) -> datetime | None:
+    """A ``collected_at`` / ``summary_date`` value with its time of day; a naive value is Asia/Bangkok."""
+
+    text = value.strip()
+    if not re.match(r"\d{4}-\d{2}-\d{2}", text):
+        return None
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=BANGKOK)
+
+
 def _is_true(value: str) -> bool:
     return value.strip().lower() in TRUE_VALUES
 
@@ -648,8 +669,73 @@ def _log(**fields: Any) -> None:
     print(json.dumps({k: fields[k] for k in LOG_KEYS if k in fields}, ensure_ascii=True), flush=True)
 
 
-def _watermarks(history: list[list[str]]) -> dict[str, int]:
-    marks: dict[str, int] = {}
+@dataclass(frozen=True)
+class Watermark:
+    """Where a tab's summaries stopped; kept in the ``window`` cell after ``after_row;to_row``.
+
+    ``post_id`` (X Feed): the last summarized row's ``post_id`` and ``collected_at``. ``date_hash``
+    (tabs with a date column): the newest date consumed and the hashes of the rows on that date, plus
+    the hashes of rows without a readable date. ``hash`` (no date column): the hashes of the last
+    MAX_SEEN rows. ``legacy``: an old row-number window, resolved once by :func:`_migrate`. Row
+    numbers are never used to pick rows, so pruning, deleting or inserting rows cannot skip or repeat
+    one.
+    """
+
+    kind: str
+    last_id: str = ""
+    last_at: str = ""
+    date_col: str = ""
+    last_date: str = ""
+    seen: tuple[str, ...] = ()
+    seen_nodate: tuple[str, ...] = ()
+    to_row: int = 0  # legacy only
+    summary_date: str = ""  # legacy only: the summary_date of the history row it came from
+
+
+KEY_FIELDS = {
+    "post_id": ("last_id", "last_at"),
+    "date_hash": ("date_col", "last_date", "seen", "seen_nodate"),
+    "hash": ("seen",),
+}
+HASH_LISTS = frozenset({"seen", "seen_nodate"})
+
+
+def format_window(after: int, last: int, mark: Watermark) -> str:
+    """``after_row=<a>;to_row=<b>`` (informational, and what a rolled-back version reads) followed by
+    the key fields, each value URL-quoted so ``;`` and ``=`` inside it cannot break parsing. Hash
+    lists are trimmed from the oldest end if the cell would pass MAX_WINDOW_CHARS."""
+
+    while True:
+        parts = [f"after_row={after}", f"to_row={last}", f"kind={mark.kind}"]
+        for name in KEY_FIELDS[mark.kind]:
+            value = getattr(mark, name)
+            parts.append(f"{name}={quote(','.join(value) if name in HASH_LISTS else value, safe='')}")
+        text = ";".join(parts)
+        if len(text) <= MAX_WINDOW_CHARS or not (mark.seen or mark.seen_nodate):
+            return text
+        mark = replace(mark, seen=mark.seen[len(mark.seen) // 2:],
+                       seen_nodate=mark.seen_nodate[len(mark.seen_nodate) // 2:])
+
+
+def parse_window(window: str, summary_date: str = "") -> Watermark | None:
+    fields: dict[str, str] = {}
+    for part in window.split(";"):
+        name, _sep, value = part.partition("=")
+        fields[name] = value
+    kind = fields.get("kind", "")
+    if kind in KEY_FIELDS:
+        values: dict[str, Any] = {}
+        for name in KEY_FIELDS[kind]:
+            text = unquote(fields.get(name, ""))
+            values[name] = tuple(h for h in text.split(",") if h) if name in HASH_LISTS else text
+        return Watermark(kind, **values)
+    if fields.get("to_row", "").isdigit():
+        return Watermark("legacy", to_row=int(fields["to_row"]), summary_date=summary_date)
+    return None
+
+
+def _watermarks(history: list[list[str]]) -> dict[str, Watermark]:
+    marks: dict[str, Watermark] = {}
     if not history:
         return marks
     header = history[0]
@@ -657,26 +743,154 @@ def _watermarks(history: list[list[str]]) -> dict[str, int]:
         record = dict(zip(header, raw))
         if record.get("status") not in SUCCESS_STATUSES:
             continue
-        match = re.search(r"to_row=(\d+)", record.get("window", ""))
-        if match and record.get("tab"):
-            marks[record["tab"]] = int(match.group(1))  # later rows win
+        mark = parse_window(record.get("window", ""), record.get("summary_date", ""))
+        if mark and record.get("tab"):
+            marks[record["tab"]] = mark  # later rows win
     return marks
 
 
-def _window_rows(header: list[str], rows: list[Row], watermark: int | None, now: datetime) -> tuple[int, list[Row]]:
-    last = rows[-1].number if rows else 1
-    if watermark is not None and watermark <= last:
-        return watermark, [r for r in rows if r.number > watermark]
+def row_hash(row: Row) -> str:
+    """First 12 hex characters of sha256 over the row's cells (never its row number)."""
+
+    cells = json.dumps(row.cells, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(cells.encode("utf-8")).hexdigest()[:12]
+
+
+def _cursor_kind(header: list[str]) -> tuple[str, str]:
+    if "post_id" in header and "collected_at" in header:
+        return "post_id", "collected_at"
     column = _date_column(header)
-    if column is None:
-        return 1, rows[-MAX_ROWS:]
-    since = now - timedelta(days=FIRST_RUN_DAYS)
+    return ("date_hash", column) if column else ("hash", "")
+
+
+def _row_day(row: Row, column: str) -> str | None:
+    stamp = _row_date(row.cells.get(column, "")) if column else None
+    return stamp.date().isoformat() if stamp else None
+
+
+def _after_time(rows: list[Row], column: str, cutoff: datetime) -> list[Row]:
+    """Rows whose ``column`` time is after ``cutoff``. A row without a readable time is new only when
+    it sits after the last readable row at or before the cutoff (it was appended after it)."""
+
+    stamps = [_row_time(r.cells.get(column, "")) for r in rows]
+    boundary = max((i for i, s in enumerate(stamps) if s is not None and s <= cutoff), default=-1)
+    return [r for i, (r, s) in enumerate(zip(rows, stamps)) if (s > cutoff if s is not None else i > boundary)]
+
+
+def _first_run_rows(column: str, rows: list[Row], now: datetime) -> list[Row]:
+    if not column:
+        return rows[-MAX_ROWS:]
+    since = (now - timedelta(days=FIRST_RUN_DAYS)).replace(hour=0, minute=0, second=0, microsecond=0)
     recent = []
     for row in rows:
         stamp = _row_date(row.cells.get(column, ""))
-        if stamp is None or stamp >= since.replace(hour=0, minute=0, second=0, microsecond=0):
+        if stamp is None or stamp >= since:
             recent.append(row)
-    return 1, recent
+    return recent
+
+
+def _new_rows(kind: str, column: str, rows: list[Row], mark: Watermark) -> list[Row] | None:
+    """Rows after ``mark``; None when an X Feed anchor is gone and its time cannot be read."""
+
+    if kind == "post_id":
+        ids = [r.cells.get("post_id", "") for r in rows]
+        if mark.last_id and mark.last_id in ids:
+            return rows[ids.index(mark.last_id) + 1:]
+        cutoff = _row_time(mark.last_at)
+        return None if cutoff is None else _after_time(rows, column, cutoff)
+    if kind == "hash":
+        seen = set(mark.seen)
+        return [r for r in rows if row_hash(r) not in seen]
+    seen, nodate = set(mark.seen), set(mark.seen_nodate)
+    new = []
+    for row in rows:
+        day = _row_day(row, column)
+        if day is None:
+            if row_hash(row) not in nodate:
+                new.append(row)
+        elif day > mark.last_date or (day == mark.last_date and row_hash(row) not in seen):
+            new.append(row)
+    return new
+
+
+def _migrate(tab: str, kind: str, column: str, rows: list[Row], mark: Watermark) -> list[Row]:
+    """Resolve a legacy ``to_row`` watermark once (spec item 3a); never the 7-day fallback.
+
+    The row at ``to_row`` is trusted as the old anchor only when it is no newer than the legacy run;
+    otherwise the tab was pruned or shifted and the legacy ``summary_date`` is the cutoff.
+    """
+
+    after = [r for r in rows if r.number > mark.to_row]
+    if kind == "hash":
+        return after  # a tab shorter than to_row: nothing new, the seen list is seeded
+    cutoff = _row_time(mark.summary_date)
+    anchor = next((r for r in rows if r.number == mark.to_row), None)
+    if anchor is not None and cutoff is not None:
+        if kind == "post_id":
+            stamp = _row_time(anchor.cells.get(column, ""))
+            trusted = stamp is not None and stamp <= cutoff
+        else:
+            day = _row_day(anchor, column)
+            trusted = day is not None and day <= cutoff.astimezone(BANGKOK).date().isoformat()
+        if trusted:
+            return after
+    _log(event="migration_fallback", tab=tab)
+    if cutoff is None:
+        return []
+    if kind == "post_id":
+        return _after_time(rows, column, cutoff)
+    # Dates carry no time of day: rows from the legacy run's own day are included, so one repeat
+    # is possible.
+    since = cutoff.astimezone(BANGKOK).date().isoformat()
+    return [r for r in rows if (day := _row_day(r, column)) is not None and day >= since]
+
+
+def _consumed(kind: str, column: str, rows: list[Row], prev: Watermark | None) -> Watermark:
+    """The watermark once every row now in the tab is consumed (rows past MAX_BATCHES included)."""
+
+    if kind == "post_id":
+        anchor = next((r for r in reversed(rows) if r.cells.get("post_id")), None)
+        if anchor is None:
+            return prev if prev is not None and prev.kind == kind else Watermark(kind)
+        return Watermark(kind, last_id=anchor.cells["post_id"], last_at=anchor.cells.get(column, ""))
+    hashed = [(row_hash(r), _row_day(r, column)) for r in rows]
+    if kind == "hash":
+        return Watermark(kind, seen=tuple(h for h, _day in hashed)[-MAX_SEEN:])
+    days = [day for _h, day in hashed if day]
+    if prev is not None and prev.kind == kind and prev.last_date:
+        days.append(prev.last_date)  # a prune of every row of the last date must not move it back
+    last_date = max(days, default="")
+    return Watermark(kind, date_col=column, last_date=last_date,
+                     seen=tuple(h for h, day in hashed if day and day == last_date)[-MAX_SEEN:],
+                     seen_nodate=tuple(h for h, day in hashed if day is None)[-MAX_SEEN:])
+
+
+def select_new_rows(tab: str, header: list[str], rows: list[Row], mark: Watermark | None,
+                    now: datetime) -> tuple[list[Row], Watermark]:
+    """The rows not yet summarized, in sheet order, and the watermark once they are (spec item 3).
+
+    With nothing new the previous watermark is returned unchanged (``no_change`` carries it).
+    """
+
+    kind, column = _cursor_kind(header)
+    if mark is not None and kind == "date_hash" and mark.kind == kind and mark.date_col in header:
+        column = mark.date_col
+    if mark is None or (mark.kind == "post_id" and kind == "post_id" and not (mark.last_id or mark.last_at)):
+        window = _first_run_rows(column, rows, now)
+    elif mark.kind == "legacy":
+        window = _migrate(tab, kind, column, rows, mark)
+    elif mark.kind != kind:
+        _log(event="cursor_reset", tab=tab)  # the tab's columns changed: start from what is there now
+        return [], _consumed(kind, column, rows, None)
+    else:
+        found = _new_rows(kind, column, rows, mark)
+        if found is None:
+            _log(event="cursor_reset", tab=tab)
+            return [], _consumed(kind, column, rows, None)
+        if not found:
+            return [], mark
+        window = found
+    return window, _consumed(kind, column, rows, mark if mark is not None and mark.kind == kind else None)
 
 
 def _output_row(tab: str, now: datetime, window: str, considered: int, status: str, *, error: str = "",
@@ -825,14 +1039,13 @@ def run(sheets: Sheets, gateway: Gateway, denylist: Sequence[str], *, now: datet
         values = sheets.read(tabs)
         for index, tab in enumerate(tabs):
             header, rows = parse_rows(values.get(tab, []))
-            after, window_rows = _window_rows(header, rows, marks.get(tab), now)
-            last = max([after] + [r.number for r in rows])
-            window = f"after_row={after};to_row={last}"
+            window_rows, mark = select_new_rows(tab, header, rows, marks.get(tab), now)
+            last = max([1] + [r.number for r in rows])
+            window = format_window(window_rows[0].number - 1 if window_rows else last, last, mark)
             # Check each row as it would be sent (header names included), not only the cell values.
             safe = [r for r in window_rows if not _contains_term(_row_line(r), denylist)]
             if not safe:
-                result.rows.append(_output_row(tab, now, f"after_row={last};to_row={last}" if after == last else window,
-                                               0, "no_change"))
+                result.rows.append(_output_row(tab, now, window, 0, "no_change"))
                 _log(event="tab", tab=tab, status="no_change")
                 continue
             started = time.monotonic()
