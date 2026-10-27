@@ -65,3 +65,23 @@ cd infra/dbt && ../../.venv/bin/dbt build --profiles-dir . --select path:models/
 - `meta_lake_datasets` — dataset ที่ lake มีจริงตาม manifest
 
 metadata models อ่าน batch ล่าสุดเท่านั้น จึงต้อง export อย่างน้อยหนึ่งครั้งก่อน `dbt build`.
+
+### Export อัตโนมัติ (Railway cron `registry-export`)
+
+Railway project `data-schedules`, service `registry-export`, cron `40 23 * * *` UTC (06:40 เวลาไทย), restart NEVER.
+แต่ละรอบรัน `infra/scripts/data_lake/scheduled_registry_export.py`: ดึงไฟล์ต้นทาง 4 ไฟล์จาก `main` ของ solo-empire และ
+architecture-docs ผ่าน GitHub API แล้ว export เข้า R2 lake เดียวกับ news-capture (เขียนแค่ `bronze/domain=metadata`,
+`landing/source=solo-empire-registry`, `control/*/source=solo-empire-registry`) พิมพ์แค่จำนวนแถว และส่ง heartbeat `registry-export`
+ไปที่ uptime Worker (แจ้งเตือนถ้าเกิน 26 ชม. หรือรอบที่ล้มเหลว)
+
+| Variable | Value |
+|---|---|
+| `GITHUB_TOKEN` | fine-grained token, Contents: read บน solo-empire และ architecture-docs |
+| `SOLO_EMPIRE_DATA_LAKE_URI` | `s3://solo-empire-portfolio/portfolio-demo/free-cloud-e2e-001` |
+| `DATA_LAKE_CLOUD_WRITE_ENABLED` | `true` |
+| `DATA_LAKE_S3_ENDPOINT`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION=auto` | R2 key ของ bucket `solo-empire-portfolio` จาก Infisical `/job-data` |
+| `HEARTBEAT_TOKEN` | Infisical `/monitoring` |
+
+Deploy: CLI upload (`railway up` ของ `git archive`, `RAILWAY_DOCKERFILE_PATH=deploy/registry-export/Dockerfile`) แบบเดียวกับ
+sheet-summaries; push ขึ้น main ไม่ redeploy เอง. image build รัน dry run บน fixture ถ้าพังจะ build ไม่ผ่าน.
+ปิด: ลบ cron ของ service ใน Railway. ล้างข้อมูล: ลบสาม prefix ข้างบนใน bucket (ไม่มี dataset อื่นใช้ร่วม).
