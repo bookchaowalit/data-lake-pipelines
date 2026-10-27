@@ -64,7 +64,6 @@ def export_registry_fixture(lake_root: Path) -> None:
         REGISTRY_FIXTURES / "registries",
         REGISTRY_FIXTURES / "metadata-catalog",
         lake_root.as_uri(),
-        revisions={"registry": "fixture"},
     )
 
 

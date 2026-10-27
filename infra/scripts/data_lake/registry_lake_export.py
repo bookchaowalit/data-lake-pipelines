@@ -124,7 +124,6 @@ def export(
     catalog: Path,
     data_lake_uri: str,
     *,
-    revisions: dict[str, str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     records = load_records(registries, catalog)
@@ -133,7 +132,10 @@ def export(
             "status": "dry-run",
             "datasets": {name: {"records": len(rows)} for name, rows in records.items()},
         }
-    metadata = {"provider": SOURCE, "revisions": dict(revisions or {})}
+    # Constant metadata: ingest refuses an existing batch whose metadata differs, and the
+    # batch id is the content hash, so anything per-run here (a commit sha) would break
+    # re-exports of unchanged files.
+    metadata = {"provider": SOURCE}
     results: dict[str, Any] = {}
     for name, rows in records.items():
         result = ingest_records(
@@ -162,16 +164,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--catalog", type=Path, required=True,
                         help="architecture-docs systems/ai-data/metadata-catalog directory")
     parser.add_argument("--data-lake-uri", default=os.environ.get("SOLO_EMPIRE_DATA_LAKE_URI", DEFAULT_LAKE_URI))
-    parser.add_argument("--revision", action="append", default=[], metavar="NAME=SHA",
-                        help="source revision recorded in the batch metadata, e.g. registry=<sha>")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    revisions = dict(item.split("=", 1) for item in args.revision)
-    report = export(args.registries, args.catalog, args.data_lake_uri, revisions=revisions, dry_run=args.dry_run)
+    report = export(args.registries, args.catalog, args.data_lake_uri, dry_run=args.dry_run)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 

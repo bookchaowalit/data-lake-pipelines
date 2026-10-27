@@ -55,8 +55,7 @@ batch อิงเนื้อหา รันซ้ำบน registry เดิ
 ```bash
 .venv/bin/python infra/scripts/data_lake/registry_lake_export.py \
   --registries ~/solo-empire/repository-catalog/registries \
-  --catalog <architecture-docs>/systems/ai-data/metadata-catalog \
-  --revision registry=$(git -C ~/solo-empire rev-parse --short HEAD)
+  --catalog <architecture-docs>/systems/ai-data/metadata-catalog
 cd infra/dbt && ../../.venv/bin/dbt build --profiles-dir . --select path:models/metadata
 ../../.venv/bin/dbt docs generate --profiles-dir .   # lineage ของทุก model ใน target/
 ```

@@ -84,7 +84,7 @@ class ExportTests(unittest.TestCase):
             self.skipTest("pyarrow not installed")
         with tempfile.TemporaryDirectory() as temp_dir:
             lake = Path(temp_dir) / "lake"
-            first = export(REGISTRIES, CATALOG, lake.as_uri(), revisions={"registry": "abc123"})
+            first = export(REGISTRIES, CATALOG, lake.as_uri())
             self.assertEqual(sorted(first["datasets"]), sorted(DATASETS))
             manifests = sorted((lake / "control" / "manifests").rglob("*.json"))
             self.assertEqual(len(manifests), len(DATASETS))
@@ -92,7 +92,7 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(manifest["domain"], "metadata")
             self.assertTrue((lake / manifest["bronze"]["key"]).is_file())
 
-            second = export(REGISTRIES, CATALOG, lake.as_uri(), revisions={"registry": "abc123"})
+            second = export(REGISTRIES, CATALOG, lake.as_uri())
             self.assertTrue(all(result["new"] for result in first["datasets"].values()))
             self.assertFalse(any(result["new"] for result in second["datasets"].values()))
             self.assertEqual(
@@ -100,6 +100,26 @@ class ExportTests(unittest.TestCase):
                 {name: result["manifest_key"] for name, result in second["datasets"].items()},
             )
             self.assertEqual(len(sorted((lake / "control" / "manifests").rglob("*.json"))), len(DATASETS))
+
+    def test_changing_one_file_only_adds_that_dataset(self):
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest("pyarrow not installed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registries = Path(temp_dir) / "registries"
+            registries.mkdir()
+            for path in REGISTRIES.iterdir():
+                (registries / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            lake = Path(temp_dir) / "lake"
+            export(registries, CATALOG, lake.as_uri())
+            sources = registries / "data-sources.yaml"
+            sources.write_text(sources.read_text(encoding="utf-8").replace("data: transactions", "data: statements"), encoding="utf-8")
+            second = export(registries, CATALOG, lake.as_uri())
+            self.assertEqual(
+                {name for name, result in second["datasets"].items() if result["new"]},
+                {"data_sources"},
+            )
 
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
