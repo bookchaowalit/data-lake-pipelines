@@ -103,7 +103,7 @@ def render(landscape: dict[str, Any]) -> str:
     systems, coverage = landscape["systems"], landscape["coverage"]
     names = {d["id"]: d["name"] for d in coverage}
     unmapped = [s["id"] for s in systems if not s["domains"]]
-    counts = defaultdict(int)
+    counts: defaultdict[str, int] = defaultdict(int)
     for row in coverage:
         counts[row["platform_coverage"]] += 1
     lines = [
