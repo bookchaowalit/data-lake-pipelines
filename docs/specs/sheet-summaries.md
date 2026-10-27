@@ -1,6 +1,6 @@
 # Spec: daily AI summaries for the "Chief Findings Warehouse" sheet
 
-Status: accepted (2026-10-26); batches and merge added 2026-10-26. Standard: ADR-0004 (spec, then failing test, then code).
+Status: accepted (2026-10-26); batches and merge added 2026-10-26; stable-key watermark added 2026-10-27. Standard: ADR-0004 (spec, then failing test, then code).
 Code: `infra/scripts/sync/sheet_summaries.py`. Tests: `infra/tests/data_lake/sheet_summaries_test.py`.
 Operator docs: [`docs/sheet-summaries.md`](../sheet-summaries.md).
 
@@ -20,13 +20,49 @@ X pull (~17:30 Asia/Bangkok), through the owner's own AI gateway and with no new
    is picked up when it appears). Never summarize `README`, `X Watchlist`, `X Query Plan`,
    `Retired Bots Archive`, `AI Summaries` or `AI Summaries Latest`.
 2. **Headers.** Row 1 of each tab is its header; columns are found by name, never by position.
-3. **Window.** Each `AI Summaries` row records the window as `after_row=<a>;to_row=<b>` (sheet row
-   numbers). A tab's watermark is `to_row` of its newest row with status `ok`, `budget_exceeded` or
-   `no_change`. Rows after the watermark are new. With no watermark (first run), or when the tab
-   shrank below the watermark, the window is the last 7 days by the first date-like column
-   (`collected_at`, `posted_at`, `date`, `found_at`, `created_at`, ...); a tab without one uses the
-   newest rows.
-4. **No new rows** → write a `no_change` row (same `to_row`) and make no gateway call.
+3. **Window.** Progress is kept by a stable key, never by sheet row number, so pruning, deleting or
+   inserting rows anywhere in a source tab cannot skip or repeat a row. The only state is the
+   `window` cell of each `AI Summaries` row: `after_row=<a>;to_row=<b>;kind=<kind>;<key fields>`.
+   `after_row`/`to_row` come first and are informational only (for people, and for a rolled-back
+   version); they never select rows. Fields are `;`-separated and every value is URL-quoted, so a `;`
+   or `=` inside a value cannot break parsing; the cell stays under 30,000 characters (hash lists
+   hold at most 300 entries and are trimmed from the oldest end if needed). A tab's watermark is the
+   window of its newest row with status `ok`, `budget_exceeded` or `no_change`; `error` rows never
+   move it. The kind follows the tab's columns:
+   - `post_id` (a tab with `post_id` and `collected_at`, i.e. `X Feed`):
+     `last_id=<post_id of the last row consumed>;last_at=<its collected_at>`. New rows are the rows
+     after the row whose `post_id == last_id`, in sheet order. If that row is gone, new rows are the
+     rows whose `collected_at` (with time; naive values are Asia/Bangkok) is after `last_at`; a row
+     whose `collected_at` cannot be read is new only when it sits after the last readable row at or
+     before `last_at`.
+   - `date_hash` (a tab with a date column): `date_col=<header>;last_date=<YYYY-MM-DD>;seen=<hashes
+     of the rows dated last_date>;seen_nodate=<hashes of rows without a readable date>`. New rows are
+     rows dated after `last_date`, rows dated `last_date` whose hash is not in `seen`, and undated
+     rows whose hash is not in `seen_nodate`. The date column is the first of `collected_at`,
+     `posted_at`, `found_at`, `date`, `created_at`, `updated_at`, `timestamp`, `Date Logged`, then any
+     header containing "date"; the Chief tabs therefore use `Date Logged`, not `Date Found`, so a
+     finding logged late is not missed.
+   - `hash` (no date column, today only `Datasets`): `seen=<hashes of the last 300 rows>`. New rows
+     are rows whose hash is not in `seen`; in a tab of more than 300 rows the older rows are never
+     resent.
+
+   A row hash is the first 12 hex characters of sha256 over the row's cells (`json.dumps(cells,
+   sort_keys=True, ensure_ascii=False)`, the row number excluded). A row edited in place gets a new
+   hash: it is resent when its date is on or after `last_date` (`date_hash`) or always (`hash`),
+   because an updated finding or dataset row is news; an edit to an older-dated row is not resent.
+   After a run the watermark covers every row then in the tab, including rows left over after 8
+   batches (item 6a) and rows dropped by the client guard. With no watermark (first run) the window
+   is the last 7 days by the date column; a tab without one uses the newest 200 rows.
+3a. **Legacy watermarks.** A window without `kind=` (`after_row=<a>;to_row=<b>`, written before
+   2026-10-27) is resolved once, then the new format is written. If the row at `to_row` exists and is
+   no newer than that history row's `summary_date` (its `collected_at`, or its date's day), the rows
+   after `to_row` are the window. Otherwise the tab was pruned or shifted and `summary_date` is the
+   cutoff: `post_id` takes rows collected after it; `date_hash` takes rows dated on or after its day
+   (no time of day, so same-day rows may repeat once); both log `event=migration_fallback`. A `hash`
+   tab takes the rows after `to_row`, if any; a shorter tab writes `no_change` and seeds `seen`. A tab
+   with a legacy watermark never falls back to 7 days. History rows are never rewritten.
+4. **No new rows** → write a `no_change` row that carries the previous key fields unchanged and make
+   no gateway call.
 5. **Client guard (hard).** Load the denylist from `CLIENT_DENYLIST_PATH` (one term per line, `#`
    comments). Missing path, missing file or no terms → the run fails before reading any tab. Terms
    and text match if either the NFKC case-folded form or the letters-and-digits skeleton (NFKD, no
@@ -99,6 +135,7 @@ X pull (~17:30 Asia/Bangkok), through the owner's own AI gateway and with no new
 | A12 | A bad or client-term batch answer is dropped and never written; a client term in the merge fails the tab |
 | A13 | X Feed sends every `top` row before any other and rotates the requesting Chiefs within each group |
 | A14 | Prompts list the Chief tabs as owners; an invented owner title becomes a real Chief or `""` |
+| A15 | Pruning, deleting or inserting rows (X Feed, Chief tabs, Datasets) never skips or repeats a row; legacy watermarks migrate once; in-place edits follow item 3 |
 
 ## Out of scope
 
