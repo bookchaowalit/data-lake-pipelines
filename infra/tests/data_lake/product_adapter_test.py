@@ -250,6 +250,8 @@ class _FakeRemoteStore:
     missing: set[str] = set()
     broken: set[str] = set()
     reads: list[str] = []
+    prefix_reads: list[str] = []
+    prefix_fails = False
     active = 0
     peak = 0
     lock = __import__("threading").Lock()
@@ -259,6 +261,19 @@ class _FakeRemoteStore:
 
     def list_keys(self, prefix: str) -> list[str]:
         return sorted(key for key in self.manifests if key.startswith(prefix))
+
+    def get_prefix(self, prefix: str) -> dict[str, bytes]:
+        from data_lake.storage import StorageError
+
+        cls = type(self)
+        cls.prefix_reads.append(prefix)
+        if cls.prefix_fails:
+            raise StorageError(prefix)
+        return {
+            key: body
+            for key, body in cls.manifests.items()
+            if key.startswith(prefix + "/") and key not in cls.missing | cls.broken
+        }
 
     def get_bytes(self, key: str) -> bytes:
         from data_lake.storage import ObjectNotFound, StorageError
@@ -295,6 +310,8 @@ class CommittedManifestReadTests(unittest.TestCase):
         _FakeRemoteStore.missing = set()
         _FakeRemoteStore.broken = set()
         _FakeRemoteStore.reads = []
+        _FakeRemoteStore.prefix_reads = []
+        _FakeRemoteStore.prefix_fails = False
         _FakeRemoteStore.peak = 0
         for index in range(20):
             for dataset in ("articles", "articles_history"):
@@ -310,19 +327,26 @@ class CommittedManifestReadTests(unittest.TestCase):
         with patch("data_lake.product_adapter.ObjectStore", _FakeRemoteStore):
             return _committed_bronze_keys(self.contract, dataset, data_lake_uri=uri)
 
-    def test_reads_run_in_parallel_and_each_manifest_is_read_once_per_lake(self) -> None:
+    def test_manifests_come_from_one_prefix_read_and_are_cached_per_lake(self) -> None:
         articles = self.committed("articles")
         history = self.committed("articles_history")
         self.assertEqual(len(articles), 20)
         self.assertEqual(len(history), 20)
         self.assertTrue(all("dataset=articles/" in key for key in articles))
+        self.assertEqual(_FakeRemoteStore.prefix_reads, ["control/manifests/source=book-news-scraping"])
+        self.assertEqual(_FakeRemoteStore.reads, [])  # no process per manifest
+
+    def test_failed_prefix_read_falls_back_to_parallel_reads(self) -> None:
+        _FakeRemoteStore.prefix_fails = True
+        self.assertEqual(len(self.committed("articles")), 20)
+        self.assertEqual(len(self.committed("articles_history")), 20)
         self.assertEqual(len(_FakeRemoteStore.reads), 40)  # the second dataset reuses the cached manifests
         self.assertGreater(_FakeRemoteStore.peak, 1)
 
     def test_cache_is_per_lake(self) -> None:
         self.committed("articles", "s3://bucket/lake-a")
         self.committed("articles", "s3://bucket/lake-b")
-        self.assertEqual(len(_FakeRemoteStore.reads), 80)
+        self.assertEqual(len(_FakeRemoteStore.prefix_reads), 2)
 
     def test_missing_manifest_is_skipped_and_broken_one_fails_closed(self) -> None:
         from data_lake.product_adapter import LakeIngestError

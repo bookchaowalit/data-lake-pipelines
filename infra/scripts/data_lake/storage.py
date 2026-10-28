@@ -318,6 +318,39 @@ class ObjectStore:
             raise StorageError(f"Object download failed for {key}")
         return result.stdout
 
+    def get_prefix(self, prefix: str) -> dict[str, bytes]:
+        """Read every object below a directory-like prefix with one provider call.
+
+        ``get_bytes`` starts one ``aws`` process per object; for hundreds of small
+        objects (commit manifests) one recursive copy is far cheaper.
+        """
+        prefix = _safe_key(prefix).rstrip("/")
+        if self.scheme == "file":
+            assert self.root is not None
+            base = self.root / prefix
+            if not base.exists():
+                return {}
+            return {
+                path.relative_to(self.root).as_posix(): path.read_bytes()
+                for path in base.rglob("*")
+                if path.is_file()
+            }
+
+        assert self.bucket is not None
+        with tempfile.TemporaryDirectory(prefix="lake-prefix-") as temporary:
+            result = self._run_aws([
+                "s3", "cp", f"s3://{self.bucket}/{self._full_key(prefix)}/", temporary,
+                "--recursive", *self._aws_args(), "--only-show-errors",
+            ])
+            if result.returncode != 0:
+                raise StorageError(f"Prefix download failed for {prefix}")
+            base = Path(temporary)
+            return {
+                f"{prefix}/{path.relative_to(base).as_posix()}": path.read_bytes()
+                for path in base.rglob("*")
+                if path.is_file()
+            }
+
     def list_keys(self, prefix: str = "") -> list[str]:
         """List object keys below a prefix for bounded polling jobs."""
         # Keep the local filesystem path bounded to ``self.root`` just like
