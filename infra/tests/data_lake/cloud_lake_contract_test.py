@@ -220,6 +220,43 @@ class CloudLakeContractTests(unittest.TestCase):
         self.assertEqual(report["reason"], "unsupported_DATA_LAKE_STORAGE_PROVIDER")
         run_aws.assert_not_called()
 
+    def test_get_prefix_reads_a_prefix_with_one_recursive_copy(self):
+        def copy(args, **_kwargs):
+            destination = Path(args[3])
+            (destination / "nested").mkdir()
+            (destination / "a.json").write_bytes(b"a")
+            (destination / "nested" / "b.json").write_bytes(b"b")
+            return subprocess.CompletedProcess(["aws"], 0, b"", b"")
+
+        store = ObjectStore("s3://bucket/lake")
+        with patch.object(store, "_run_aws", side_effect=copy) as run_aws:
+            bodies = store.get_prefix("control/manifests/source=news")
+        self.assertEqual(
+            bodies,
+            {"control/manifests/source=news/a.json": b"a", "control/manifests/source=news/nested/b.json": b"b"},
+        )
+        run_aws.assert_called_once()
+        args = run_aws.call_args.args[0]
+        self.assertEqual(args[:3], ["s3", "cp", "s3://bucket/lake/control/manifests/source=news/"])
+        self.assertIn("--recursive", args)
+
+    def test_get_prefix_failure_raises_storage_error(self):
+        store = ObjectStore("s3://bucket/lake")
+        failed = subprocess.CompletedProcess(["aws"], 1, b"", b"AccessDenied")
+        with patch.object(store, "_run_aws", return_value=failed), self.assertRaises(StorageError):
+            store.get_prefix("control/manifests/source=news")
+
+    def test_get_prefix_on_a_file_lake_reads_below_the_prefix_only(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "control" / "m").mkdir(parents=True)
+            (Path(root) / "control" / "m" / "x.json").write_bytes(b"x")
+            (Path(root) / "control" / "other.json").write_bytes(b"o")
+            store = ObjectStore(Path(root).as_uri())
+            self.assertEqual(store.get_prefix("control/m"), {"control/m/x.json": b"x"})
+            self.assertEqual(store.get_prefix("control/missing"), {})
+
 
 if __name__ == "__main__":
     unittest.main()

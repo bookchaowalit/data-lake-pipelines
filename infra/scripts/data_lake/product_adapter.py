@@ -250,9 +250,35 @@ _MANIFEST_CACHE: dict[tuple[str, str], bytes] = {}
 _MANIFEST_CACHE_LOCK = threading.Lock()
 
 
-def _read_manifests(store: ObjectStore, lake_uri: str, keys: Sequence[str]) -> list[tuple[str, bytes | Exception]]:
+def _prefetch_manifests(store: ObjectStore, lake_uri: str, keys: Sequence[str], prefixes: Sequence[str]) -> None:
+    """Fill the cache with one recursive download per prefix instead of one process per manifest.
+
+    A fresh cron container starts with an empty cache, so per-key reads still grew with every
+    ingest (the news-capture cron passed its 900 s timeout again on 2026-10-28 at ~500 manifests).
+    Anything the bulk copy misses (a failed copy, a key written after the listing) is read per key.
+    """
+    with _MANIFEST_CACHE_LOCK:
+        uncached = {key for key in keys if (lake_uri, key) not in _MANIFEST_CACHE}
+    for prefix in prefixes:
+        wanted = {key for key in uncached if key.startswith(prefix.rstrip("/") + "/")}
+        if len(wanted) < 2:
+            continue
+        try:
+            bodies = store.get_prefix(prefix)
+        except StorageError:
+            continue
+        with _MANIFEST_CACHE_LOCK:
+            for key in wanted & bodies.keys():
+                _MANIFEST_CACHE[(lake_uri, key)] = bodies[key]
+
+
+def _read_manifests(
+    store: ObjectStore, lake_uri: str, keys: Sequence[str], prefixes: Sequence[str] = ()
+) -> list[tuple[str, bytes | Exception]]:
     """Read manifest bodies in listing order; a failed read is returned as its exception."""
     remote = is_remote_lake_uri(lake_uri)
+    if remote and prefixes:
+        _prefetch_manifests(store, lake_uri, keys, prefixes)
 
     def read(key: str) -> bytes | Exception:
         if remote:
@@ -304,7 +330,7 @@ def _committed_bronze_keys(
         except StorageError as exc:
             raise LakeIngestError(f"Cannot list Bronze commit manifests for {dataset}") from exc
     json_keys = [key for key in manifest_keys if key.endswith(".json")]
-    for manifest_key, body in _read_manifests(store, data_lake_uri, json_keys):
+    for manifest_key, body in _read_manifests(store, data_lake_uri, json_keys, manifest_prefixes):
         try:
             if isinstance(body, Exception):
                 raise body
