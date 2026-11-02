@@ -616,8 +616,8 @@ def transform_bronze_to_silver(
     # Exclude before choosing the latest version per record, so a newer test
     # capture that shares an id can never hide the real row behind it.
     excluded = set(contract.excluded_providers)
-    kept_rows = []
-    excluded_rows = []
+    kept_rows: list[dict[str, Any]] = []
+    excluded_rows: list[dict[str, Any]] = []
     for row in bronze_rows:
         is_excluded = _text(parse_payload_json(row).get("provider")) in excluded
         (excluded_rows if is_excluded else kept_rows).append(row)
@@ -733,7 +733,7 @@ def transform_bronze_to_silver(
     silver_result, silver_bytes = put_part(silver_key, normalized)
     raw_keys = sorted({_text(row.get("raw_object_key")) for row in latest_rows if _text(row.get("raw_object_key"))})
     ingest_runs = sorted({_text(row.get("ingest_run_id")) for row in latest_rows if _text(row.get("ingest_run_id"))})
-    manifest = {
+    manifest: dict[str, Any] = {
         "manifest_version": "1",
         "layer": "silver",
         "source": contract.source,
