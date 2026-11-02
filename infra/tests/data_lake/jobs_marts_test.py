@@ -173,6 +173,50 @@ class JobsMartsTests(unittest.TestCase):
             companies = self._rows(root, result, "jobs_company_hiring", "SELECT company_key FROM lake_table")
             self.assertEqual([row["company_key"] for row in companies], ["acme"])
 
+    def test_windows_cover_exactly_n_dates_ending_on_as_of(self):
+        with tempfile.TemporaryDirectory() as root:
+            days = [f"2026-10-{d:02d}" for d in range(1, 23)]  # one posting per date to 10-22
+            records = [_job(i, posted=day) for i, day in enumerate(days, start=1)]
+            records.append(_job(99, posted="2026-12-31"))  # future-dated: never "recent"
+            _ingest(root, records)
+            result = self._run(root)
+            health = self._rows(root, result, "jobs_board_health", "SELECT postings_7d FROM lake_table")
+            self.assertEqual(health[0]["postings_7d"], 7)
+            company = self._rows(root, result, "jobs_company_hiring", "SELECT postings_30d FROM lake_table")
+            self.assertEqual(company[0]["postings_30d"], 22)
+
+    def test_skills_keep_at_most_50_tags_per_week_even_with_ties(self):
+        with tempfile.TemporaryDirectory() as root:
+            _ingest(root, [_job(i, tags=f"tag{i:03d}") for i in range(1, 61)])
+            result = self._run(root)
+            skills = self._rows(
+                root, result, "jobs_skills_demand",
+                "SELECT count(*) n, min(tag) first_tag, max(tag) last_tag, max(demand_rank) top_rank FROM lake_table",
+            )
+            self.assertEqual(
+                tuple(skills[0].values()), (50, "tag001", "tag050", 1)
+            )
+
+    def test_dbt_build_without_an_explicit_silver_part_fails(self):
+        import subprocess
+
+        from data_lake.jobs_marts import DBT_PROJECT_DIR, resolve_dbt_bin
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                [
+                    str(resolve_dbt_bin()), "build", "--select", "stg_job_postings",
+                    "--profiles-dir", str(DBT_PROJECT_DIR), "--project-dir", str(DBT_PROJECT_DIR),
+                    "--target-path", str(Path(temp_dir) / "target"), "--log-path", str(Path(temp_dir) / "logs"),
+                ],
+                cwd=str(DBT_PROJECT_DIR),
+                env={**os.environ, "DBT_DUCKDB_PATH": str(Path(temp_dir) / "x.duckdb")},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("jobs_silver_part", result.stdout + result.stderr)
+
     def test_rerun_is_idempotent_and_manifest_links_silver(self):
         with tempfile.TemporaryDirectory() as root:
             _ingest(root, FIXTURE_JOBS)

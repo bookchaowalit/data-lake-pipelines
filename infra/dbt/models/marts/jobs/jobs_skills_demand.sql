@@ -22,7 +22,8 @@ select
     posted_week,
     tag,
     postings,
+    -- Ties share a rank; the 50-row cap is a separate, deterministic cut.
     rank() over (partition by posted_week order by postings desc) as demand_rank
 from counted
-qualify demand_rank <= 50
+qualify row_number() over (partition by posted_week order by postings desc, tag) <= 50
 order by 1, 4, 2

@@ -82,7 +82,7 @@ Findings that shape the next tasks:
 
 Design: one runner, `infra/scripts/data_lake/jobs_marts.py`, does Silver → dbt → Gold in one bounded run. It builds (or re-finds) the Silver snapshot of the current Bronze and hands **that exact part** to dbt (`--vars jobs_silver_part`), which solves Task 2 finding 1 by construction. dbt runs in a scratch DuckDB file (`DBT_DUCKDB_PATH`) that is thrown away afterwards. Marts are exported as deterministic Parquet (pyarrow, ordered rows) and published write-once with a Gold manifest. No DuckDB S3 config needed: the Silver part is copied through `ObjectStore`.
 
-- [x] `stg_job_postings` (valid rows only, one row per `record_id`; glob default only for local dev).
+- [x] `stg_job_postings` (valid rows only, one row per `record_id`; needs an explicit `jobs_silver_part`).
 - [x] `jobs_postings_daily` — posted date × board: postings, companies, with_salary.
 - [x] `jobs_board_health` — board: total, companies, last posted/seen, postings in last 7 days.
 - [x] `jobs_skills_demand` — ISO week × tag (lower-cased): postings, rank, top 50 per week.
@@ -94,6 +94,7 @@ Design: one runner, `infra/scripts/data_lake/jobs_marts.py`, does Silver → dbt
 - [x] Tests `infra/tests/data_lake/jobs_marts_test.py` (5): mart values, idempotent rerun, new Bronze → new Gold run, stale reporting, quality gate writes no Gold. Suite 52/52 files, mypy 57 files, ruff clean.
 - [x] Real run on R2: Track B landed a new batch at 16:18 UTC, so Silver made a new snapshot `silver-7f9d98ed92c6d18910bf61f2` (4,410 rows, 9 boards); Gold `gold-b903ed14085599696ebb7f8b`: board_health 9, postings_daily 207, skills_demand 1,402, company_hiring 2,346 rows; dbt 5 models + 12 tests pass; age 0.26 h. Rerun: every object `existed`.
 - [x] Review fixes (Codex): capture times normalised to UTC (`timestamptz … at time zone 'UTC'` + profile `TimeZone: UTC`), missing companies are `NULL` keys (not one extra "company"), a posting counts once per tag. Gold rebuilt as `gold-9c9ac59b1a26ba75726e4d72` from the same Silver run; `gold-b903…` stays as superseded evidence, so readers must take the newest Gold manifest.
+- [x] Review fixes (Codex, round 2): `jobs_silver_part` is required for `build`/`run` (no glob default; a later snapshot can drop a record, so no mix of parts is correct), recent windows are exactly 7 / 30 dates ending on `as_of_date` with future dates excluded, skills cap is a deterministic `row_number() <= 50` per week (ties keep their shared `demand_rank`). Gold rebuilt as `gold-a39106b907a07a4dcadc414e` (skills_demand 1,402 → 998 rows: ties had pushed weeks past 50).
 
 Findings:
 

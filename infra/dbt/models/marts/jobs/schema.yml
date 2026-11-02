@@ -5,7 +5,8 @@ models:
     description: Postings per posting date and board, from the jobs Silver snapshot.
     tests:
       - unique_combination_of_columns:
-          columns: [posted_date, board]
+          arguments:
+            columns: [posted_date, board]
     columns:
       - name: posted_date
         tests: [not_null]
@@ -26,7 +27,8 @@ models:
     description: Top 50 tags per ISO week by postings.
     tests:
       - unique_combination_of_columns:
-          columns: [posted_week, tag]
+          arguments:
+            columns: [posted_week, tag]
     columns:
       - name: tag
         tests: [not_null]
