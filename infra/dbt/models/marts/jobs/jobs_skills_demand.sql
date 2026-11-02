@@ -1,7 +1,9 @@
 -- Gold mart: tag demand per ISO week (Monday start), top 50 tags per week.
+-- A posting counts once per tag, even if its board lists the tag twice.
 
 with tagged as (
-    select
+    select distinct
+        record_id,
         cast(date_trunc('week', posted_date) as date) as posted_week,
         lower(trim(tag)) as tag
     from {{ ref('stg_job_postings') }},
@@ -11,7 +13,7 @@ with tagged as (
 ),
 
 counted as (
-    select posted_week, tag, count(*) as postings
+    select posted_week, tag, count(distinct record_id) as postings
     from tagged
     group by 1, 2
 )

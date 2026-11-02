@@ -93,6 +93,7 @@ Design: one runner, `infra/scripts/data_lake/jobs_marts.py`, does Silver → dbt
 - [x] Gold layout: `gold/domain=jobs/dataset=<mart>/schema_version=1/part-<gold_run_id>.parquet`; manifest `control/manifests/gold/source=book-job-data/domain=jobs/gold_run_id=<id>.json`. `gold_run_id` = hash(Silver run, jobs model files, duckdb + pyarrow versions).
 - [x] Tests `infra/tests/data_lake/jobs_marts_test.py` (5): mart values, idempotent rerun, new Bronze → new Gold run, stale reporting, quality gate writes no Gold. Suite 52/52 files, mypy 57 files, ruff clean.
 - [x] Real run on R2: Track B landed a new batch at 16:18 UTC, so Silver made a new snapshot `silver-7f9d98ed92c6d18910bf61f2` (4,410 rows, 9 boards); Gold `gold-b903ed14085599696ebb7f8b`: board_health 9, postings_daily 207, skills_demand 1,402, company_hiring 2,346 rows; dbt 5 models + 12 tests pass; age 0.26 h. Rerun: every object `existed`.
+- [x] Review fixes (Codex): capture times normalised to UTC (`timestamptz … at time zone 'UTC'` + profile `TimeZone: UTC`), missing companies are `NULL` keys (not one extra "company"), a posting counts once per tag. Gold rebuilt as `gold-9c9ac59b1a26ba75726e4d72` from the same Silver run; `gold-b903…` stays as superseded evidence, so readers must take the newest Gold manifest.
 
 Findings:
 
