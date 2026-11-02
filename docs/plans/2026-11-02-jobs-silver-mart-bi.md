@@ -59,14 +59,24 @@ Known data issues found while sampling:
 - [x] Dry run on a local copy of the real R2 Bronze (2026-11-02): 17,428 rows → 4,292 latest → 2 fixture excluded → **7 invalid (0.16 %)** → 4,283 valid across 8 boards. With `0.0` it fails closed as intended.
 - [ ] Jobs scheduled run uses `--max-invalid-ratio 0.02` (≈ 12× today's rate; a jump past 2 % means a board broke and should stop the run).
 
-### Task 2: First Silver run on R2 (manual, evidenced)
+### Task 2: First Silver run on R2 ✅ (2026-11-02, main `a5f1453`)
 
-- [ ] Run inside the Infisical env so the secrets expand there, not in the outer shell (single quotes matter):
+- [x] Run inside the Infisical env so the secrets expand there, not in the outer shell (single quotes matter). `ObjectStore` shells out to the `aws` CLI for S3, so it must be on `PATH` (GitHub-hosted Ubuntu has it; locally use a throwaway `uv venv` + `uv pip install awscli`):
   ```bash
-  infisical run --path=/job-data -- bash -c 'AWS_ACCESS_KEY_ID="$JOB_DATA_R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$JOB_DATA_R2_SECRET_ACCESS_KEY" DATA_LAKE_S3_ENDPOINT="$JOB_DATA_S3_ENDPOINT" AWS_ENDPOINT_URL="$JOB_DATA_S3_ENDPOINT" AWS_DEFAULT_REGION=auto DATA_LAKE_CLOUD_WRITE_ENABLED=true .venv/bin/python infra/scripts/data_lake/silver.py --data-lake-uri "$JOB_DATA_LAKE_URI" --json'
+  infisical run --path=/job-data -- bash -c 'AWS_ACCESS_KEY_ID="$JOB_DATA_R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$JOB_DATA_R2_SECRET_ACCESS_KEY" DATA_LAKE_S3_ENDPOINT="$JOB_DATA_S3_ENDPOINT" AWS_ENDPOINT_URL="$JOB_DATA_S3_ENDPOINT" AWS_DEFAULT_REGION=auto DATA_LAKE_CLOUD_WRITE_ENABLED=true .venv/bin/python infra/scripts/data_lake/silver.py --data-lake-uri "$JOB_DATA_LAKE_URI" --max-invalid-ratio 0.02 --json'
   ```
-- [ ] Precondition: branch `feat/jobs-silver-v2-quarantine` merged (otherwise the run aborts on the URL-less rows). Pass `--max-invalid-ratio 0.02`.
-- [ ] Evidence: valid/rejected row counts, both Silver keys, manifest key, rerun = no new part.
+- [x] Evidence (run id `silver-c822249f3a893e42114cc727`):
+  - Bronze 17,428 rows → 13,136 duplicates → 2 fixture rows excluded → 7 invalid (0.16 %) → **4,283 valid**, `quality.status=passed_with_rejects`.
+  - `silver/domain=jobs/dataset=job_postings/schema_version=1/event_date=mixed/part-silver-c822249f3a893e42114cc727.parquet`
+  - `silver/domain=jobs/dataset=job_postings_rejects/schema_version=1/event_date=mixed/part-silver-c822249f3a893e42114cc727.parquet`
+  - `control/manifests/silver/source=book-job-data/dataset=job_postings/transform_id=silver-c822249f3a893e42114cc727.json`
+  - Rerun: same run id, `silver_existed`/`rejects_existed`/`manifest_existed` all `true` (no new objects).
+  - Read back from R2: 8 boards, `count(*) = count(distinct record_id)` per board; all 7 rejects are `HN_WhoIsHiring` (posts without a URL).
+
+Findings that shape the next tasks:
+
+1. **Each run is a full snapshot.** When Bronze changes, the next run writes a new complete part under `event_date=mixed`. `read_silver_rows()` globs every part, so after the second scheduled run it would double-count. Task 3 must read only the part named by the **latest Silver manifest** (or Task 4 must prune older parts — prefer reading latest; parts are immutable evidence).
+2. HN_WhoIsHiring rows have no URL by nature; fix in `book-job-scraping` (fall back to the HN item URL) rather than loosening Silver.
 
 ### Task 3: dbt sources on R2 + jobs marts
 
@@ -74,6 +84,7 @@ Known data issues found while sampling:
 
 Marts (Gold):
 
+- [ ] `stg_job_postings` reads the single Silver part named by the latest `control/manifests/silver/source=book-job-data/dataset=job_postings/` manifest (see Task 2 finding 1), never a glob over all parts.
 - [ ] `jobs_postings_daily` — date × board: new postings, unique companies, with-salary share.
 - [ ] `jobs_board_health` — board: last seen, 7-day volume, invalid-row rate (feeds the uptime story).
 - [ ] `jobs_skills_demand` — week × tag: postings count, rank; top-N only.
