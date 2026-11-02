@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: jobs_postings_daily
+    description: Postings per posting date and board, from the jobs Silver snapshot.
+    tests:
+      - unique_combination_of_columns:
+          columns: [posted_date, board]
+    columns:
+      - name: posted_date
+        tests: [not_null]
+      - name: board
+        tests: [not_null]
+      - name: postings
+        tests: [not_null]
+
+  - name: jobs_board_health
+    description: One row per board with volume and recency, anchored on the newest capture.
+    columns:
+      - name: board
+        tests: [unique, not_null]
+      - name: postings_total
+        tests: [not_null]
+
+  - name: jobs_skills_demand
+    description: Top 50 tags per ISO week by postings.
+    tests:
+      - unique_combination_of_columns:
+          columns: [posted_week, tag]
+    columns:
+      - name: tag
+        tests: [not_null]
+
+  - name: jobs_company_hiring
+    description: One row per company (case-insensitive) with 30-day and total postings.
+    columns:
+      - name: company_key
+        tests: [unique, not_null]

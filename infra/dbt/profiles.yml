@@ -11,5 +11,6 @@ solo_empire_lake:
       # not create missing parent directories before opening the database
       # file, and the project directory itself always exists. Confirmed
       # by a real CI failure when this pointed at target/local.duckdb.
-      path: local.duckdb
+      # DBT_DUCKDB_PATH lets a runner build into its own scratch file.
+      path: "{{ env_var('DBT_DUCKDB_PATH', 'local.duckdb') }}"
       threads: 4

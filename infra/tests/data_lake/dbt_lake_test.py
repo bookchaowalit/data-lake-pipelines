@@ -230,6 +230,39 @@ def build_synthetic_bronze(root: Path) -> None:
     )
 
 
+def build_jobs_silver_fixture(lake_root: Path) -> Path:
+    """One small jobs Silver part, built by the real Bronze → Silver code."""
+    from data_lake.ingest import ingest_payload
+    from data_lake.silver import transform_bronze_to_silver
+
+    ingest_payload(
+        b"dbt-jobs-fixture",
+        [
+            {
+                "id": f"job-{i}",
+                "title": f"Engineer {i}",
+                "company": "Fixture Co",
+                "url": f"https://example.invalid/jobs/{i}",
+                "event_time": "2026-09-30T12:00:00Z",
+                "posted": "2026-09-29",
+                "provider": "book-job-scraping",
+                "source": "Fixture Board",
+                "tags": "Python, SQL",
+            }
+            for i in range(3)
+        ],
+        source="book-job-data",
+        domain="jobs",
+        dataset="job_postings",
+        data_lake_uri=str(lake_root),
+        input_format="text",
+        event_time_field="event_time",
+        privacy_class="internal",
+    )
+    result = transform_bronze_to_silver(data_lake_uri=str(lake_root))
+    return lake_root / result["silver_key"]
+
+
 def run() -> bool:
     if DBT_BIN is None:
         message = "dbt not on PATH (install infra/requirements-data-lake.txt)"
@@ -243,6 +276,7 @@ def run() -> bool:
         bronze_root = Path(tmp) / "bronze"
         build_synthetic_bronze(bronze_root)
         export_registry_fixture(Path(tmp))
+        jobs_silver_part = build_jobs_silver_fixture(Path(tmp))
         target_dir = Path(tmp) / "target"
         # dbt-duckdb does not create the target directory itself before
         # opening the database file there.
@@ -265,6 +299,7 @@ def run() -> bool:
                         "bronze_manifest_root": str(
                             Path(tmp) / "control" / "manifests"
                         ),
+                        "jobs_silver_part": str(jobs_silver_part),
                     }
                 ),
             ],
@@ -300,6 +335,7 @@ def run() -> bool:
                         "bronze_manifest_root": str(
                             Path(tmp) / "control" / "manifests"
                         ),
+                        "jobs_silver_part": str(jobs_silver_part),
                     }
                 ),
             ],

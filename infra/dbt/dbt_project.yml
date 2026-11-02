@@ -13,6 +13,9 @@ vars:
   # editing SQL.
   bronze_root: "{{ env_var('SOLO_EMPIRE_DATA_LAKE_URI', '../../data/lake') }}/bronze"
   bronze_manifest_root: "{{ env_var('SOLO_EMPIRE_DATA_LAKE_URI', '../../data/lake') }}/control/manifests"
+  # The jobs_marts runner overrides this with the exact Silver part it built;
+  # the glob is for local development only (see stg_job_postings).
+  jobs_silver_part: "{{ env_var('SOLO_EMPIRE_DATA_LAKE_URI', '../../data/lake') }}/silver/domain=jobs/dataset=job_postings/schema_version=1/event_date=*/part-*.parquet"
 
 models:
   solo_empire_lake:
