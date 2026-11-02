@@ -1,0 +1,78 @@
+# Jobs Bronze → Silver → dbt marts → Gold on the R2 lake (plan: docs/plans/2026-11-02-jobs-silver-mart-bi.md).
+# Track B (career-job-scraper, "17 */6") lands Bronze; this runs 30 min after each of its slots
+# and in between, because GitHub's cron can start hours late. Every run is idempotent: when
+# Bronze has not changed it finds the existing Silver/Gold objects and writes nothing.
+#
+# Public repository: GitHub-hosted runner, and the log is public, so only counts and object
+# keys are printed. Failures and stale data reach Telegram through the uptime Worker
+# heartbeat `jobs-marts`.
+name: Jobs marts (Silver → Gold)
+
+on:
+  schedule:
+    - cron: "47 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jobs-marts
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install runtime from uv.lock
+        # Same lock as local runs, so the duckdb/pyarrow versions (part of gold_run_id) match.
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.13.1
+          uv sync --frozen --no-dev
+
+      - name: Build Silver and Gold
+        id: marts
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.JOB_DATA_R2_SECRET_ACCESS_KEY }}
+          DATA_LAKE_S3_ENDPOINT: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_ENDPOINT_URL: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+          DATA_LAKE_CLOUD_WRITE_ENABLED: "true"
+          SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
+        run: |
+          set +e
+          .venv/bin/python infra/scripts/data_lake/jobs_marts.py --max-invalid-ratio 0.02 --stale-hours 24 --json > "$RUNNER_TEMP/result.json"
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          # Counts and keys only (public log).
+          jq '{status, error, silver_run_id, gold_run_id,
+               silver: (.silver // {} | {record_count, invalid_count, excluded_count, existed}),
+               marts: (.marts // {} | map_values({rows, existed})),
+               dbt: .dbt.statuses, freshness}' "$RUNNER_TEMP/result.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $code
+
+      - name: Heartbeat
+        if: ${{ always() }}
+        env:
+          HEARTBEAT_TOKEN: ${{ secrets.HEARTBEAT_TOKEN }}
+          CODE: ${{ steps.marts.outputs.exit_code }}
+        run: |
+          case "$CODE" in
+            0) body='{"ok":true,"failed":[]}' ;;
+            3) body='{"ok":false,"failed":["stale"]}' ;;
+            *) body='{"ok":false,"failed":["jobs-marts"]}' ;;
+          esac
+          curl -fsS -X POST https://solo-empire-monitor.bookchaowalit.workers.dev/heartbeat/jobs-marts \
+            -H "Authorization: Bearer $HEARTBEAT_TOKEN" -H "Content-Type: application/json" -d "$body"
