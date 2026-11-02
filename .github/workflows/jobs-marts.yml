@@ -52,12 +52,14 @@ jobs:
           SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
         run: |
           set +e
-          .venv/bin/python infra/scripts/data_lake/jobs_marts.py --max-invalid-ratio 0.02 --stale-hours 24 --json > "$RUNNER_TEMP/result.json"
+          # stderr (dbt/aws output) stays in a runner temp file, out of the public log.
+          .venv/bin/python infra/scripts/data_lake/jobs_marts.py --max-invalid-ratio 0.02 --stale-hours 24 --json \
+            > "$RUNNER_TEMP/result.json" 2> "$RUNNER_TEMP/stderr.log"
           code=$?
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          # Counts and keys only (public log).
-          jq '{status, error, silver_run_id, gold_run_id,
+          # Counts and run ids only (public log); an error shows its exception type, not its text.
+          jq '{status, error: (if .error then (.error | split(":")[0]) else null end), silver_run_id, gold_run_id,
                silver: (.silver // {} | {record_count, invalid_count, excluded_count, existed}),
                marts: (.marts // {} | map_values({rows, existed})),
                dbt: .dbt.statuses, freshness}' "$RUNNER_TEMP/result.json" | tee -a "$GITHUB_STEP_SUMMARY"
