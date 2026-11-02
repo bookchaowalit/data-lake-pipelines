@@ -78,20 +78,27 @@ Findings that shape the next tasks:
 1. **Each run is a full snapshot.** When Bronze changes, the next run writes a new complete part under `event_date=mixed`. `read_silver_rows()` globs every part, so after the second scheduled run it would double-count. Task 3 must read only the part named by the **latest Silver manifest** (or Task 4 must prune older parts — prefer reading latest; parts are immutable evidence).
 2. HN_WhoIsHiring rows have no URL by nature; fix in `book-job-scraping` (fall back to the HN item URL) rather than loosening Silver.
 
-### Task 3: dbt sources on R2 + jobs marts
+### Task 3: dbt marts → Gold ✅ (2026-11-02)
 
-**Files:** `infra/dbt/models/staging/stg_job_postings.sql`, `infra/dbt/models/marts/jobs/*.sql`, `schema.yml`, `profiles.yml` (new `r2` target with httpfs secret from env)
+Design: one runner, `infra/scripts/data_lake/jobs_marts.py`, does Silver → dbt → Gold in one bounded run. It builds (or re-finds) the Silver snapshot of the current Bronze and hands **that exact part** to dbt (`--vars jobs_silver_part`), which solves Task 2 finding 1 by construction. dbt runs in a scratch DuckDB file (`DBT_DUCKDB_PATH`) that is thrown away afterwards. Marts are exported as deterministic Parquet (pyarrow, ordered rows) and published write-once with a Gold manifest. No DuckDB S3 config needed: the Silver part is copied through `ObjectStore`.
 
-Marts (Gold):
+- [x] `stg_job_postings` (valid rows only, one row per `record_id`; glob default only for local dev).
+- [x] `jobs_postings_daily` — posted date × board: postings, companies, with_salary.
+- [x] `jobs_board_health` — board: total, companies, last posted/seen, postings in last 7 days.
+- [x] `jobs_skills_demand` — ISO week × tag (lower-cased): postings, rank, top 50 per week.
+- [x] `jobs_company_hiring` — company (case-insensitive): total, last 30 days, boards, first/last posted.
+- [x] "Recent" windows are anchored on the newest capture in the snapshot, not the wall clock, so a rebuild of the same Silver run gives identical rows.
+- [x] dbt tests: `unique`/`not_null` on keys, local `unique_combination_of_columns` generic test (no package deps), `tests/jobs_marts_quality.sql` consistency checks. `dbt_lake_test.py` builds a jobs Silver fixture so the full project (100 nodes) still passes.
+- [x] Freshness: runner reports age of the newest capture; `status=stale` and exit 3 above `--stale-hours` (default 24), Gold still written.
+- [x] Gold layout: `gold/domain=jobs/dataset=<mart>/schema_version=1/part-<gold_run_id>.parquet`; manifest `control/manifests/gold/source=book-job-data/domain=jobs/gold_run_id=<id>.json`. `gold_run_id` = hash(Silver run, jobs model files, duckdb + pyarrow versions).
+- [x] Tests `infra/tests/data_lake/jobs_marts_test.py` (5): mart values, idempotent rerun, new Bronze → new Gold run, stale reporting, quality gate writes no Gold. Suite 52/52 files, mypy 57 files, ruff clean.
+- [x] Real run on R2: Track B landed a new batch at 16:18 UTC, so Silver made a new snapshot `silver-7f9d98ed92c6d18910bf61f2` (4,410 rows, 9 boards); Gold `gold-b903ed14085599696ebb7f8b`: board_health 9, postings_daily 207, skills_demand 1,402, company_hiring 2,346 rows; dbt 5 models + 12 tests pass; age 0.26 h. Rerun: every object `existed`.
 
-- [ ] `stg_job_postings` reads the single Silver part named by the latest `control/manifests/silver/source=book-job-data/dataset=job_postings/` manifest (see Task 2 finding 1), never a glob over all parts.
-- [ ] `jobs_postings_daily` — date × board: new postings, unique companies, with-salary share.
-- [ ] `jobs_board_health` — board: last seen, 7-day volume, invalid-row rate (feeds the uptime story).
-- [ ] `jobs_skills_demand` — week × tag: postings count, rank; top-N only.
-- [ ] `jobs_company_hiring` — company: open postings 30 d, boards, first/last seen.
-- [ ] dbt tests: `not_null`/`unique` on keys, `accepted_values` on board, freshness on Silver (warn 8 h, error 24 h).
-- [ ] Export step writes each mart as Parquet to `gold/domain=jobs/dataset=<mart>/` + Gold manifest.
-- [ ] CI keeps running on fixtures (no R2 creds in PRs).
+Findings:
+
+1. New board **PeoplePerHour** (16 jobs): `posted_at` does not parse as a date, so it is missing from `jobs_postings_daily` / `jobs_skills_demand`. Fix the date at the source (`book-job-scraping`) or add a parser in `stg_job_postings`.
+2. Board health already shows value: RemoteOK last posted 2026-08-18 → its scraper is likely broken.
+3. BI / Task 5 needs the newest Gold run: read the newest Gold manifest, or take `marts.*.key` from the runner output in the same workflow.
 
 ### Task 4: Schedule it
 
