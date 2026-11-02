@@ -42,8 +42,8 @@ from data_lake.storage import ObjectStore  # noqa: E402
 
 
 SILVER_SCHEMA_VERSION = "1"
-JOB_SILVER_PRODUCT_SCHEMA = "job.silver.v1"
-JOB_TRANSFORM_VERSION = "job-postings-silver.v1"
+JOB_SILVER_PRODUCT_SCHEMA = "job.silver.v2"
+JOB_TRANSFORM_VERSION = "job-postings-silver.v2"
 CRYPTO_SILVER_PRODUCT_SCHEMA = "crypto.silver.v1"
 CRYPTO_TRANSFORM_VERSION = "crypto-prices-silver.v1"
 STOCK_SILVER_PRODUCT_SCHEMA = "stock.silver.v1"
@@ -81,6 +81,9 @@ JOB_SILVER_COLUMNS = COMMON_SILVER_COLUMNS + (
     "location",
     "salary_text",
     "posted_at",
+    "board",
+    "tags",
+    "keyword",
 )
 CRYPTO_SILVER_COLUMNS = COMMON_SILVER_COLUMNS + (
     "coin_id",
@@ -159,6 +162,12 @@ class SilverProductContract:
     required_fields: tuple[str, ...] = ("source_record_id", "title", "canonical_url")
     privacy_class: str = "internal"
     retention_class: str = "operational"
+    # 0.0 keeps the transform fail-closed. A positive ratio lets invalid rows
+    # go to a ``<dataset>_rejects`` Silver part as long as they stay within it.
+    max_invalid_ratio: float = 0.0
+    # Bronze rows whose payload ``provider`` is listed here are test captures
+    # that reached a real lake; they are counted but never published.
+    excluded_providers: tuple[str, ...] = ("offline_fixture",)
 
 
 def _pyarrow():
@@ -201,6 +210,12 @@ def _numeric_errors(value: str, field: str, *, positive: bool = False) -> list[s
     if positive and number <= 0:
         return [f"{field} must be positive"]
     return []
+
+
+def _tag_list(value: Any) -> list[str]:
+    """Return board tags as a clean list from a comma string or a JSON list."""
+    items = value if isinstance(value, list) else str(value or "").split(",")
+    return [tag for tag in (_text(item) for item in items) if tag]
 
 
 def _canonical_url(value: str) -> str:
@@ -276,6 +291,7 @@ def normalize_job_row(
     salary = _first_text(payload, "salary", "salary_text", "compensation")
     posted_at = _first_text(payload, "posted_at", "posted", "created_date", "date")
     provider = _first_text(payload, "provider", "board", "source")
+    board = _first_text(payload, "source", "board")
     errors = []
     if not source_record_id:
         errors.append("missing source_record_id")
@@ -293,6 +309,9 @@ def normalize_job_row(
         "location": location,
         "salary_text": salary,
         "posted_at": posted_at,
+        "board": board,
+        "tags": _canonical_json(_tag_list(payload.get("tags"))),
+        "keyword": _text(payload.get("keyword")),
         "quality_status": "invalid" if errors else "valid",
         "quality_errors": _canonical_json(errors),
     }
@@ -580,6 +599,9 @@ def transform_bronze_to_silver(
     data_lake_uri: str = "",
 ) -> dict[str, Any]:
     """Read one Bronze dataset and publish one deterministic Silver part."""
+    ratio = contract.max_invalid_ratio
+    if not (isinstance(ratio, (int, float)) and math.isfinite(ratio) and 0.0 <= ratio <= 1.0):
+        raise ValueError(f"max_invalid_ratio must be a finite number in [0, 1], got {ratio!r}")
     uri = default_data_lake_uri(data_lake_uri=data_lake_uri)
     bronze_contract = _contract_as_bronze(contract)
     bronze_rows = read_bronze_rows(
@@ -591,7 +613,23 @@ def transform_bronze_to_silver(
         raise SilverQualityError(
             f"Bronze dataset is empty: {contract.source}/{contract.bronze_dataset}"
         )
-    latest_rows = select_latest_bronze_rows(bronze_rows)
+    # Exclude before choosing the latest version per record, so a newer test
+    # capture that shares an id can never hide the real row behind it.
+    excluded = set(contract.excluded_providers)
+    kept_rows = []
+    excluded_rows = []
+    for row in bronze_rows:
+        is_excluded = _text(parse_payload_json(row).get("provider")) in excluded
+        (excluded_rows if is_excluded else kept_rows).append(row)
+    excluded_count = len(excluded_rows)
+    latest_rows = select_latest_bronze_rows(kept_rows) if kept_rows else []
+    # The v1 manifest shape is kept byte-for-byte unless this run actually
+    # quarantines or excludes, so replays of existing runs stay idempotent.
+    extended_quality = bool(contract.max_invalid_ratio or excluded_count)
+    if not latest_rows:
+        raise SilverQualityError(
+            f"No publishable Bronze rows after exclusions: {contract.source}/{contract.bronze_dataset}"
+        )
     columns = (
         NORMALIZERS[contract.normalizer][1]
         if contract.normalizer in NORMALIZERS
@@ -613,11 +651,22 @@ def transform_bronze_to_silver(
         }
         for row in latest_rows
     ]
-    fingerprint = hashlib.sha256(
-        _canonical_json({"transform": contract.transform_version, "rows": fingerprint_input}).encode("utf-8")
-    ).hexdigest()
+    fingerprint_body: dict[str, Any] = {"transform": contract.transform_version, "rows": fingerprint_input}
+    if extended_quality:
+        # The manifest records the policy and the excluded rows, and objects
+        # are write-once, so any change to either must get its own run id.
+        fingerprint_body["policy"] = {
+            "max_invalid_ratio": contract.max_invalid_ratio,
+            "excluded_providers": sorted(excluded),
+            "excluded_rows": sorted(
+                (_text(row.get("source_record_id")), _text(row.get("raw_sha256")))
+                for row in excluded_rows
+            ),
+        }
+    fingerprint = hashlib.sha256(_canonical_json(fingerprint_body).encode("utf-8")).hexdigest()
     silver_run_id = f"silver-{fingerprint[:24]}"
     normalized: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     for row in latest_rows:
         if contract.normalizer in NORMALIZERS:
@@ -632,16 +681,26 @@ def transform_bronze_to_silver(
             item, row_errors = normalize_fx_row(row, silver_run_id=silver_run_id)
         else:
             raise ValueError(f"unsupported Silver normalizer: {contract.normalizer}")
-        normalized.append(item)
+        (rejected if row_errors else normalized).append(item)
         if row_errors:
             errors.append({
                 "source_record_id": _text(row.get("source_record_id")),
                 "errors": row_errors,
             })
-    normalized.sort(key=lambda item: (item["record_id"], item["event_time"], item["source_record_id"]))
-    if errors:
+    def sort_key(item: dict[str, Any]) -> tuple[str, str, str]:
+        return (item["record_id"], item["event_time"], item["source_record_id"])
+
+    normalized.sort(key=sort_key)
+    rejected.sort(key=sort_key)
+    invalid_ratio = len(errors) / len(latest_rows)
+    if errors and (invalid_ratio > contract.max_invalid_ratio or not normalized):
         raise SilverQualityError(
-            "Silver quality gate failed: " + _canonical_json({"invalid_rows": errors})
+            "Silver quality gate failed: "
+            + _canonical_json({
+                "invalid_ratio": round(invalid_ratio, 6),
+                "max_invalid_ratio": contract.max_invalid_ratio,
+                "invalid_rows": errors,
+            })
         )
 
     store = ObjectStore(uri)
@@ -652,15 +711,26 @@ def transform_bronze_to_silver(
         f"schema_version={_safe_component(contract.silver_schema_version)}/"
         f"event_date={partition}/part-{silver_run_id}.parquet"
     )
-    with tempfile.TemporaryDirectory(prefix="solo-empire-silver-") as temp_dir:
-        parquet_path = Path(temp_dir) / "part.parquet"
-        _write_silver_parquet(normalized, parquet_path, columns=columns)
-        parquet_bytes = parquet_path.read_bytes()
-    silver_result = store.put_bytes(
-        silver_key,
-        parquet_bytes,
-        content_type="application/vnd.apache.parquet",
-    )
+    def put_part(key: str, rows: list[dict[str, Any]]):
+        with tempfile.TemporaryDirectory(prefix="solo-empire-silver-") as temp_dir:
+            parquet_path = Path(temp_dir) / "part.parquet"
+            _write_silver_parquet(rows, parquet_path, columns=columns)
+            parquet_bytes = parquet_path.read_bytes()
+        result = store.put_bytes(key, parquet_bytes, content_type="application/vnd.apache.parquet")
+        return result, len(parquet_bytes)
+
+    rejects_result = None
+    rejects_key = ""
+    rejects_bytes = 0
+    if rejected:
+        rejects_key = (
+            f"silver/domain={_safe_component(contract.domain)}/"
+            f"dataset={_safe_component(contract.silver_dataset + '_rejects')}/"
+            f"schema_version={_safe_component(contract.silver_schema_version)}/"
+            f"event_date={_event_partition(rejected)}/part-{silver_run_id}.parquet"
+        )
+        rejects_result, rejects_bytes = put_part(rejects_key, rejected)
+    silver_result, silver_bytes = put_part(silver_key, normalized)
     raw_keys = sorted({_text(row.get("raw_object_key")) for row in latest_rows if _text(row.get("raw_object_key"))})
     ingest_runs = sorted({_text(row.get("ingest_run_id")) for row in latest_rows if _text(row.get("ingest_run_id"))})
     manifest = {
@@ -683,21 +753,35 @@ def transform_bronze_to_silver(
             "deduplicated_record_count": len(latest_rows),
         },
         "quality": {
-            "status": "passed",
-            "invalid_count": 0,
-            "duplicate_count": len(bronze_rows) - len(latest_rows),
+            "status": "passed_with_rejects" if rejected else "passed",
+            "invalid_count": len(rejected),
+            "duplicate_count": len(kept_rows) - len(latest_rows),
             "output_record_count": len(normalized),
             "required_fields": list(contract.required_fields),
         },
         "silver": {
             "key": silver_key,
             "sha256": silver_result.sha256,
-            "bytes": len(parquet_bytes),
+            "bytes": silver_bytes,
             "columns": list(columns),
         },
         "privacy_class": contract.privacy_class,
         "retention_class": contract.retention_class,
     }
+    if extended_quality:
+        manifest["quality"].update({
+            "invalid_ratio": round(invalid_ratio, 6),
+            "max_invalid_ratio": contract.max_invalid_ratio,
+            "excluded_count": excluded_count,
+            "excluded_providers": sorted(excluded),
+        })
+    if rejects_result:
+        manifest["rejects"] = {
+            "key": rejects_key,
+            "sha256": rejects_result.sha256,
+            "bytes": rejects_bytes,
+            "record_count": len(rejected),
+        }
     manifest_key = (
         f"control/manifests/silver/source={_safe_component(contract.source)}/"
         f"dataset={_safe_component(contract.silver_dataset)}/"
@@ -717,7 +801,9 @@ def transform_bronze_to_silver(
         "manifest_key": manifest_result.key,
         "record_count": len(normalized),
         "input_record_count": len(bronze_rows),
-        "duplicate_count": len(bronze_rows) - len(latest_rows),
+        "duplicate_count": len(kept_rows) - len(latest_rows),
+        "rejects_key": rejects_result.key if rejects_result else "",
+        "rejects_existed": bool(rejects_result and rejects_result.existed),
         "silver_existed": silver_result.existed,
         "manifest_existed": manifest_result.existed,
         "quality": manifest["quality"],
@@ -743,6 +829,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--privacy-class", default="internal")
     parser.add_argument("--retention-class", default="operational")
+    parser.add_argument(
+        "--max-invalid-ratio",
+        type=float,
+        default=0.0,
+        help="Quarantine invalid rows up to this share of input (default 0: fail closed)",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
@@ -760,6 +852,7 @@ def main() -> int:
         normalizer=args.normalizer,
         privacy_class=args.privacy_class,
         retention_class=args.retention_class,
+        max_invalid_ratio=args.max_invalid_ratio,
         required_fields=(
             ("source_record_id", "coin_id", "currency", "price")
             if args.normalizer == "crypto_prices"
@@ -790,6 +883,8 @@ def main() -> int:
         print(f"  dataset: {args.source}/{args.silver_dataset}")
         print(f"  records: {result['record_count']}")
         print(f"  duplicate Bronze rows: {result['duplicate_count']}")
+        if result["rejects_key"]:
+            print(f"  rejects: {result['quality']['invalid_count']} → {result['rejects_key']}")
         print(f"  Silver: {result['silver_key']}")
         print(f"  manifest: {result['manifest_key']}")
     return 0
