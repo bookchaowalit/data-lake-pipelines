@@ -102,14 +102,18 @@ Findings:
 2. Board health already shows value: RemoteOK last posted 2026-08-18 → its scraper is likely broken.
 3. BI / Task 5 needs the newest Gold run: read the newest Gold manifest, or take `marts.*.key` from the runner output in the same workflow.
 
-### Task 4: Schedule it
+### Task 4: Schedule it ✅ (2026-11-02)
 
-**Files:** `.github/workflows/jobs-silver-gold.yml`
+**Files:** `.github/workflows/jobs-marts.yml`; `platform-uptime-worker` `src/targets.ts` (25eb183, deployed version `1bb470d2`)
 
-- [ ] Trigger: `workflow_run` is cross-repo-unsafe, so use `schedule` at :30 after each Track B slot (`30 */6 * * *`) + `workflow_dispatch`.
-- [ ] Steps: Silver → `dbt build --target r2 --select +marts.jobs` → Gold export → heartbeat.
-- [ ] Secrets: R2 key (repo secret from Infisical `/job-data`), `HEARTBEAT_TOKEN`.
-- [ ] Concurrency group so two runs never overlap.
+- [x] `cron: "47 */2 * * *"` + `workflow_dispatch`: 30 min after each Track B slot (`17 */6`) and in between, because GitHub cron can start hours late; idempotent runs cost nothing when Bronze is unchanged. Concurrency group `jobs-marts`.
+- [x] GitHub-hosted `ubuntu-24.04` (public repo); `uv sync --frozen --no-dev` from `uv.lock`, so duckdb/pyarrow (part of `gold_run_id`) match local runs. `aws` CLI is preinstalled on the runner.
+- [x] One step: `jobs_marts.py --max-invalid-ratio 0.02 --stale-hours 24` (Silver → dbt → Gold). The log is public: only counts, run ids and `existed` flags go to the step summary.
+- [x] Repo secrets (piped from Infisical, never printed): `JOB_DATA_LAKE_URI`, `JOB_DATA_S3_ENDPOINT`, `JOB_DATA_R2_ACCESS_KEY_ID`, `JOB_DATA_R2_SECRET_ACCESS_KEY` (`/job-data`), `HEARTBEAT_TOKEN` (`/monitoring`).
+- [x] Heartbeat `jobs-marts` → uptime Worker, 5 h window (two missed runs + 1 h). Exit 0 → ok; exit 3 (stale) → `ok:false, failed:["stale"]`; anything else → `ok:false, failed:["jobs-marts"]`.
+- [x] First run [41488190902](https://github.com/bookchaowalit/data-lake-pipelines/actions/runs/41488190902): success; same `silver-7f9d98ed92c6d18910bf61f2` / `gold-a39106b907a07a4dcadc414e` as the local run, every object `existed` → deterministic across machines.
+
+Note: GitHub disables scheduled workflows in a public repo after 60 days without repository activity; the `jobs-marts` heartbeat alert is the safety net (same as Track B).
 
 ### Task 5: BI (per D2; Evidence.dev assumed)
 
