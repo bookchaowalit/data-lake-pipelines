@@ -126,6 +126,155 @@ class SilverTests(unittest.TestCase):
             self.assertEqual(ObjectStore(root).list_keys("silver/"), [])
             self.assertEqual(ObjectStore(root).list_keys("control/manifests/silver/"), [])
 
+    def _ingest_jobs(self, root, records, raw=b"jobs-v2-capture"):
+        ingest_payload(
+            raw,
+            records,
+            source="book-job-data",
+            domain="jobs",
+            dataset="job_postings",
+            data_lake_uri=root,
+            input_format="text",
+            event_time_field="event_time",
+            privacy_class="internal",
+        )
+
+    @staticmethod
+    def _job(index, **overrides):
+        record = {
+            "id": f"job-{index}",
+            "title": f"Engineer {index}",
+            "company": "Demo Co",
+            "url": f"https://example.com/jobs/{index}",
+            "event_time": "2026-08-08T00:00:00Z",
+            "provider": "book-job-scraping",
+            "source": "Himalayas",
+            "tags": "Python, Data-Engineer ,,dbt",
+            "keyword": "python contract",
+        }
+        record.update(overrides)
+        return record
+
+    def test_job_silver_v2_carries_board_tags_and_keyword(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._ingest_jobs(root, [self._job(1), self._job(2, source="Jobicy", tags=["SQL", " Go "])])
+            result = transform_bronze_to_silver(data_lake_uri=root)
+            rows = query_parquet(
+                str(Path(root) / result["silver_key"]),
+                "SELECT record_id, provider, board, tags, keyword FROM lake_table ORDER BY record_id",
+            )
+            self.assertEqual([row["board"] for row in rows], ["Himalayas", "Jobicy"])
+            self.assertEqual(rows[0]["provider"], "book-job-scraping")
+            self.assertEqual(json.loads(rows[0]["tags"]), ["Python", "Data-Engineer", "dbt"])
+            self.assertEqual(json.loads(rows[1]["tags"]), ["SQL", "Go"])
+            self.assertEqual(rows[0]["keyword"], "python contract")
+
+    def test_job_silver_excludes_offline_fixture_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._ingest_jobs(root, [self._job(1), self._job(2, provider="offline_fixture")])
+            result = transform_bronze_to_silver(data_lake_uri=root)
+            self.assertEqual(result["record_count"], 1)
+            self.assertEqual(result["quality"]["excluded_count"], 1)
+
+    def test_job_quarantine_writes_rejects_within_limit(self):
+        with tempfile.TemporaryDirectory() as root:
+            records = [self._job(i) for i in range(1, 33)]
+            records.append(self._job(99, url=""))  # 1 of 33 ≈ 3 % invalid
+            self._ingest_jobs(root, records)
+            contract = SilverProductContract(max_invalid_ratio=0.05)
+            first = transform_bronze_to_silver(contract, data_lake_uri=root)
+            second = transform_bronze_to_silver(contract, data_lake_uri=root)
+            self.assertEqual(first["record_count"], 32)
+            self.assertEqual(first["quality"]["status"], "passed_with_rejects")
+            self.assertEqual(first["quality"]["invalid_count"], 1)
+            self.assertIn("dataset=job_postings_rejects/", first["rejects_key"])
+            self.assertEqual(first["silver_run_id"], second["silver_run_id"])
+            self.assertTrue(second["rejects_existed"])
+            valid = query_parquet(
+                str(Path(root) / first["silver_key"]),
+                "SELECT count(*) AS n, count(*) FILTER (WHERE quality_status <> 'valid') AS bad FROM lake_table",
+            )[0]
+            self.assertEqual((valid["n"], valid["bad"]), (32, 0))
+            rejects = query_parquet(
+                str(Path(root) / first["rejects_key"]),
+                "SELECT record_id, quality_status, quality_errors FROM lake_table",
+            )
+            self.assertEqual(len(rejects), 1)
+            self.assertEqual(rejects[0]["record_id"], "job-99")
+            self.assertEqual(rejects[0]["quality_status"], "invalid")
+            self.assertIn("missing canonical_url", json.loads(rejects[0]["quality_errors"]))
+            manifest = json.loads(ObjectStore(root).get_bytes(first["manifest_key"]))
+            self.assertEqual(manifest["quality"]["max_invalid_ratio"], 0.05)
+            self.assertEqual(manifest["rejects"]["key"], first["rejects_key"])
+
+    def test_job_quarantine_policy_change_does_not_conflict(self):
+        with tempfile.TemporaryDirectory() as root:
+            records = [self._job(i) for i in range(1, 33)] + [self._job(99, url="")]
+            self._ingest_jobs(root, records)
+            loose = transform_bronze_to_silver(
+                SilverProductContract(max_invalid_ratio=0.05), data_lake_uri=root
+            )
+            looser = transform_bronze_to_silver(
+                SilverProductContract(max_invalid_ratio=0.10), data_lake_uri=root
+            )
+            self.assertNotEqual(loose["silver_run_id"], looser["silver_run_id"])
+
+    def test_default_policy_keeps_v1_manifest_shape(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._ingest_jobs(root, [self._job(1), self._job(2)])
+            result = transform_bronze_to_silver(data_lake_uri=root)
+            manifest = json.loads(ObjectStore(root).get_bytes(result["manifest_key"]))
+            self.assertNotIn("rejects", manifest)
+            self.assertEqual(
+                set(manifest["quality"]),
+                {"status", "invalid_count", "duplicate_count", "output_record_count", "required_fields"},
+            )
+
+    def test_new_excluded_row_alone_does_not_conflict(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._ingest_jobs(root, [self._job(1), self._job(2)])
+            first = transform_bronze_to_silver(data_lake_uri=root)
+            self._ingest_jobs(root, [self._job(3, provider="offline_fixture")], raw=b"fixture-leak")
+            second = transform_bronze_to_silver(data_lake_uri=root)
+            self.assertNotEqual(first["silver_run_id"], second["silver_run_id"])
+            self.assertEqual(second["quality"]["excluded_count"], 1)
+            self.assertEqual(second["record_count"], 2)
+
+    def test_invalid_quarantine_ratio_is_rejected_before_writing(self):
+        for ratio in (float("nan"), float("inf"), -0.01, 1.5):
+            with self.subTest(ratio=ratio), tempfile.TemporaryDirectory() as root:
+                self._ingest_jobs(root, [self._job(1), self._job(2, url="")])
+                with self.assertRaises(ValueError):
+                    transform_bronze_to_silver(
+                        SilverProductContract(max_invalid_ratio=ratio), data_lake_uri=root
+                    )
+                self.assertEqual(ObjectStore(root).list_keys("silver/"), [])
+
+    def test_newer_fixture_row_does_not_hide_real_job_version(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._ingest_jobs(root, [self._job(1, title="Real title")])
+            self._ingest_jobs(
+                root,
+                [self._job(1, provider="offline_fixture", title="Fixture", event_time="2026-08-09T00:00:00Z")],
+                raw=b"fixture-same-id",
+            )
+            result = transform_bronze_to_silver(data_lake_uri=root)
+            rows = query_parquet(
+                str(Path(root) / result["silver_key"]), "SELECT title FROM lake_table"
+            )
+            self.assertEqual([row["title"] for row in rows], ["Real title"])
+            self.assertEqual(result["quality"]["excluded_count"], 1)
+
+    def test_job_quarantine_above_limit_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._ingest_jobs(root, [self._job(1), self._job(2, url=""), self._job(3, title="")])
+            with self.assertRaises(SilverQualityError):
+                transform_bronze_to_silver(
+                    SilverProductContract(max_invalid_ratio=0.05), data_lake_uri=root
+                )
+            self.assertEqual(ObjectStore(root).list_keys("silver/"), [])
+            self.assertEqual(ObjectStore(root).list_keys("control/manifests/silver/"), [])
+
     def test_fx_quality_rejects_non_finite_rates(self):
         for value in ("NaN", "Infinity", "-Infinity"):
             _row, errors = normalize_fx_row(
