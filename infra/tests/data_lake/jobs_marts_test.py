@@ -145,6 +145,34 @@ class JobsMartsTests(unittest.TestCase):
                 [("acme", 2, 2, ["Himalayas"]), ("beta", 2, 1, ["Jobicy"])],
             )
 
+    def test_offsets_missing_companies_and_repeated_tags(self):
+        with tempfile.TemporaryDirectory() as root:
+            _ingest(
+                root,
+                [
+                    # 18:00 at +07:00 is 11:00 UTC; it must not read as 18:00.
+                    _job(1, tags="Python, python, SQL", event_time="2026-10-22T18:00:00+07:00"),
+                    _job(2, company="", tags="Go", event_time="2026-10-22T06:00:00Z"),
+                ],
+            )
+            result = self._run(root, now=datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc))
+            self.assertEqual(result["freshness"]["max_seen_at"], "2026-10-22T11:00:00+00:00")
+            self.assertEqual(result["freshness"]["age_hours"], 1.0)
+            health = self._rows(
+                root, result, "jobs_board_health",
+                "SELECT companies, CAST(last_seen_at AS VARCHAR) seen FROM lake_table",
+            )
+            self.assertEqual((health[0]["companies"], health[0]["seen"]), (1, "2026-10-22 11:00:00"))
+            daily = self._rows(root, result, "jobs_postings_daily", "SELECT companies FROM lake_table")
+            self.assertEqual(daily[0]["companies"], 1)
+            skills = self._rows(
+                root, result, "jobs_skills_demand",
+                "SELECT tag, postings FROM lake_table ORDER BY tag",
+            )
+            self.assertEqual([tuple(row.values()) for row in skills], [("go", 1), ("python", 1), ("sql", 1)])
+            companies = self._rows(root, result, "jobs_company_hiring", "SELECT company_key FROM lake_table")
+            self.assertEqual([row["company_key"] for row in companies], ["acme"])
+
     def test_rerun_is_idempotent_and_manifest_links_silver(self):
         with tempfile.TemporaryDirectory() as root:
             _ingest(root, FIXTURE_JOBS)

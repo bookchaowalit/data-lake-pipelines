@@ -27,12 +27,14 @@ select
     provider,
     title,
     nullif(trim(company), '') as company,
-    lower(trim(company)) as company_key,
+    lower(nullif(trim(company), '')) as company_key,
     canonical_url,
     nullif(trim(location), '') as location,
     nullif(trim(salary_text), '') as salary_text,
     try_cast(posted_at as date) as posted_date,
-    try_cast(event_time as timestamp) as seen_at,
+    -- Instant in UTC, stored naive: offsets are honoured, and offset-less
+    -- values are read as UTC because the profile pins TimeZone=UTC.
+    try_cast(event_time as timestamptz) at time zone 'UTC' as seen_at,
     from_json(tags, '["VARCHAR"]') as tags,
     keyword,
     privacy_class,

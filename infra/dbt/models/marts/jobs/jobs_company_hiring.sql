@@ -16,6 +16,6 @@ select
     max(jobs.posted_date) as last_posted_date
 from {{ ref('stg_job_postings') }} as jobs
 cross join as_of
-where jobs.company_key <> ''
+where jobs.company_key is not null
 group by 1
 order by 1

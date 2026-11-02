@@ -14,3 +14,7 @@ solo_empire_lake:
       # DBT_DUCKDB_PATH lets a runner build into its own scratch file.
       path: "{{ env_var('DBT_DUCKDB_PATH', 'local.duckdb') }}"
       threads: 4
+      # Offset-less timestamps in the lake are UTC; never read them in the
+      # machine's local zone.
+      settings:
+        TimeZone: UTC
