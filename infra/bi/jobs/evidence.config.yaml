@@ -1,0 +1,11 @@
+appearance:
+  default: system
+  switcher: true
+
+plugins:
+  components:
+    "@evidence-dev/core-components": {}
+  datasources:
+    # The only source: jobs.duckdb, built from one Gold manifest by
+    # infra/scripts/data_lake/jobs_bi_snapshot.py. Nothing else is read.
+    "@evidence-dev/duckdb": {}

@@ -1,0 +1,5 @@
+name: jobs
+type: duckdb
+options:
+  # Built by infra/scripts/data_lake/jobs_bi_snapshot.py (gitignored).
+  filename: jobs.duckdb
