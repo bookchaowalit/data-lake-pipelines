@@ -14,6 +14,28 @@ repo นี้คงโครงสร้าง `infra/...` เดิมไว�
 - `infra/tests/` — test ทั้งหมดของโค้ดข้างต้น
 - ผลิตภัณฑ์ข้อมูล `job.v1` (ผู้บริโภคคือ `book-job-data` และ `crm` job-radar) — `book-job-data` ยังเป็น repo ของตัวเอง; ที่นี่มีเฉพาะ adapter/readiness/e2e
 
+## Jobs: Bronze → Silver → Gold → BI
+
+domain แรกที่ครบทุกชั้น (แผน [`docs/plans/2026-11-02-jobs-silver-mart-bi.md`](docs/plans/2026-11-02-jobs-silver-mart-bi.md)) บน R2
+`solo-empire-portfolio/portfolio-demo/book-job-data-001`:
+
+```text
+career-job-scraper (Track B, "17 */6")      → Bronze job_postings
+.github/workflows/jobs-marts.yml ("47 */2") → build: jobs_marts.py
+    silver.py (job.silver.v2, quarantine ≤ 2 % → job_postings_rejects, ตัด offline_fixture)
+    → dbt build +path:models/marts/jobs (Silver part เดียวผ่าน var jobs_silver_part)
+    → Gold gold/domain=jobs/dataset=<mart>/schema_version=1 + manifest control/manifests/gold/source=book-job-data/domain=jobs/
+  → bi: jobs_bi_snapshot.py (ตรวจ sha256 ตาม manifest) → jobs_bi_site.py (static HTML, CSP เข้ม) → Cloudflare Pages
+        jobs-insights.pages.dev หลัง Cloudflare Access (deploy เมื่อ <gold_run_id>@<commit> เปลี่ยน)
+  → heartbeat jobs-marts (5 ชม.; failed = stale / jobs-marts / jobs-bi)
+```
+
+- Silver ทุกรอบเป็น snapshot เต็ม: อย่า glob ทุก part ให้ใช้ part เดียวจาก manifest
+- ผู้อ่าน Gold ใช้ Gold manifest ล่าสุดของ run ที่ต้องการ (BI ใช้ `manifest_key` จาก build job รอบเดียวกัน)
+- run id อิงเนื้อหา (Bronze, model, เวอร์ชัน duckdb/pyarrow) รันซ้ำบนข้อมูลเดิมจึงไม่เขียนอะไรใหม่
+- รันเองในเครื่อง: secret ใน Infisical `/job-data` (`JOB_DATA_*`) map เป็น `AWS_*` / `DATA_LAKE_S3_ENDPOINT` ภายใน `bash -c '…'` และต้องมี `aws` CLI
+- lineage: `lake.silver-job-postings` → `lake.gold-jobs-marts` → `consumer.jobs-insights-site` ใน metadata catalog ของ architecture-docs
+
 ## ความสัมพันธ์กับ repo อื่น
 
 - `data-lake-core` (public) เป็น runtime แพ็กเกจพกพา; README ของมันระบุว่า "parent `infra/scripts/data_lake`" เป็น canonical สำหรับ 9 modules ที่ใช้ร่วม — canonical นั้นย้ายมาที่ `infra/scripts/data_lake/` ใน repo นี้แล้ว (ต้องแก้ `scripts/check_parity.py` ของ public repo ให้ชี้มาที่นี่ — ยังไม่ได้ทำ)

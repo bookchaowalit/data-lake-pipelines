@@ -130,12 +130,13 @@ Note: GitHub disables scheduled workflows in a public repo after 60 days without
 - [x] Deploy deps: `infra/bi/jobs/deploy` pins wrangler 4.149.0 with `undici` overridden to 7.30.1 (8 advisories in 7.29.1); OSV clean.
 - [x] Tests: `jobs_bi_snapshot_test.py` (4), `jobs_bi_site_test.py` (9: escaping, no off-site refs + CSP, reproducible bytes, 90-day window, last complete week, exact weekly counts, board status, empty marts).
 
-### Task 6: Clean up and register
+### Task 6: Clean up and register ✅ (2026-11-03)
 
-- [ ] D3 action on `remote_job_feeds`.
-- [ ] Find and stop the `offline_fixture` leak in Track B.
-- [ ] Add Silver/Gold datasets + BI consumer to `catalog_assets` / `lineage_edges` (architecture-docs) so `meta_source_lineage` shows the full chain.
-- [ ] Update README "Metadata ใน lake" and the data-sources registry.
+- [x] **D3 decided: keep `remote_job_feeds`, do not retire.** It has a consumer: Track A job-radar (`sales-crm`, Railway `income-pipeline/job-radar`) writes each feed response to `free-cloud-e2e-001/income/remote_job_feeds` and its projector reads that Bronze back to build Neon `job_leads` and Telegram alerts (lake-first by design). Different purpose (personal lead pipeline) from the `book-job-data` product, so it stays a separate dataset. **Found while checking:** its last write was 2026-10-29 23:13 UTC+7; the service has the cron `7 * * * *` but no active deployment, so Track A has not run since 2026-10-29 17:08 UTC and has no heartbeat to say so. Follow-up for the owner.
+- [x] `offline_fixture` leak found and stopped: `career-job-market-data` `scripts/r2_parity.py` writes fixture rows with provider `offline_fixture`, and its README pointed it at `portfolio-demo/book-job-data-001`, the production Track B lake. It now refuses any prefix whose last segment lacks `parity` (tests `test_r2_parity_guard.py`, merge 8951719); README and runbook point at `book-job-data-parity-001`. The 2 rows stay in write-once Bronze; Silver excludes them.
+- [x] Lineage: architecture-docs `d04193b` — `lake.silver-job-postings` pilot → active (v2 change record), new `lake.gold-jobs-marts` and `consumer.jobs-insights-site`, edges `silver-jobs-to-gold-jobs-marts` and `gold-jobs-marts-to-jobs-insights-site`; `metadata_catalog_guard.py` OK. The `job-capture` flow already lists `lake.silver-job-postings`, so `meta_source_lineage` reaches Gold and the site after the next `registry-export` run.
+- [x] solo-empire `data-sources.yaml` (`3c1e68cc`): `job-capture` gains probe `jobs-marts` (5 h).
+- [x] README: section "Jobs: Bronze → Silver → Gold → BI".
 
 ## Done when
 
