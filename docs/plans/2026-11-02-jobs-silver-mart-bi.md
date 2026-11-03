@@ -115,13 +115,20 @@ Findings:
 
 Note: GitHub disables scheduled workflows in a public repo after 60 days without repository activity; the `jobs-marts` heartbeat alert is the safety net (same as Track B).
 
-### Task 5: BI (per D2; Evidence.dev assumed)
+### Task 5: BI — static site from Gold (2026-11-03)
 
-**Files:** new public repo `jobs-insights` (or `infra/bi/` here)
+**Files:** `infra/scripts/data_lake/jobs_bi_snapshot.py`, `infra/scripts/data_lake/jobs_bi_site.py`, `infra/bi/jobs/` (assets, `design-floor.json`, `deploy/` = wrangler only), `bi` + `heartbeat` jobs in `.github/workflows/jobs-marts.yml`
 
-- [ ] Pages: Overview (postings/day by board), Boards health, Skills demand, Companies.
-- [ ] Build reads Gold Parquet only; rebuild after Task 4 succeeds (deploy hook).
-- [ ] Cloudflare Access in front; ADR-0007 design floor (WCAG 2.2); screenshots at 375/768/1440 before and after deploy.
+**D2 outcome:** owner picked Evidence.dev, then switched to a Python static site (2026-11-03) after a trial build showed: Evidence moved to hosted Evidence Studio (Aug 2026), the open-source framework's last release is Feb 2026 and its lockfile carries 144 OSV advisories (some in browser code that would render scraped text); its DuckDB-WASM engines (33–38 MiB) exceed the Cloudflare Pages 25 MiB file limit and had to come from a CDN without in-browser integrity checks.
+
+- [x] Snapshot: one Gold manifest → `jobs.duckdb`; only `control/manifests/gold/source=book-job-data/domain=jobs/*.json`, each mart checked against the manifest sha256, built beside the target and swapped (no half file).
+- [x] Site: Python stdlib only. Pages Overview (KPIs + stacked SVG postings/day, last 90 days ending on `as_of_date`), Boards (status Active / Quiet 14+ days / No posted date), Skills (last complete Monday week top 20 + last 4 weeks top 30), Companies (all, with a first-party filter script), 404. Every mart value goes through `html.escape`; same snapshot → same bytes. 388 KB total.
+- [x] No third-party code: `_headers` CSP `default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; form-action 'none'; frame-ancestors 'none'`, `noindex`.
+- [x] ADR-0007 floor: vendored `tokens.css` 1.0.0 unchanged + `app-theme.css` (light only, Latin-first); `check.mjs` 0 failures at 320/375/390/768/1440 on all routes incl. 404; screenshots checked at 375/768/1440.
+- [x] Hosting: Cloudflare Pages project `jobs-insights` (jobs-insights.pages.dev). Cloudflare Access app "Jobs insights" (`jobs-insights.pages.dev` + `*.jobs-insights.pages.dev`) with the reusable owner-email policy, created **before** the first deploy. Deploy token: account token with Pages Write only (repo secret `CLOUDFLARE_PAGES_TOKEN`, plus `CLOUDFLARE_ACCOUNT_ID`).
+- [x] Workflow: `bi` runs after a success or stale (exit 3) build; skips when the live deployment's commit message already equals the `gold_run_id` (dispatch always deploys). Heartbeat moved to a final job: `failed` lists `stale`, `jobs-marts` and/or `jobs-bi`.
+- [x] Deploy deps: `infra/bi/jobs/deploy` pins wrangler 4.149.0 with `undici` overridden to 7.30.1 (8 advisories in 7.29.1); OSV clean.
+- [x] Tests: `jobs_bi_snapshot_test.py` (4), `jobs_bi_site_test.py` (8: escaping, no off-site refs + CSP, reproducible bytes, 90-day window, last complete week, board status, empty marts).
 
 ### Task 6: Clean up and register
 

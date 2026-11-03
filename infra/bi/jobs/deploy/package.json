@@ -1,0 +1,11 @@
+{
+  "name": "jobs-insights-deploy",
+  "private": true,
+  "description": "Deploy tool only (wrangler) for the jobs BI static site; the site itself has no npm dependencies.",
+  "devDependencies": {
+    "wrangler": "4.149.0"
+  },
+  "overrides": {
+    "undici": "7.30.1"
+  }
+}

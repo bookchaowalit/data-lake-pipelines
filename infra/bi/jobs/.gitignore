@@ -1,0 +1,4 @@
+# Built by infra/scripts/data_lake/jobs_bi_site.py from a Gold snapshot; never committed.
+build/
+jobs.duckdb
+deploy/node_modules/

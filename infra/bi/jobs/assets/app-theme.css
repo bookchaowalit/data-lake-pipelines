@@ -1,0 +1,6 @@
+/* Jobs insights: values for the ADR-0007 token names (light only, Latin-first). */
+:root {
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Thai Fallback", sans-serif;
+  --color-surface: #f5f6f8;
+  --color-accent: #1f5fbf;
+}
