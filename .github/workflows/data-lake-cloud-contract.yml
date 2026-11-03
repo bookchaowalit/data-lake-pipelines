@@ -16,8 +16,7 @@ on:
       - "infra/tests/fixtures/cloud_lake_demo.json"
       - "systems/ai-data/cloud-data-lake-mvp.md"
       - ".github/workflows/data-lake-cloud-contract.yml"
-  schedule:
-    - cron: "30 2 * * 1"
+  # Scheduled by the jobs queue (platform-jobs-worker job `data-lake-cloud-contract`, cron "30 2 * * 1" UTC), ADR-0008.
   workflow_dispatch:
 
 permissions:

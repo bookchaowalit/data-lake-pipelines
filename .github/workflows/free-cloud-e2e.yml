@@ -16,8 +16,7 @@ on:
       - "operations/runbooks/FREE-CLOUD-E2E-RUNBOOK.md"
       - ".github/workflows/free-cloud-e2e.yml"
   workflow_dispatch:
-  schedule:
-    - cron: "17 3 * * 1"
+  # Scheduled by the jobs queue (platform-jobs-worker job `free-cloud-e2e`, cron "17 3 * * 1" UTC), ADR-0008.
 
 permissions:
   contents: read

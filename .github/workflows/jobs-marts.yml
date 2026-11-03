@@ -1,6 +1,6 @@
 # Jobs Bronze → Silver → dbt marts → Gold on the R2 lake (plan: docs/plans/2026-11-02-jobs-silver-mart-bi.md).
 # Track B (career-job-scraper, "17 */6") lands Bronze; this runs 30 min after each of its slots
-# and in between, because GitHub's cron can start hours late. Every run is idempotent: when
+# and in between; the jobs queue (ADR-0008) starts it on time, which GitHub's cron did not. Every run is idempotent: when
 # Bronze has not changed it finds the existing Silver/Gold objects and writes nothing.
 #
 # Then the `bi` job rebuilds the static site (jobs_bi_site.py → infra/bi/jobs) from that Gold run and deploys it
@@ -13,9 +13,14 @@
 name: Jobs marts (Silver → Gold)
 
 on:
-  schedule:
-    - cron: "47 */2 * * *"
+  # Scheduled by the jobs queue (platform-jobs-worker job `jobs-marts`, cron "47 */2 * * *" UTC), ADR-0008.
   workflow_dispatch:
+    inputs:
+      source:
+        description: "manual forces the BI deploy; jobs-queue behaves like a scheduled run"
+        type: choice
+        options: [manual, jobs-queue]
+        default: manual
 
 permissions:
   contents: read
@@ -93,14 +98,14 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          EVENT: ${{ github.event_name }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.source != 'jobs-queue' }}
         run: |
           # Each deploy carries "<gold_run_id>@<commit>" as its commit message, so new
           # Gold data or a new site version deploys once and nothing else does.
           live=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PAGES_PROJECT" \
             | jq -r '.result.canonical_deployment.deployment_trigger.metadata.commit_message // ""')
-          if [ "$live" = "$DEPLOY_MARK" ] && [ "$EVENT" != "workflow_dispatch" ]; then
+          if [ "$live" = "$DEPLOY_MARK" ] && [ "$FORCE" != "true" ]; then
             echo "deploy=false" >> "$GITHUB_OUTPUT"
             echo "$DEPLOY_MARK is already live; nothing to deploy." | tee -a "$GITHUB_STEP_SUMMARY"
           else
