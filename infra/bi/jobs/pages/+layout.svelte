@@ -13,6 +13,12 @@
 	// Stock components render a few elements the floor rejects; fix them as
 	// they appear (pages render client-side and re-render on navigation).
 	function patch(root) {
+		// Skip-link target: the layout's own <main>, after the header and sidebar.
+		const main = root.querySelector('main');
+		if (main && main.id !== 'main-content') {
+			main.id = 'main-content';
+			main.setAttribute('tabindex', '-1');
+		}
 		// Scrollable tables must be reachable by keyboard.
 		for (const box of root.querySelectorAll('.scrollbox:not([tabindex])')) {
 			box.setAttribute('tabindex', '0');
@@ -26,22 +32,26 @@
 		}
 	}
 
+	// Rendered only in the browser: <main> gets its id from patch(), and the
+	// prerender step would reject a link to an id it cannot see.
+	let mounted = false;
+
 	onMount(() => {
 		patch(document);
+		mounted = true;
 		const observer = new MutationObserver(() => patch(document));
 		observer.observe(document.body, { childList: true, subtree: true });
 		return () => observer.disconnect();
 	});
 </script>
 
-<a class="skip-link" href="#main-content">Skip to content</a>
+{#if mounted}
+	<a class="skip-link" href="#main-content">Skip to content</a>
+{/if}
 
-<!-- The skip target wraps the layout so it contains its <main> (no id of its own). -->
-<div id="main-content" tabindex="-1">
-	<EvidenceDefaultLayout {data}>
-		<slot slot="content" />
-	</EvidenceDefaultLayout>
-</div>
+<EvidenceDefaultLayout {data}>
+	<slot slot="content" />
+</EvidenceDefaultLayout>
 
 <style>
 	.skip-link {
