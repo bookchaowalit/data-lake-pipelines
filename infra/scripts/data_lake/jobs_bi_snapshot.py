@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Jobs Gold → one DuckDB file for the BI site (infra/bi/jobs).
+"""Jobs Gold → one DuckDB file for the BI site (jobs_bi_site.py, infra/bi/jobs).
 
 The BI site reads nothing but Gold: this takes one jobs Gold manifest, checks
 every mart part against the sha256 the manifest recorded, and loads the marts
@@ -28,10 +28,7 @@ from data_lake.product_adapter import default_data_lake_uri  # noqa: E402
 from data_lake.storage import ObjectStore  # noqa: E402
 
 GOLD_MANIFEST_PREFIX = f"control/manifests/gold/source={GOLD_SOURCE}/domain=jobs/"
-DEFAULT_TARGET = ROOT / "infra" / "bi" / "jobs" / "sources" / "jobs" / "jobs.duckdb"
-# The Evidence site reads the file with its own (older) DuckDB, 1.4.x via
-# @evidence-dev/duckdb 2.0.1, which cannot open files in the DuckDB 2.x format.
-READER_STORAGE_VERSION = "v1.4.0"
+DEFAULT_TARGET = ROOT / "infra" / "bi" / "jobs" / "jobs.duckdb"
 
 
 class BiSnapshotError(RuntimeError):
@@ -63,9 +60,7 @@ def build_bi_snapshot(manifest_key: str, target: Path, *, data_lake_uri: str = "
         staging = target.with_name(f".{target.name}.partial-{os.getpid()}")
         staging.unlink(missing_ok=True)
         try:
-            con = duckdb.connect(
-                str(staging), config={"storage_compatibility_version": READER_STORAGE_VERSION}
-            )
+            con = duckdb.connect(str(staging))
             try:
                 for name in JOBS_MARTS:
                     con.execute(

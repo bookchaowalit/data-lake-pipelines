@@ -1,0 +1,64 @@
+/* Layout and charts. No inline styles anywhere: the CSP forbids them. */
+*, *::before, *::after { box-sizing: border-box; }
+html { color-scheme: light; }
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-latin);
+}
+a { color: var(--color-accent); }
+.skip-link {
+  position: absolute; left: var(--space-2); top: -4rem; z-index: 10;
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-bg); border: 2px solid var(--color-accent); border-radius: var(--radius-sm);
+}
+.skip-link:focus { top: var(--space-2); }
+header { border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
+.bar { max-width: 72rem; margin: 0 auto; padding: var(--space-3) var(--space-4); display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-6); align-items: center; }
+.brand { font-weight: 700; color: var(--color-fg); text-decoration: none; min-height: var(--target-min); display: inline-flex; align-items: center; }
+nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); }
+nav a { display: inline-flex; align-items: center; min-height: var(--target-min); padding: 0 var(--space-1); }
+nav a[aria-current="page"] { color: var(--color-fg); font-weight: 700; text-decoration: none; }
+main { max-width: 72rem; margin: 0 auto; padding: var(--space-6) var(--space-4) var(--space-12); }
+main:focus { outline: none; }
+h1 { font-size: var(--text-3xl); line-height: 1.2; margin: 0 0 var(--space-2); }
+h2 { font-size: var(--text-xl); margin: var(--space-8) 0 var(--space-3); }
+.lede { color: var(--color-fg-muted); margin: 0 0 var(--space-6); max-width: 48rem; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: var(--space-4); margin: 0; }
+.kpi { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-4); }
+.kpi dt { color: var(--color-fg-muted); font-size: var(--text-sm); }
+.kpi dd { margin: var(--space-1) 0 0; font-size: var(--text-2xl); font-weight: 700; font-variant-numeric: tabular-nums; }
+.chart { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--color-fg-muted); font-size: 11px; font-family: var(--font-sans); }
+.chart .grid { stroke: var(--color-border); stroke-width: 1; }
+.legend { list-style: none; padding: 0; margin: var(--space-2) 0; display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); font-size: var(--text-sm); }
+.legend svg { width: 0.8rem; height: 0.8rem; vertical-align: -0.1rem; margin-right: var(--space-1); }
+.s0 { fill: #0072b2; } .s1 { fill: #e69f00; } .s2 { fill: #009e73; } .s3 { fill: #d55e00; }
+.s4 { fill: #cc79a7; } .s5 { fill: #56b4e9; } .s6 { fill: #6b6b6b; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+table { border-collapse: collapse; width: 100%; font-size: var(--text-sm); }
+caption { text-align: left; padding: var(--space-2) var(--space-3); color: var(--color-fg-muted); }
+th, td { padding: var(--space-2) var(--space-3); text-align: left; border-top: 1px solid var(--color-border); vertical-align: top; }
+thead th { border-top: 0; background: var(--color-surface); white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.barcell { width: 30%; min-width: 6rem; }
+td.barcell svg { width: 100%; height: 0.9rem; display: block; }
+td.barcell rect { fill: #0072b2; }
+.status-quiet { color: var(--color-danger); font-weight: 600; }
+.status-none { color: var(--color-fg-muted); }
+.filter { margin: 0 0 var(--space-3); }
+.filter label { display: block; font-weight: 600; margin-bottom: var(--space-1); }
+.filter input { font: inherit; min-height: var(--target-touch); width: min(100%, 24rem); padding: 0 var(--space-3); border: 1px solid var(--color-fg-muted); border-radius: var(--radius-sm); }
+.muted { color: var(--color-fg-muted); font-size: var(--text-sm); }
+footer { max-width: 72rem; margin: 0 auto; padding: var(--space-4); border-top: 1px solid var(--color-border); color: var(--color-fg-muted); font-size: var(--text-sm); overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+/* Long tables scroll inside their frame, so the focused frame fits the viewport. */
+.table-wrap.tall { max-height: 70vh; overflow: auto; }
+.table-wrap.tall thead th { position: sticky; top: 0; z-index: 1; }
+/* The day chart keeps a readable size on phones and scrolls sideways instead. */
+.chart-wrap { overflow-x: auto; margin-bottom: var(--space-6); }
+.chart-wrap .chart { min-width: 40rem; }
+.status-quiet, .status-none, td.status { white-space: nowrap; }

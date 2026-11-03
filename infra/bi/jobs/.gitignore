@@ -1,13 +1,4 @@
-.evidence/template
-.svelte-kit
-build
-node_modules
-.DS_Store
-static/data
-*.options.yaml
-.vscode/settings.json
-.env
-.evidence/meta
-
-# Built from Gold at build time; never committed.
-sources/jobs/jobs.duckdb
+# Built by infra/scripts/data_lake/jobs_bi_site.py from a Gold snapshot; never committed.
+build/
+jobs.duckdb
+deploy/node_modules/

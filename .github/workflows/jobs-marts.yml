@@ -3,7 +3,7 @@
 # and in between, because GitHub's cron can start hours late. Every run is idempotent: when
 # Bronze has not changed it finds the existing Silver/Gold objects and writes nothing.
 #
-# Then the `bi` job rebuilds the Evidence site (infra/bi/jobs) from that Gold run and deploys it
+# Then the `bi` job rebuilds the static site (jobs_bi_site.py → infra/bi/jobs) from that Gold run and deploys it
 # to Cloudflare Pages (jobs-insights.pages.dev, behind Cloudflare Access) when the Gold run is
 # not the one already live.
 #
@@ -123,7 +123,7 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Snapshot Gold for the site
+      - name: Snapshot Gold and build the site
         if: ${{ steps.live.outputs.deploy == 'true' }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
@@ -135,27 +135,20 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check uv==0.13.1
           uv sync --frozen --no-dev
-          # Prints status, run ids and row counts only.
+          # Both print status, run ids and counts only; stderr stays out of the public log.
           .venv/bin/python infra/scripts/data_lake/jobs_bi_snapshot.py --manifest-key "$MANIFEST_KEY" 2> "$RUNNER_TEMP/snapshot.err"
-
-      - name: Build the site
-        if: ${{ steps.live.outputs.deploy == 'true' }}
-        working-directory: infra/bi/jobs
-        run: |
-          npm ci --no-audit --no-fund
-          # Query output and build warnings can quote data; keep them out of the public log.
-          npm run sources > "$RUNNER_TEMP/sources.log" 2>&1 || { echo "evidence sources failed"; exit 1; }
-          npm run build > "$RUNNER_TEMP/build.log" 2>&1 || { echo "evidence build failed"; exit 1; }
-          grep -E '^offload' "$RUNNER_TEMP/build.log" || true
+          .venv/bin/python infra/scripts/data_lake/jobs_bi_site.py 2> "$RUNNER_TEMP/site.err"
 
       - name: Deploy to Cloudflare Pages
         if: ${{ steps.live.outputs.deploy == 'true' }}
-        working-directory: infra/bi/jobs
+        working-directory: infra/bi/jobs/deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          npx wrangler pages deploy build --project-name "$PAGES_PROJECT" --branch main \
+          # wrangler is the only npm package, pinned with its lockfile.
+          npm ci --no-audit --no-fund --ignore-scripts > "$RUNNER_TEMP/npm.log" 2>&1 || { echo "npm ci failed"; exit 1; }
+          npx --no-install wrangler pages deploy ../build --project-name "$PAGES_PROJECT" --branch main \
             --commit-message "$GOLD_RUN_ID" --commit-dirty=true > "$RUNNER_TEMP/deploy.log" 2>&1 \
             || { echo "wrangler deploy failed"; exit 1; }
           echo "deployed $GOLD_RUN_ID to $PAGES_PROJECT" | tee -a "$GITHUB_STEP_SUMMARY"
