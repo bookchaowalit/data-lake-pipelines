@@ -86,6 +86,7 @@ jobs:
       GOLD_RUN_ID: ${{ needs.build.outputs.gold_run_id }}
       MANIFEST_KEY: ${{ needs.build.outputs.manifest_key }}
       PAGES_PROJECT: jobs-insights
+      DEPLOY_MARK: ${{ needs.build.outputs.gold_run_id }}@${{ github.sha }}
     steps:
       - name: Is this Gold run already live?
         id: live
@@ -94,16 +95,17 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           EVENT: ${{ github.event_name }}
         run: |
-          # Each deploy carries its gold_run_id as the commit message.
+          # Each deploy carries "<gold_run_id>@<commit>" as its commit message, so new
+          # Gold data or a new site version deploys once and nothing else does.
           live=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PAGES_PROJECT" \
             | jq -r '.result.canonical_deployment.deployment_trigger.metadata.commit_message // ""')
-          if [ "$live" = "$GOLD_RUN_ID" ] && [ "$EVENT" != "workflow_dispatch" ]; then
+          if [ "$live" = "$DEPLOY_MARK" ] && [ "$EVENT" != "workflow_dispatch" ]; then
             echo "deploy=false" >> "$GITHUB_OUTPUT"
-            echo "$GOLD_RUN_ID is already live; nothing to deploy." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$DEPLOY_MARK is already live; nothing to deploy." | tee -a "$GITHUB_STEP_SUMMARY"
           else
             echo "deploy=true" >> "$GITHUB_OUTPUT"
-            echo "live: ${live:-none}; deploying $GOLD_RUN_ID" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "live: ${live:-none}; deploying $DEPLOY_MARK" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,9 +151,9 @@ jobs:
           # wrangler is the only npm package, pinned with its lockfile.
           npm ci --no-audit --no-fund --ignore-scripts > "$RUNNER_TEMP/npm.log" 2>&1 || { echo "npm ci failed"; exit 1; }
           npx --no-install wrangler pages deploy ../build --project-name "$PAGES_PROJECT" --branch main \
-            --commit-message "$GOLD_RUN_ID" --commit-dirty=true > "$RUNNER_TEMP/deploy.log" 2>&1 \
+            --commit-message "$DEPLOY_MARK" --commit-dirty=true > "$RUNNER_TEMP/deploy.log" 2>&1 \
             || { echo "wrangler deploy failed"; exit 1; }
-          echo "deployed $GOLD_RUN_ID to $PAGES_PROJECT" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "deployed $DEPLOY_MARK to $PAGES_PROJECT" | tee -a "$GITHUB_STEP_SUMMARY"
 
   heartbeat:
     needs: [build, bi]

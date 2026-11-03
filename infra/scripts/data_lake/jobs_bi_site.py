@@ -321,24 +321,30 @@ def render_skills(snapshot: Snapshot) -> str:
         if rows else "<p>No tags in that week.</p>"
     )
 
-    summed: dict[str, list[int]] = {}
-    for row in snapshot.skills:
-        if first_of_4 <= row["posted_week"] <= last_week:
-            entry = summed.setdefault(row["tag"], [0, 0])
-            entry[0] += int(row["postings"])
-            entry[1] += 1
-    ranked = sorted(summed.items(), key=lambda item: (-item[1][0], item[0]))[:30]
-    peak4 = ranked[0][1][0] if ranked else 0
-    rows4 = [
-        f"<tr><th scope=\"row\">{escape(str(tag))}</th><td class=\"num\">{_fmt_int(total)}</td>"
-        f"{_bar_cell(total, peak4)}<td class=\"num\">{weeks}</td></tr>"
-        for tag, (total, weeks) in ranked
-    ]
-    body.append(f"<h2>Last 4 complete weeks ({first_of_4.isoformat()} to {(last_week + timedelta(days=6)).isoformat()})</h2>")
+    # Gold keeps each week's top 50 tags only, so weeks are never summed: a
+    # missing week means "not in that week's top 50", not zero postings.
+    weeks = [first_of_4 + timedelta(days=7 * i) for i in range(4)]
+    counts = {
+        (row["posted_week"], row["tag"]): int(row["postings"])
+        for row in snapshot.skills
+        if first_of_4 <= row["posted_week"] <= last_week
+    }
+    rows4 = []
+    for row in top:
+        cells = "".join(
+            f'<td class="num">{_fmt_int(counts[(week, row["tag"])]) if (week, row["tag"]) in counts else "—"}</td>'
+            for week in weeks
+        )
+        rows4.append(f"<tr><th scope=\"row\">{escape(str(row['tag']))}</th>{cells}</tr>")
+    body.append("<h2>The same tags over the last 4 complete weeks</h2>")
     body.append(
-        _table("skills-4w", "Top 30 tags over the last 4 complete weeks",
-               [("Tag", False), ("Postings", True), ("Share", False), ("Weeks in the top 50", True)],
-               rows4, "Top tags over four weeks")
+        '<p class="muted">Postings per week starting on the date shown. “—” means the tag was not in '
+        "that week’s top 50, so its count is not in the Gold mart.</p>"
+    )
+    body.append(
+        _table("skills-4w", "This week's top 20 tags, postings per week",
+               [("Tag", False), *((week.isoformat(), True) for week in weeks)],
+               rows4, "Top tags per week")
         if rows4 else "<p>No tags in those weeks.</p>"
     )
     return _page("Skills", "/skills/", "".join(body), snapshot.meta)
