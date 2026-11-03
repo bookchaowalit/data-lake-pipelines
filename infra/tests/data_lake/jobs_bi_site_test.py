@@ -162,6 +162,17 @@ class JobsBiSiteTests(unittest.TestCase):
         self.assertNotIn("too-old", skills)
         self.assertIn("python", skills)
 
+    def test_four_week_view_shows_exact_weekly_counts_not_sums_of_top_50s(self):
+        # The Gold mart keeps each week's top 50 only, so a tag missing from a
+        # week means "not in that week's top 50", never zero: no summing.
+        out, _ = self._build()
+        skills = self._read(out, "skills/index.html")
+        self.assertNotIn("Weeks in the top 50", skills)
+        for week in ("2026-09-21", "2026-09-28", "2026-10-05", "2026-10-12"):
+            self.assertIn(f">{week}</th>", skills)
+        python_row = re.search(r'<tr><th scope="row">python</th>.*?</tr>', skills.split("skills-4w")[1]).group(0)
+        self.assertIn('<td class="num">—</td><td class="num">—</td><td class="num">6</td><td class="num">10</td>', python_row)
+
     def test_boards_flag_quiet_and_undated_boards(self):
         out, _ = self._build()
         boards = self._read(out, "boards/index.html")
