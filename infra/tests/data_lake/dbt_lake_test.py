@@ -263,6 +263,28 @@ def build_jobs_silver_fixture(lake_root: Path) -> Path:
     return lake_root / result["silver_key"]
 
 
+def build_synthetic_x_feed(lake_root: Path) -> None:
+    """Twenty fake X sightings through the real lake writer, plus a re-export with one changed row."""
+    sys.path.insert(0, str(ROOT / "infra" / "scripts" / "utils"))
+    sys.path.insert(0, str(ROOT / "infra" / "scripts"))
+    sys.path.insert(0, str(ROOT / "infra" / "tests" / "fixtures"))
+    from data_lake.ingest import ingest_records
+    from x_feed_rows import x_feed_rows
+
+    rows = x_feed_rows("test-pull-dbt")
+    for batch in (rows, [{**rows[0], "likes": 999}, *rows[1:]]):
+        ingest_records(
+            batch,
+            source="x-feed",
+            domain="social",
+            dataset="x_feed",
+            data_lake_uri=str(lake_root),
+            source_record_id_field="sighting_key",
+            event_time_field="collected_at",
+            metadata={"adapter": "dbt_lake_test", "contract": "x_feed.v1"},
+        )
+
+
 def run() -> bool:
     if DBT_BIN is None:
         message = "dbt not on PATH (install infra/requirements-data-lake.txt)"
@@ -277,6 +299,7 @@ def run() -> bool:
         build_synthetic_bronze(bronze_root)
         export_registry_fixture(Path(tmp))
         jobs_silver_part = build_jobs_silver_fixture(Path(tmp))
+        build_synthetic_x_feed(Path(tmp))
         target_dir = Path(tmp) / "target"
         # dbt-duckdb does not create the target directory itself before
         # opening the database file there.
