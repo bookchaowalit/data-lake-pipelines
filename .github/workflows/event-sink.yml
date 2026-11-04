@@ -140,6 +140,6 @@ jobs:
             body=$(jq -cn '{ok:false, failed:$ARGS.positional}' --args "${failed[@]}")
           fi
           echo "heartbeat: $body"
-          curl -fsS -X POST https://solo-empire-monitor.bookchaowalit.workers.dev/heartbeat/event-sink \
+          curl -fsS -X POST https://monitor.bookchaowalit.com/heartbeat/event-sink \
             -H "Authorization: Bearer $HEARTBEAT_TOKEN" -H "Content-Type: application/json" -d "$body"
           [ ${#failed[@]} -eq 0 ]
