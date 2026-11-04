@@ -34,7 +34,7 @@ import jsonschema
 
 SPREADSHEET_ID = "1zajA2iEfa9TS5JNjV1Y7LOurrTmiqrP-8ygn9clvBdI"
 GATEWAY_URL = "https://api.bookchaowalit.com"
-HEARTBEAT_URL = "https://solo-empire-monitor.bookchaowalit.workers.dev/heartbeat/sheet-summaries"
+HEARTBEAT_URL = "https://monitor.bookchaowalit.com/heartbeat/sheet-summaries"
 BANGKOK = timezone(timedelta(hours=7))
 
 OUTPUT_TAB = "AI Summaries"

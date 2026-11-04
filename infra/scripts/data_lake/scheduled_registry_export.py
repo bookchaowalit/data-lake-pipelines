@@ -47,7 +47,7 @@ SOURCES = {
 LANDSCAPE_REPO = "architecture-docs"
 LANDSCAPE_PATH = "operations/platform/SYSTEM-LANDSCAPE-GENERATED.md"
 LANDSCAPE_MESSAGE = "docs(landscape): regenerate from registries (registry-export cron)"
-HEARTBEAT_URL = "https://solo-empire-monitor.bookchaowalit.workers.dev/heartbeat/registry-export"
+HEARTBEAT_URL = "https://monitor.bookchaowalit.com/heartbeat/registry-export"
 # Cloudflare answers 403 to default client User-Agents on workers.dev.
 USER_AGENT = "registry-export/1"
 

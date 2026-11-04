@@ -185,5 +185,5 @@ jobs:
           else
             body=$(jq -cn '{ok:false, failed:$ARGS.positional}' --args "${failed[@]}")
           fi
-          curl -fsS -X POST https://solo-empire-monitor.bookchaowalit.workers.dev/heartbeat/jobs-marts \
+          curl -fsS -X POST https://monitor.bookchaowalit.com/heartbeat/jobs-marts \
             -H "Authorization: Bearer $HEARTBEAT_TOKEN" -H "Content-Type: application/json" -d "$body"
