@@ -447,7 +447,9 @@ def load_bronze_dataset(
     item_builder: Optional[Callable[..., dict[str, Any]]] = None,
     read_mode: Optional[str] = None,
     read_fallback: Optional[str] = None,
+    min_ingest_date: Optional[str] = None,
 ) -> dict[str, Any]:
+    """Load a Bronze dataset; ``min_ingest_date`` bounds Parquet reads (not Iceberg)."""
     uri = data_lake_uri or default_data_lake_uri(
         data_lake_uri=contract.data_lake_uri,
         project_root=contract.project_root,
@@ -514,7 +516,9 @@ def load_bronze_dataset(
             except (LakeUnavailable, LakeIngestError) as exc:
                 if fallback != "parquet":
                     raise
-                rows = read_bronze_rows(contract, dataset, data_lake_uri=uri)
+                rows = read_bronze_rows(
+                    contract, dataset, data_lake_uri=uri, min_ingest_date=min_ingest_date
+                )
                 source_kind = (
                     "bronze_s3_parquet_fallback"
                     if is_remote_lake_uri(uri)
@@ -522,7 +526,9 @@ def load_bronze_dataset(
                 )
                 fallback_reason = f"{type(exc).__name__}: {exc}"
         else:
-            rows = read_bronze_rows(contract, dataset, data_lake_uri=uri)
+            rows = read_bronze_rows(
+                contract, dataset, data_lake_uri=uri, min_ingest_date=min_ingest_date
+            )
         if latest_only:
             rows = select_latest_bronze_rows(rows)
             items = [builder(row, history=False, history_idx=0) for row in rows]

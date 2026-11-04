@@ -21,11 +21,14 @@ class FakeNewsStore:
     def __init__(self, current: dict, history: dict) -> None:
         self.current = current
         self.history = history
+        self.min_ingest_dates: list[str | None] = []
 
-    def load_records(self, *, data_lake_uri: str) -> dict:
+    def load_records(self, *, data_lake_uri: str, min_ingest_date: str | None = None) -> dict:
+        self.min_ingest_dates.append(min_ingest_date)
         return self.current
 
-    def load_history(self, *, data_lake_uri: str) -> dict:
+    def load_history(self, *, data_lake_uri: str, min_ingest_date: str | None = None) -> dict:
+        self.min_ingest_dates.append(min_ingest_date)
         return self.history
 
 
@@ -227,6 +230,14 @@ class NewsCaptureRuntimeTests(unittest.TestCase):
         self.assertTrue(report["latest_observed_at"].endswith("Z"))
         self.assertEqual(set(report["feeds"]), set(runner.NEWS_FEEDS))
         self.assertTrue(all(item["status"] == "ok" for item in report["feeds"].values()))
+
+    def test_health_gate_reads_only_recent_ingest_dates(self) -> None:
+        # Reading every Bronze part ever written grew past the 900 s cron cap (2026-11-02);
+        # freshness only needs the partitions inside the freshness window plus a day.
+        store = _healthy_store()
+        runner.check_news_health("/tmp/news-test-lake", max_age_hours=24.0, store_module=store)
+        expected = (datetime.now(timezone.utc) - timedelta(hours=48)).date().isoformat()
+        self.assertEqual(store.min_ingest_dates, [expected, expected])
 
     def test_health_gate_rejects_a_missing_feed_even_when_another_feed_is_fresh(self) -> None:
         now = runner.utc_now_iso()

@@ -243,6 +243,57 @@ class ProductAdapterTests(unittest.TestCase):
             self.assertEqual(len(all_parts), 2)
 
 
+    def test_bronze_reader_skips_parts_before_min_ingest_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lake_uri = str(Path(tmp) / "lake")
+            contract = LakeProductContract(
+                source="book-stock-data",
+                domain="market",
+                product_schema_version="stock.v1",
+                project_root=ROOT,
+            )
+            for day, symbol in (("2026-08-01", "OLD"), ("2026-08-07", "NEW")):
+                with patch("data_lake.ingest.utc_now", return_value=f"{day}T00:00:00Z"):
+                    ingest_to_lake(
+                        contract,
+                        raw=f'{{"symbol":"{symbol}"}}'.encode(),
+                        records=[{"id": symbol, "symbol": symbol, "price": 1}],
+                        dataset="stock_prices",
+                        data_lake_uri=lake_uri,
+                    )
+            everything = read_bronze_rows(contract, "stock_prices", data_lake_uri=lake_uri)
+            recent = read_bronze_rows(
+                contract, "stock_prices", data_lake_uri=lake_uri, min_ingest_date="2026-08-05"
+            )
+            self.assertEqual(sorted(r["source_record_id"] for r in everything), ["NEW", "OLD"])
+            self.assertEqual([r["source_record_id"] for r in recent], ["NEW"])
+            payload = load_bronze_dataset(
+                contract,
+                "stock_prices",
+                data_lake_uri=lake_uri,
+                latest_only=True,
+                id_fields=["symbol"],
+                min_ingest_date="2026-08-05",
+            )
+            self.assertEqual([i["symbol"] for i in payload["items"]], ["NEW"])
+
+    def test_min_ingest_date_needs_committed_reads(self):
+        contract = LakeProductContract(
+            source="book-job-data",
+            domain="jobs",
+            product_schema_version="job.v1",
+            project_root=ROOT,
+        )
+        with self.assertRaises(ValueError):
+            read_bronze_rows(
+                contract,
+                "job_postings",
+                data_lake_uri="s3://portfolio/prefix",
+                require_committed=False,
+                min_ingest_date="2026-08-05",
+            )
+
+
 class _FakeRemoteStore:
     """In-memory stand-in for an s3:// ObjectStore that records reads and overlap."""
 

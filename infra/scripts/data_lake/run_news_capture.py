@@ -20,7 +20,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -367,9 +367,14 @@ def check_news_health(
     if max_age_hours <= 0:
         raise ValueError("freshness threshold must be positive")
     store = store_module or _load_news_store()
+    # Only partitions inside the freshness window (plus a day for date boundaries) can make
+    # the check pass; reading every part ever written outgrew the 900 s cron cap.
+    min_ingest_date = (
+        (datetime.now(timezone.utc) - timedelta(hours=max_age_hours + 24.0)).date().isoformat()
+    )
     try:
-        current = store.load_records(data_lake_uri=lake_uri)
-        history = store.load_history(data_lake_uri=lake_uri)
+        current = store.load_records(data_lake_uri=lake_uri, min_ingest_date=min_ingest_date)
+        history = store.load_history(data_lake_uri=lake_uri, min_ingest_date=min_ingest_date)
     except Exception as exc:  # noqa: BLE001 - health must fail closed
         raise NewsCycleError(f"health_{type(exc).__name__}") from exc
     current_items = current.get("items") if isinstance(current, dict) else None

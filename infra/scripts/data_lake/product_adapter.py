@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -471,6 +472,14 @@ def load_lineage(data_dir: Path, *, filename: str = "lake_lineage.json") -> Opti
         return None
 
 
+_INGEST_DATE = re.compile(r"/ingest_date=(\d{4}-\d{2}-\d{2})/")
+
+
+def _ingest_date_on_or_after(key: str, min_ingest_date: str) -> bool:
+    match = _INGEST_DATE.search(key)
+    return match is None or match.group(1) >= min_ingest_date
+
+
 def read_bronze_rows(
     contract: LakeProductContract,
     dataset: str,
@@ -478,7 +487,15 @@ def read_bronze_rows(
     data_lake_uri: Optional[str] = None,
     sql: str | None = None,
     require_committed: bool = True,
+    min_ingest_date: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Read committed Bronze rows; ``min_ingest_date`` (YYYY-MM-DD) skips older partitions.
+
+    DuckDB opens each part over its own requests, so an unbounded remote read grows with
+    every batch ever written. A part whose key has no readable ``ingest_date`` is kept.
+    """
+    if min_ingest_date is not None and not require_committed:
+        raise ValueError("min_ingest_date needs require_committed reads")
     uri = data_lake_uri or default_data_lake_uri(
         data_lake_uri=contract.data_lake_uri,
         project_root=contract.project_root,
@@ -489,6 +506,10 @@ def read_bronze_rows(
         if require_committed
         else None
     )
+    if committed_keys is not None and min_ingest_date is not None:
+        committed_keys = {
+            key for key in committed_keys if _ingest_date_on_or_after(key, min_ingest_date)
+        }
     if remote:
         if committed_keys is not None:
             paths: str | list[str] = [f"{uri.rstrip('/')}/{key}" for key in sorted(committed_keys)]
