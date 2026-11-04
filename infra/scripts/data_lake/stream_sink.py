@@ -458,11 +458,13 @@ class ConfluentConsumer:
         if not self._joined:
             deadline = max(deadline, time.monotonic() + self._join_timeout)
         polled: list[dict[str, Any]] = []
+        first = True
         while not polled:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if remaining <= 0 and not first:
                 break
-            for message in self._consumer.consume(num_messages=max_records, timeout=min(remaining, 1.0)):
+            first = False  # a zero timeout still makes one nonblocking consume
+            for message in self._consumer.consume(num_messages=max_records, timeout=max(min(remaining, 1.0), 0.0)):
                 error = message.error()
                 if error is not None:
                     if error.code() == self._partition_eof():

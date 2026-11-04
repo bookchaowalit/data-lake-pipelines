@@ -167,6 +167,13 @@ class ConfluentConsumerTests(unittest.TestCase):
         consumer, _ = self._consumer()
         self.assertEqual(consumer.poll(timeout_ms=1, max_records=10), [])
 
+    def test_zero_timeout_after_join_still_consumes_once(self):
+        consumer, fake = self._consumer()
+        fake.batches = [[]]
+        consumer.poll(timeout_ms=1, max_records=10)  # joins
+        fake.batches = [[FakeMessage(7, json.dumps(_envelope(7)).encode())]]
+        self.assertEqual([m["offset"] for m in consumer.poll(timeout_ms=0, max_records=10)], [7])
+
     def test_per_partition_commit_error_is_raised(self):
         consumer, fake = self._consumer()
 
