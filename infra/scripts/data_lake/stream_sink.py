@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Sink Kafka-compatible events to Avro, then convert them to Bronze Parquet.
 
+The broker client is confluent-kafka (librdkafka): kafka-python-ng cannot
+authenticate to Kafka 4.x (the Aiven event plane, ADR-0008). Local Redpanda
+uses PLAINTEXT; ``STREAM_KAFKA_USERNAME`` switches the client to SASL_SSL.
+
 The sink is deliberately small and at-least-once:
 
 1. poll a bounded micro-batch;
@@ -185,7 +189,12 @@ def _event_row(
         "dataset": event_dataset,
         "schema_version": event_schema_version,
         "received_at": str(value.get("received_at") or received_at),
-        "event_time": None if value.get("event_time") is None else str(value.get("event_time")),
+        # ADR-0008 envelopes carry occurred_at; Bronze envelopes carry event_time.
+        "event_time": (
+            None
+            if value.get("event_time", value.get("occurred_at")) is None
+            else str(value.get("event_time", value.get("occurred_at")))
+        ),
         "content_type": str(value.get("content_type") or "application/json"),
         "raw_object_key": None if value.get("raw_object_key") is None else str(value.get("raw_object_key")),
         "raw_sha256": None if value.get("raw_sha256") is None else str(value.get("raw_sha256")),
@@ -416,40 +425,116 @@ def sink_messages(
     }
 
 
+class BrokerError(RuntimeError):
+    """The broker returned an error for a poll, commit, or join."""
+
+
 def _commit_offsets(consumer: Any, messages: list[StreamMessage]) -> None:
     """Commit the next offset per partition after durable lake writes."""
-    try:
-        from kafka import TopicPartition  # type: ignore
-        from kafka.structs import OffsetAndMetadata  # type: ignore
-    except ImportError:
-        consumer.commit()
-        return
-
-    offsets = {}
-    for key, next_offset in _next_offsets(messages).items():
-        topic, partition_text = key.rsplit("/", 1)
-        offsets[TopicPartition(topic, int(partition_text))] = OffsetAndMetadata(next_offset, None)
-    try:
-        consumer.commit(offsets=offsets)
-    except TypeError:
-        # Keeps simple fake consumers useful in offline contract tests while
-        # the real kafka-python-ng client receives explicit per-partition offsets.
-        consumer.commit()
+    consumer.commit(offsets=_next_offsets(messages))
 
 
 def _consumer_lag(consumer: Any) -> int | None:
     """Return the assigned Kafka lag for the local heartbeat, when available."""
-    try:
-        assignments = consumer.assignment()
-        if not assignments:
-            return 0
-        end_offsets = consumer.end_offsets(assignments)
-        return sum(
-            max(int(end_offsets[partition]) - int(consumer.position(partition)), 0)
-            for partition in assignments
+    lag = getattr(consumer, "lag", None)
+    return lag() if callable(lag) else None
+
+
+class ConfluentConsumer:
+    """confluent-kafka consumer behind the small poll/commit/close shape the sink uses."""
+
+    def __init__(self, config: dict[str, str], topic: str, *, join_timeout: float = 30.0):
+        from confluent_kafka import Consumer  # type: ignore
+
+        self._consumer = Consumer({**config, "enable.auto.commit": False})
+        self._consumer.subscribe([topic])
+        self._join_timeout = join_timeout
+        self._joined = False
+
+    def poll(self, *, timeout_ms: int, max_records: int) -> list[dict[str, Any]]:
+        # The first poll also waits for the group join, which takes seconds; an
+        # empty answer before the join would read as "no events".
+        deadline = time.monotonic() + timeout_ms / 1000
+        if not self._joined:
+            deadline = max(deadline, time.monotonic() + self._join_timeout)
+        polled: list[dict[str, Any]] = []
+        while not polled:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            for message in self._consumer.consume(num_messages=max_records, timeout=min(remaining, 1.0)):
+                error = message.error()
+                if error is not None:
+                    if error.code() == self._partition_eof():
+                        continue
+                    raise BrokerError(error.name())
+                _, timestamp_ms = message.timestamp()
+                polled.append(
+                    {
+                        "topic": message.topic(),
+                        "partition": message.partition(),
+                        "offset": message.offset(),
+                        "value": message.value(),
+                        "timestamp_ms": timestamp_ms if timestamp_ms and timestamp_ms > 0 else None,
+                    }
+                )
+            if not self._joined and self._consumer.assignment():
+                self._joined = True
+                deadline = min(deadline, time.monotonic() + timeout_ms / 1000)
+        return polled
+
+    @staticmethod
+    def _partition_eof() -> int:
+        from confluent_kafka import KafkaError  # type: ignore
+
+        return KafkaError._PARTITION_EOF
+
+    def commit(self, offsets: dict[str, int]) -> None:
+        from confluent_kafka import KafkaException, TopicPartition  # type: ignore
+
+        partitions = []
+        for key, next_offset in offsets.items():
+            topic, partition_text = key.rsplit("/", 1)
+            partitions.append(TopicPartition(topic, int(partition_text), next_offset))
+        try:
+            self._consumer.commit(offsets=partitions, asynchronous=False)
+        except KafkaException as exc:
+            raise BrokerError(exc.args[0].name() if exc.args else "commit failed") from exc
+
+    def lag(self) -> int | None:
+        try:
+            total = 0
+            for position in self._consumer.position(self._consumer.assignment()):
+                _, high = self._consumer.get_watermark_offsets(position, timeout=5.0)
+                if position.offset >= 0:
+                    total += max(high - position.offset, 0)
+            return total
+        except Exception:  # noqa: BLE001 - lag is best-effort heartbeat detail
+            return None
+
+    def close(self) -> None:
+        self._consumer.close()
+
+
+def kafka_config(bootstrap_servers: str, group_id: str, auto_offset_reset: str, environ: Mapping[str, str]) -> dict[str, str]:
+    """librdkafka settings: PLAINTEXT locally, SASL_SSL when STREAM_KAFKA_USERNAME is set."""
+    config = {
+        "bootstrap.servers": bootstrap_servers,
+        "group.id": group_id,
+        "auto.offset.reset": "error" if auto_offset_reset == "none" else auto_offset_reset,
+    }
+    if environ.get("STREAM_KAFKA_USERNAME"):
+        config.update(
+            {
+                "security.protocol": "SASL_SSL",
+                "sasl.mechanism": environ.get("STREAM_KAFKA_SASL_MECHANISM", "SCRAM-SHA-256"),
+                "sasl.username": environ["STREAM_KAFKA_USERNAME"],
+                "sasl.password": environ["STREAM_KAFKA_PASSWORD"],
+            }
         )
-    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
-        return None
+        if environ.get("STREAM_KAFKA_CA_PEM"):
+            config["ssl.ca.pem"] = environ["STREAM_KAFKA_CA_PEM"]
+    return config
 
 
 def _collect_messages(consumer: Any, *, poll_ms: int, max_records: int, batch_seconds: float) -> list[StreamMessage]:
@@ -702,24 +787,14 @@ def _check_status(status_file: str, max_age_seconds: float, as_json: bool) -> in
 
 def _kafka_consumer(args: argparse.Namespace) -> Any:
     try:
-        from kafka import KafkaConsumer  # type: ignore
+        import confluent_kafka  # type: ignore  # noqa: F401
     except ImportError as exc:
         raise AvroUnavailable(
-            "The Kafka-compatible sink requires kafka-python-ng; install with "
+            "The Kafka-compatible sink requires confluent-kafka; install with "
             "python3 -m pip install -r infra/requirements-data-lake.txt"
         ) from exc
-
-    def decode(value: bytes) -> Any:
-        return json.loads(value.decode("utf-8"))
-
-    return KafkaConsumer(
-        args.topic,
-        bootstrap_servers=args.bootstrap_servers.split(","),
-        group_id=args.group_id,
-        enable_auto_commit=False,
-        auto_offset_reset=args.auto_offset_reset,
-        value_deserializer=decode,
-    )
+    config = kafka_config(args.bootstrap_servers, args.group_id, args.auto_offset_reset, os.environ)
+    return ConfluentConsumer(config, args.topic)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -727,7 +802,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     sink = subparsers.add_parser("sink", help="consume Kafka-compatible JSON events into Avro")
-    sink.add_argument("--bootstrap-servers", default="localhost:19092")
+    sink.add_argument("--bootstrap-servers", default=os.environ.get("STREAM_KAFKA_BOOTSTRAP", "localhost:19092"))
     sink.add_argument("--topic", required=True)
     sink.add_argument("--group-id", required=True)
     sink.add_argument("--data-lake-uri", default=DEFAULT_LAKE_URI)
@@ -743,6 +818,12 @@ def build_parser() -> argparse.ArgumentParser:
     sink.add_argument("--batch-seconds", type=float, default=60.0)
     sink.add_argument("--auto-offset-reset", choices=["earliest", "latest", "none"], default="latest")
     sink.add_argument("--once", action="store_true", help="process one poll window and exit")
+    sink.add_argument(
+        "--until-empty",
+        action="store_true",
+        help="process batches until a poll comes back empty, then exit (scheduled runs)",
+    )
+    sink.add_argument("--max-batches", type=int, default=50, help="upper bound for --until-empty")
     sink.add_argument("--status-file", help="local JSON heartbeat path for healthchecks")
     sink.add_argument("--json", action="store_true", dest="as_json")
 
@@ -826,6 +907,8 @@ def main() -> int:
                         "broker_lag": None,
                     },
                 )
+                batches = 0
+                total_records = 0
                 while True:
                     result = run_once(
                         consumer,
@@ -839,8 +922,10 @@ def main() -> int:
                         retention_class=args.retention_class,
                         poll_ms=args.poll_ms,
                         max_records=args.max_records,
-                        batch_seconds=0.0 if args.once else args.batch_seconds,
+                        batch_seconds=0.0 if args.once or args.until_empty else args.batch_seconds,
                     )
+                    batches += result["status"] == "success"
+                    total_records += result.get("record_count", 0)
                     now = utc_now()
                     _write_status(
                         args.status_file,
@@ -858,9 +943,12 @@ def main() -> int:
                 )
                     if args.once:
                         break
+                    if args.until_empty and (result["status"] == "empty" or batches >= args.max_batches):
+                        result = {**result, "batches": batches, "total_records": total_records}
+                        break
             finally:
                 consumer.close()
-    except (AvroUnavailable, IcebergUnavailable, ParquetUnavailable, StorageError, ValueError) as exc:
+    except (AvroUnavailable, BrokerError, IcebergUnavailable, ParquetUnavailable, StorageError, ValueError) as exc:
         if getattr(args, "status_file", None):
             _write_status(
                 args.status_file,
@@ -883,6 +971,8 @@ def main() -> int:
             print(f"Avro conversion complete: {result['record_count']} record(s)")
             print(f"  Bronze: {result['bronze_key']}")
             print(f"  Manifest: {result['manifest_key']}")
+    elif "batches" in result:
+        print(f"Stream sink drained: {result['batches']} batch(es), {result['total_records']} record(s)")
     elif result["status"] == "empty":
         print("No streaming events available")
     else:

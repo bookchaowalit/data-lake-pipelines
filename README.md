@@ -36,6 +36,25 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
 - รันเองในเครื่อง: secret ใน Infisical `/job-data` (`JOB_DATA_*`) map เป็น `AWS_*` / `DATA_LAKE_S3_ENDPOINT` ภายใน `bash -c '…'` และต้องมี `aws` CLI
 - lineage: `lake.silver-job-postings` → `lake.gold-jobs-marts` → `consumer.jobs-insights-site` ใน metadata catalog ของ architecture-docs
 
+## Event plane: Kafka → Bronze (ADR-0008 M4)
+
+```text
+.github/workflows/event-sink.yml (jobs queue, "5 * * * *")
+  → event_heartbeat.py: ops.heartbeat.emitted → ops.events.v1 (SASL user ops-heartbeat)
+  → stream_sink.py sink --until-empty ต่อ topic (SASL user lake-sink, group lake-sink)
+      commerce.events.v1 / platform.events.v1 / data.ingest.v1 / ops.events.v1
+      → landing/stream/source=aiven-kafka/domain=<d>/dataset=<ds>/…/part-<batch>.avro
+        + control/checkpoints/stream + control/manifests/stream (topic/partition/offset ต่อ batch)
+      → commit offset หลังเขียน lake ครบเท่านั้น (at-least-once, batch id จาก offset จึงรันซ้ำได้)
+  → stream_sink.py convert --watch --once → bronze/domain=<d>/dataset=<ds>/… + control/manifests/stream-parquet
+  → heartbeat event-sink (3 ชม.; failed = heartbeat-event / sink:<topic> / event-plane-e2e / convert)
+```
+
+- client คือ confluent-kafka: kafka-python-ng ยืนยันตัวตนกับ Kafka 4.x ไม่ได้
+- `event-plane-e2e` = heartbeat ที่ส่งในรอบเดียวกันไม่กลับมาถึง lake
+- group `lake-sink` เริ่มที่ปลาย topic ณ 2026-11-04 (ข้าม smoke data ของ M3)
+- รันเองในเครื่อง: Infisical `/aiven` (`KAFKA_*`) map เป็น `STREAM_KAFKA_*`; ไม่ใส่ `STREAM_KAFKA_USERNAME` = PLAINTEXT สำหรับ Redpanda ในเครื่อง
+
 ## ความสัมพันธ์กับ repo อื่น
 
 - `data-lake-core` (public) เป็น runtime แพ็กเกจพกพา; README ของมันระบุว่า "parent `infra/scripts/data_lake`" เป็น canonical สำหรับ 9 modules ที่ใช้ร่วม — canonical นั้นย้ายมาที่ `infra/scripts/data_lake/` ใน repo นี้แล้ว (ต้องแก้ `scripts/check_parity.py` ของ public repo ให้ชี้มาที่นี่ — ยังไม่ได้ทำ)

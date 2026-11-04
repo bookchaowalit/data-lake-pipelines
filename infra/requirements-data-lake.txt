@@ -9,7 +9,7 @@ beautifulsoup4>=4.12.0
 # Draft v1/v2 discovery export validation used by the local capture consumers.
 jsonschema==4.26.0
 fastavro>=1.12.2
-kafka-python-ng>=2.2.3
+confluent-kafka>=2.16,<3
 pyarrow>=25.0.1
 pyiceberg[sql-sqlite,s3fs]>=0.12.0
 # Multi-engine lake query lab (lab engines only; production remains DuckDB).

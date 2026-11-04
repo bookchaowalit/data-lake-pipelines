@@ -1,0 +1,145 @@
+# Event plane → lake (ADR-0008 M4): drain the Aiven Kafka topics into R2 landing Avro, then
+# convert pending Avro to Bronze Parquet with stream manifests (lineage: topic/partition/offset
+# per batch). Offsets are committed only after the lake writes, so a failed run is replayed.
+#
+# Each run first publishes one ops.heartbeat.emitted envelope (ops-heartbeat user), so the run is
+# also an end-to-end check (produce → broker → lake) and the free Aiven service never idles.
+#
+# Public repository: GitHub-hosted runner and a public log, so only counts are printed and
+# stderr stays in runner temp files. Failures reach Telegram through the uptime Worker
+# heartbeat `event-sink`.
+name: Event sink (Kafka → Bronze)
+
+on:
+  # Scheduled by the jobs queue (platform-jobs-worker job `event-sink`, cron "5 * * * *" UTC), ADR-0008.
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "who started the run"
+        type: choice
+        options: [manual, jobs-queue]
+        default: manual
+
+permissions:
+  contents: read
+
+concurrency:
+  group: event-sink
+  cancel-in-progress: false
+
+jobs:
+  sink:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STREAM_KAFKA_BOOTSTRAP: ${{ secrets.STREAM_KAFKA_BOOTSTRAP }}
+      STREAM_KAFKA_CA_PEM: ${{ secrets.STREAM_KAFKA_CA_PEM }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install runtime from uv.lock
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.13.1
+          uv sync --frozen --no-dev
+
+      - name: Publish the ops heartbeat event
+        id: heartbeat
+        env:
+          STREAM_KAFKA_USERNAME: ${{ secrets.KAFKA_OPS_HEARTBEAT_USERNAME }}
+          STREAM_KAFKA_PASSWORD: ${{ secrets.KAFKA_OPS_HEARTBEAT_PASSWORD }}
+        run: |
+          if .venv/bin/python infra/scripts/data_lake/event_heartbeat.py > "$RUNNER_TEMP/heartbeat.json" 2> "$RUNNER_TEMP/heartbeat.err"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "heartbeat event: not published ($(head -c 200 "$RUNNER_TEMP/heartbeat.err" | grep -o '([A-Za-z]*)' | head -1))"
+          fi
+
+      - name: Drain topics into landing Avro
+        id: drain
+        env:
+          STREAM_KAFKA_USERNAME: ${{ secrets.KAFKA_LAKE_SINK_USERNAME }}
+          STREAM_KAFKA_PASSWORD: ${{ secrets.KAFKA_LAKE_SINK_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.JOB_DATA_R2_SECRET_ACCESS_KEY }}
+          DATA_LAKE_S3_ENDPOINT: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_ENDPOINT_URL: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+          DATA_LAKE_CLOUD_WRITE_ENABLED: "true"
+          SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
+        run: |
+          failed=()
+          ops_records=0
+          # topic domain dataset
+          while read -r topic domain dataset; do
+            if .venv/bin/python infra/scripts/data_lake/stream_sink.py sink --topic "$topic" --group-id lake-sink \
+                --source aiven-kafka --domain "$domain" --dataset "$dataset" --auto-offset-reset earliest \
+                --until-empty --json > "$RUNNER_TEMP/$topic.json" 2> "$RUNNER_TEMP/$topic.err"; then
+              records=$(jq -r '.total_records // .record_count // 0' "$RUNNER_TEMP/$topic.json")
+              echo "$topic: $records record(s)" | tee -a "$GITHUB_STEP_SUMMARY"
+              if [ "$topic" = "ops.events.v1" ]; then ops_records=$records; fi
+            else
+              failed+=("$topic")
+              echo "$topic: failed ($(grep -o '^ERROR: [A-Za-z]*' "$RUNNER_TEMP/$topic.err" | head -1))" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done <<'TOPICS'
+          commerce.events.v1 commerce events
+          platform.events.v1 platform events
+          data.ingest.v1 data ingest
+          ops.events.v1 ops events
+          TOPICS
+          echo "failed=${failed[*]}" >> "$GITHUB_OUTPUT"
+          echo "ops_records=$ops_records" >> "$GITHUB_OUTPUT"
+
+      - name: Convert landing Avro to Bronze Parquet
+        id: convert
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.JOB_DATA_R2_SECRET_ACCESS_KEY }}
+          DATA_LAKE_S3_ENDPOINT: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_ENDPOINT_URL: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+          DATA_LAKE_CLOUD_WRITE_ENABLED: "true"
+          SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
+        run: |
+          if .venv/bin/python infra/scripts/data_lake/stream_sink.py convert --watch --once --json \
+              > "$RUNNER_TEMP/convert.json" 2> "$RUNNER_TEMP/convert.err"; then
+            jq '{status, scanned, converted, already_converted, errors: (.errors | length)}' "$RUNNER_TEMP/convert.json" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "status=$(jq -r .status "$RUNNER_TEMP/convert.json")" >> "$GITHUB_OUTPUT"
+          else
+            echo "convert: failed ($(grep -o '^ERROR: [A-Za-z]*' "$RUNNER_TEMP/convert.err" | head -1))" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Heartbeat
+        if: ${{ always() }}
+        env:
+          HEARTBEAT_TOKEN: ${{ secrets.HEARTBEAT_TOKEN }}
+          PUBLISHED: ${{ steps.heartbeat.outputs.ok }}
+          FAILED_TOPICS: ${{ steps.drain.outputs.failed }}
+          OPS_RECORDS: ${{ steps.drain.outputs.ops_records }}
+          CONVERT: ${{ steps.convert.outputs.status }}
+        run: |
+          failed=()
+          if [ "$PUBLISHED" != "true" ]; then failed+=("heartbeat-event"); fi
+          for topic in $FAILED_TOPICS; do failed+=("sink:$topic"); done
+          # The heartbeat published above must come back through the broker into the lake.
+          if [ "$PUBLISHED" = "true" ] && [ "${OPS_RECORDS:-0}" -lt 1 ]; then failed+=("event-plane-e2e"); fi
+          if [ "$CONVERT" != "healthy" ]; then failed+=("convert"); fi
+          if [ ${#failed[@]} -eq 0 ]; then
+            body='{"ok":true,"failed":[]}'
+          else
+            body=$(jq -cn '{ok:false, failed:$ARGS.positional}' --args "${failed[@]}")
+          fi
+          echo "heartbeat: $body"
+          curl -fsS -X POST https://solo-empire-monitor.bookchaowalit.workers.dev/heartbeat/event-sink \
+            -H "Authorization: Bearer $HEARTBEAT_TOKEN" -H "Content-Type: application/json" -d "$body"
+          [ ${#failed[@]} -eq 0 ]
