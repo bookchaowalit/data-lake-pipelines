@@ -71,6 +71,8 @@ class FakeConfluent:
         self.batches: list[list[FakeMessage]] = []
         self.consumes = 0
         self.committed = None
+        self.commit_result = None
+        self.never_assigned = False
         self.closed = False
 
     def subscribe(self, topics):
@@ -82,10 +84,11 @@ class FakeConfluent:
         return self.batches.pop(0) if self.batches else []
 
     def assignment(self):
-        return ["tp"] if self.consumes else []
+        return ["tp"] if self.consumes and not self.never_assigned else []
 
     def commit(self, offsets, asynchronous):
         self.committed = (offsets, asynchronous)
+        return offsets if self.commit_result is None else self.commit_result
 
     def close(self):
         self.closed = True
@@ -135,9 +138,9 @@ class KafkaConfigTests(unittest.TestCase):
 
 @_skip_unless_runtime(HAS_RUNTIME, "install requirements-data-lake.txt for confluent-kafka")
 class ConfluentConsumerTests(unittest.TestCase):
-    def _consumer(self) -> tuple[ConfluentConsumer, FakeConfluent]:
+    def _consumer(self, join_timeout: float = 5) -> tuple[ConfluentConsumer, FakeConfluent]:
         with patch("confluent_kafka.Consumer", FakeConfluent):
-            consumer = ConfluentConsumer({"group.id": "g"}, "ops.events.v1", join_timeout=5)
+            consumer = ConfluentConsumer({"group.id": "g"}, "ops.events.v1", join_timeout=join_timeout)
         fake = consumer._consumer
         self.assertFalse(fake.config["enable.auto.commit"])
         self.assertEqual(fake.topics, ["ops.events.v1"])
@@ -153,6 +156,26 @@ class ConfluentConsumerTests(unittest.TestCase):
         self.assertEqual([m["offset"] for m in polled], [4])
         self.assertEqual(polled[0]["timestamp_ms"], 1_700_000_000_000)
         self.assertGreaterEqual(fake.consumes, 2)
+
+    def test_group_join_timeout_is_an_error_not_an_empty_poll(self):
+        consumer, fake = self._consumer(join_timeout=0.3)
+        fake.never_assigned = True
+        with self.assertRaisesRegex(BrokerError, "join timed out"):
+            consumer.poll(timeout_ms=1, max_records=10)
+
+    def test_empty_poll_after_join_is_empty(self):
+        consumer, _ = self._consumer()
+        self.assertEqual(consumer.poll(timeout_ms=1, max_records=10), [])
+
+    def test_per_partition_commit_error_is_raised(self):
+        consumer, fake = self._consumer()
+
+        class Failed:
+            error = FakeError(25, "UNKNOWN_MEMBER_ID")
+
+        fake.commit_result = [Failed()]
+        with self.assertRaisesRegex(BrokerError, "UNKNOWN_MEMBER_ID"):
+            consumer.commit({"ops.events.v1/0": 3})
 
     def test_broker_error_is_raised(self):
         consumer, fake = self._consumer()
@@ -196,7 +219,8 @@ class EnvelopeSinkTests(unittest.TestCase):
             argv = [
                 "stream_sink.py", "sink", "--topic", "ops.events.v1", "--group-id", "lake-sink",
                 "--data-lake-uri", temp_dir, "--source", "aiven-kafka", "--domain", "ops",
-                "--dataset", "events", "--max-records", "2", "--poll-ms", "1", "--until-empty", "--json",
+                "--dataset", "events", "--max-records", "2", "--poll-ms", "1", "--until-empty",
+                "--expect-id", "ops.heartbeat.emitted:3", "--json",
             ]
             out = io.StringIO()
             with patch.object(sys, "argv", argv), redirect_stdout(out):
@@ -204,8 +228,19 @@ class EnvelopeSinkTests(unittest.TestCase):
         self.assertEqual(code, 0)
         result = json.loads(out.getvalue())
         self.assertEqual((result["batches"], result["total_records"]), (3, 5))
+        self.assertTrue(result["expected_id_found"])
         self.assertEqual(len(drain.commits), 3)
         self.assertTrue(drain.closed)
+
+
+    def test_expect_id_is_false_when_the_event_did_not_land(self):
+        drain = FakeDrainConsumer([StreamMessage("ops.events.v1", 0, 0, _envelope(0))])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = stream_sink.run_once(
+                drain, data_lake_uri=temp_dir, source="aiven-kafka", domain="ops", dataset="events",
+                poll_ms=1, expect_id="ops.heartbeat.emitted:missing",
+            )
+        self.assertFalse(result["expected_id_found"])
 
 
 class HeartbeatTests(unittest.TestCase):

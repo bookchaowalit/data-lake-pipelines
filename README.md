@@ -51,7 +51,7 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
 ```
 
 - client คือ confluent-kafka: kafka-python-ng ยืนยันตัวตนกับ Kafka 4.x ไม่ได้
-- `event-plane-e2e` = heartbeat ที่ส่งในรอบเดียวกันไม่กลับมาถึง lake
+- `event-plane-e2e` = heartbeat ที่ส่งในรอบเดียวกัน (เทียบด้วย envelope id ผ่าน `--expect-id`) ไม่กลับมาถึง lake
 - group `lake-sink` เริ่มที่ปลาย topic ณ 2026-11-04 (ข้าม smoke data ของ M3)
 - รันเองในเครื่อง: Infisical `/aiven` (`KAFKA_*`) map เป็น `STREAM_KAFKA_*`; ไม่ใส่ `STREAM_KAFKA_USERNAME` = PLAINTEXT สำหรับ Redpanda ในเครื่อง
 

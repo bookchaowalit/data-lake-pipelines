@@ -481,6 +481,9 @@ class ConfluentConsumer:
             if not self._joined and self._consumer.assignment():
                 self._joined = True
                 deadline = min(deadline, time.monotonic() + timeout_ms / 1000)
+        if not polled and not self._joined:
+            # No assignment means nothing was read at all; that is a failure, not an empty topic.
+            raise BrokerError("consumer group join timed out")
         return polled
 
     @staticmethod
@@ -497,9 +500,13 @@ class ConfluentConsumer:
             topic, partition_text = key.rsplit("/", 1)
             partitions.append(TopicPartition(topic, int(partition_text), next_offset))
         try:
-            self._consumer.commit(offsets=partitions, asynchronous=False)
+            committed = self._consumer.commit(offsets=partitions, asynchronous=False)
         except KafkaException as exc:
             raise BrokerError(exc.args[0].name() if exc.args else "commit failed") from exc
+        # A synchronous commit reports per-partition failures on the returned partitions.
+        for partition in committed or []:
+            if partition.error is not None:
+                raise BrokerError(f"commit failed: {partition.error.name()}")
 
     def lag(self) -> int | None:
         try:
@@ -572,6 +579,7 @@ def run_once(
     poll_ms: int = 5_000,
     max_records: int = 1_000,
     batch_seconds: float = 0.0,
+    expect_id: str | None = None,
 ) -> dict[str, Any]:
     """Poll, durably land, and then commit one bounded micro-batch."""
     messages = _collect_messages(
@@ -595,6 +603,8 @@ def run_once(
     )
     _commit_offsets(consumer, messages)
     result["committed"] = True
+    if expect_id is not None:
+        result["expected_id_found"] = any(message.value.get("id") == expect_id for message in messages)
     return result
 
 
@@ -824,6 +834,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="process batches until a poll comes back empty, then exit (scheduled runs)",
     )
     sink.add_argument("--max-batches", type=int, default=50, help="upper bound for --until-empty")
+    sink.add_argument("--expect-id", help="report whether an event with this envelope id was landed")
     sink.add_argument("--status-file", help="local JSON heartbeat path for healthchecks")
     sink.add_argument("--json", action="store_true", dest="as_json")
 
@@ -909,6 +920,7 @@ def main() -> int:
                 )
                 batches = 0
                 total_records = 0
+                expected_found = False
                 while True:
                     result = run_once(
                         consumer,
@@ -923,7 +935,9 @@ def main() -> int:
                         poll_ms=args.poll_ms,
                         max_records=args.max_records,
                         batch_seconds=0.0 if args.once or args.until_empty else args.batch_seconds,
+                        expect_id=args.expect_id,
                     )
+                    expected_found = expected_found or bool(result.get("expected_id_found"))
                     batches += result["status"] == "success"
                     total_records += result.get("record_count", 0)
                     now = utc_now()
@@ -945,6 +959,8 @@ def main() -> int:
                         break
                     if args.until_empty and (result["status"] == "empty" or batches >= args.max_batches):
                         result = {**result, "batches": batches, "total_records": total_records}
+                        if args.expect_id is not None:
+                            result["expected_id_found"] = expected_found
                         break
             finally:
                 consumer.close()

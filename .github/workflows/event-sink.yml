@@ -57,6 +57,7 @@ jobs:
         run: |
           if .venv/bin/python infra/scripts/data_lake/event_heartbeat.py > "$RUNNER_TEMP/heartbeat.json" 2> "$RUNNER_TEMP/heartbeat.err"; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "id=$(jq -r .id "$RUNNER_TEMP/heartbeat.json")" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
             echo "heartbeat event: not published ($(head -c 200 "$RUNNER_TEMP/heartbeat.err" | grep -o '([A-Za-z]*)' | head -1))"
@@ -67,6 +68,7 @@ jobs:
         env:
           STREAM_KAFKA_USERNAME: ${{ secrets.KAFKA_LAKE_SINK_USERNAME }}
           STREAM_KAFKA_PASSWORD: ${{ secrets.KAFKA_LAKE_SINK_PASSWORD }}
+          HEARTBEAT_ID: ${{ steps.heartbeat.outputs.id }}
           AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.JOB_DATA_R2_SECRET_ACCESS_KEY }}
           DATA_LAKE_S3_ENDPOINT: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
@@ -76,15 +78,17 @@ jobs:
           SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
         run: |
           failed=()
-          ops_records=0
+          heartbeat_landed=false
           # topic domain dataset
           while read -r topic domain dataset; do
+            expect=()
+            if [ "$topic" = "ops.events.v1" ] && [ -n "$HEARTBEAT_ID" ]; then expect=(--expect-id "$HEARTBEAT_ID"); fi
             if .venv/bin/python infra/scripts/data_lake/stream_sink.py sink --topic "$topic" --group-id lake-sink \
                 --source aiven-kafka --domain "$domain" --dataset "$dataset" --auto-offset-reset earliest \
-                --until-empty --json > "$RUNNER_TEMP/$topic.json" 2> "$RUNNER_TEMP/$topic.err"; then
+                --until-empty "${expect[@]}" --json > "$RUNNER_TEMP/$topic.json" 2> "$RUNNER_TEMP/$topic.err"; then
               records=$(jq -r '.total_records // .record_count // 0' "$RUNNER_TEMP/$topic.json")
               echo "$topic: $records record(s)" | tee -a "$GITHUB_STEP_SUMMARY"
-              if [ "$topic" = "ops.events.v1" ]; then ops_records=$records; fi
+              if [ "$(jq -r '.expected_id_found // false' "$RUNNER_TEMP/$topic.json")" = "true" ]; then heartbeat_landed=true; fi
             else
               failed+=("$topic")
               echo "$topic: failed ($(grep -o '^ERROR: [A-Za-z]*' "$RUNNER_TEMP/$topic.err" | head -1))" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -96,7 +100,7 @@ jobs:
           ops.events.v1 ops events
           TOPICS
           echo "failed=${failed[*]}" >> "$GITHUB_OUTPUT"
-          echo "ops_records=$ops_records" >> "$GITHUB_OUTPUT"
+          echo "heartbeat_landed=$heartbeat_landed" >> "$GITHUB_OUTPUT"
 
       - name: Convert landing Avro to Bronze Parquet
         id: convert
@@ -125,14 +129,14 @@ jobs:
           HEARTBEAT_TOKEN: ${{ secrets.HEARTBEAT_TOKEN }}
           PUBLISHED: ${{ steps.heartbeat.outputs.ok }}
           FAILED_TOPICS: ${{ steps.drain.outputs.failed }}
-          OPS_RECORDS: ${{ steps.drain.outputs.ops_records }}
+          HEARTBEAT_LANDED: ${{ steps.drain.outputs.heartbeat_landed }}
           CONVERT: ${{ steps.convert.outputs.status }}
         run: |
           failed=()
           if [ "$PUBLISHED" != "true" ]; then failed+=("heartbeat-event"); fi
           for topic in $FAILED_TOPICS; do failed+=("sink:$topic"); done
-          # The heartbeat published above must come back through the broker into the lake.
-          if [ "$PUBLISHED" = "true" ] && [ "${OPS_RECORDS:-0}" -lt 1 ]; then failed+=("event-plane-e2e"); fi
+          # This run's heartbeat (by envelope id, not any ops record) must come back through the lake.
+          if [ "$PUBLISHED" = "true" ] && [ "$HEARTBEAT_LANDED" != "true" ]; then failed+=("event-plane-e2e"); fi
           if [ "$CONVERT" != "healthy" ]; then failed+=("convert"); fi
           if [ ${#failed[@]} -eq 0 ]; then
             body='{"ok":true,"failed":[]}'
