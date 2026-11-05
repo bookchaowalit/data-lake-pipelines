@@ -29,14 +29,24 @@ hash, and the object store is write-once, so a mutable `latest.json` is not allo
    `now` writes the identical object, which the store treats as a no-op.
 4. A run that fails before Gold (quality gate, dbt failure) writes no pointer.
 5. The result dict gains `pointer_key` and `pointer_existed`.
+6. (2026-11-05) After Gold, the run also publishes Silver for `job_matches` and `job_leads` with
+   the `jobs_envelope` normalizer: newest row per `source_record_id`, the common Silver columns
+   (`payload_json` kept verbatim), only `source_record_id` required, `offline_fixture` excluded,
+   same `max_invalid_ratio`. These are best-effort: a failure (empty Bronze, quality gate) is
+   reported in the result under `envelope_silver.<dataset>.error` and never blocks Gold or the
+   pointer.
+7. The pointer gains `datasets`: `{<dataset>: {"silver_key", "silver_run_id", "record_count"}}`
+   for `job_postings` and every envelope dataset that succeeded; a failed dataset is absent.
+   The top-level `silver_*` fields stay (they describe `job_postings`), so it is still
+   `pointer_version` `"1"`.
 
 ## Reader contract
 
 A reader lists `control/pointers/gold/source=book-job-data/domain=jobs/`, takes the greatest key
 ending in `.json`, checks `pointer_version == "1"` and `layer == "gold"`, then reads
-`silver_key`. If any step fails the reader must fall back to its own Bronze read, not serve
+`silver_key` (or `datasets.<dataset>.silver_key`). If any step fails, or the dataset is absent, the reader must fall back to its own Bronze read, not serve
 empty data.
 
 ## Out of scope
 
-Pointers for other domains; pruning old pointers (each is a few hundred bytes, ~12 a day).
+Silver for the `_history` datasets; pointers for other domains; pruning old pointers (each is a few hundred bytes, ~12 a day).
