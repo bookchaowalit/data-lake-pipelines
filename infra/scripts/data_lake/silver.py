@@ -644,7 +644,24 @@ def transform_bronze_to_silver(
         (excluded_rows if is_excluded else kept_rows).append(row)
     excluded_count = len(excluded_rows)
     if contract.keep_all_versions:
-        latest_rows = list(kept_rows)
+        # Bronze reads can return rows tied on (event_time, received_at, event_id)
+        # in any order; a full canonical key keeps the run id replay-stable.
+        latest_rows = sorted(
+            kept_rows,
+            key=lambda row: tuple(
+                _text(row.get(field))
+                for field in (
+                    "event_time",
+                    "received_at",
+                    "event_id",
+                    "source_record_id",
+                    "ingest_run_id",
+                    "raw_object_key",
+                    "raw_sha256",
+                    "payload_json",
+                )
+            ),
+        )
     else:
         latest_rows = select_latest_bronze_rows(kept_rows) if kept_rows else []
     # The v1 manifest shape is kept byte-for-byte unless this run actually

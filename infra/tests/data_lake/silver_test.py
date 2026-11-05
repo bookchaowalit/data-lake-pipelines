@@ -7,6 +7,7 @@ import sys
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -272,6 +273,26 @@ class SilverTests(unittest.TestCase):
             history = transform_bronze_to_silver(SilverProductContract(keep_all_versions=True), data_lake_uri=root)
             self.assertNotEqual(latest["silver_run_id"], history["silver_run_id"])
             self.assertFalse(history["manifest_existed"])
+
+    def test_history_run_id_does_not_depend_on_bronze_read_order(self):
+        import data_lake.silver as silver_module
+
+        with tempfile.TemporaryDirectory() as root:
+            # Same event_time/received_at/event_id: the Bronze sort leaves these tied.
+            self._ingest_jobs(root, [self._job(1), self._job(1, title="Engineer 1 again")])
+            rows = silver_module.read_bronze_rows(
+                silver_module._contract_as_bronze(SilverProductContract()), "job_postings", data_lake_uri=root
+            )
+            for row in rows:
+                row["event_id"] = "tied"
+            contract = SilverProductContract(
+                normalizer="jobs_envelope", required_fields=("source_record_id",), keep_all_versions=True
+            )
+            run_ids = set()
+            for ordered in (rows, list(reversed(rows))):
+                with mock.patch.object(silver_module, "read_bronze_rows", return_value=ordered):
+                    run_ids.add(transform_bronze_to_silver(contract, data_lake_uri=root)["silver_run_id"])
+            self.assertEqual(len(run_ids), 1)
 
     def test_new_excluded_row_alone_does_not_conflict(self):
         with tempfile.TemporaryDirectory() as root:
