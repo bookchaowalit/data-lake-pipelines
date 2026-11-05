@@ -89,6 +89,23 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 rep["postgres_rows"] = len(stored)
                 rep["postgres_missing_keys"] = len(pg_missing)
                 rep["postgres_missing_sample"] = [list(k) for k in pg_missing[:5]]
+                if c.version:
+                    # A newer version can reach raw while its upsert fails: the key exists, the row is stale.
+                    newest: dict[tuple[Any, ...], Any] = {}
+                    pairs = [(tuple(r.values.get(k) for k in c.pk), r.values.get(c.version)) for r in rows]
+                    if ds.raw and tbl is not None:
+                        pairs += list(zip(zip(*(tbl.column(k).to_pylist() for k in c.pk)),
+                                          tbl.column(c.version).to_pylist()))
+                    for pk, v in pairs:
+                        if v is not None and all(x is not None for x in pk) and (pk not in newest or v > newest[pk]):
+                            newest[pk] = v
+                    with conn.cursor() as q:
+                        q.execute(f"select {', '.join(c.pk)}, {c.version} from {PG_SCHEMA}.{n}")
+                        stored_v = {tuple(row[:-1]): row[-1] for row in q.fetchall()}
+                    stale = sorted(pk for pk, v in newest.items()
+                                   if pk in stored_v and (stored_v[pk] is None or stored_v[pk] < v))
+                    rep["postgres_stale_versions"] = len(stale)
+                    rep["postgres_stale_sample"] = [list(k) for k in stale[:5]]
                 if "post_id" in c.pk:
                     with conn.cursor() as q:
                         q.execute(f"select count(*) - count(distinct post_id) from {PG_SCHEMA}.{n}")
@@ -115,6 +132,9 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 reasons.append(f"{rep['raw_duplicate_post_ids']} duplicate post_id in raw")
             if rep.get("postgres_missing_keys"):
                 reasons.append(f"{rep['postgres_missing_keys']} keys missing from Postgres")
+            if rep.get("postgres_stale_versions"):
+                reasons.append(f"{rep['postgres_stale_versions']} Postgres rows older than raw/Sheet "
+                               f"({CURATED[n].version})")
             if rep.get("postgres_duplicate_post_ids"):
                 reasons.append(f"{rep['postgres_duplicate_post_ids']} duplicate post_id in Postgres")
             rep["reasons"] = reasons

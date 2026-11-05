@@ -308,6 +308,26 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(r["postgres_missing_keys"], 1)
         self.assertTrue(any("coercion" in x for x in r["reasons"]))
 
+    def test_context_appended_alone_lands_in_its_posts_feed_partition(self):
+        self._append({"x_feed": [feed_row("66", collected="2026-11-04 10:00")]})
+        rep = self._append({"x_post_context": [{"post_id": "66", "media_count": 1}]})
+        self.assertEqual(rep["raw"]["x_post_context"]["parts"],
+                         ["raw/x_post_context/date=2026-11-04/part-0000.parquet"])
+
+    def test_validate_flags_a_newer_raw_version_that_postgres_missed(self):
+        base = {h: "" for h in DATASETS["claims"].names} | {"claim_id": "CL-3", "claim": "x",
+                                                           "last_checked": "2026-11-05 08:01"}
+        self._append({"claims": [base]})
+        newer = type_row(DATASETS["claims"], base | {"last_checked": "2026-11-05 20:01"})
+        write_raw(DATASETS["claims"], [newer], [newer.values["last_checked"]], store=self.store, prefix="",
+                  source="append", execute=True, run_date=date(2026, 11, 5), now=NOW)  # upsert "failed"
+        cfg = type("C", (), {"db_url": os.environ["X_LAKE_TEST_DB_URL"]})()
+        chk = DatasetCheck("claims", "Claims")
+        with patch.object(validate, "load", return_value=({"claims": []}, {"claims": chk}, [])), \
+                patch.object(validate, "open_store", return_value=(self.store, "")):
+            r = validate.reconcile(cfg, ["claims"], None, None)["datasets"]["claims"]
+        self.assertEqual((r["postgres_missing_keys"], r["postgres_stale_versions"], r["ok"]), (0, 1, False))
+
     def test_claims_keep_latest_version_in_postgres_and_every_version_in_raw(self):
         base = {h: "" for h in DATASETS["claims"].names} | {"claim_id": "CL-1", "claim": "x", "first_post_id": "5",
                                                            "last_checked": "2026-11-05 08:01", "queue_state": "queued"}

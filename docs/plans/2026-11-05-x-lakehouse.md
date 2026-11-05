@@ -136,8 +136,8 @@ and `updated_at` moves only on a real change (proved: a second full backfill upd
 `claims` (by `last_checked`) and `x_signals` (by `collected_at`) also refuse an update from an older
 version, so replaying an old batch cannot roll a row back. The joined X Feed columns use
 `coalesce(excluded.c, t.c)`, so a later batch that lacks the feed row keeps the stored author and
-text. A signal appended in a later call than its post looks the post up in the last 7 days of raw
-`x_feed` partitions.
+text. A signal or post-context row appended in a later call than its post looks the post up in the
+last 7 days of raw `x_feed` partitions (context uses the post's capture date as its partition).
 
 ## 5. Serving layer (Sheet)
 
@@ -223,7 +223,9 @@ Built into every run and into `validate.py` (read-only, exit 1 on failure):
   `--execute` refuse **before** opening R2 or Postgres (exit 2); `--execute` also refuses without
   `X_LAKE_DB_URL`, so raw and curated are always written together
 - curated vs raw: every key in the scoped raw rows (and Sheet rows) must exist in Postgres, so
-  lake-only rows after cutover are covered too
+  lake-only rows after cutover are covered too; for claims and x_signals the stored version
+  (`last_checked` / `collected_at`) must also be the newest one seen, which catches an upsert that
+  failed after its raw write
 
 `validate` fails, listing the reasons, on: a missing tab or column, any coercion error, duplicate
 natural keys or post_ids, Sheet rows missing from raw, and keys missing from Postgres.

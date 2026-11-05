@@ -26,7 +26,7 @@ from .coerce import TZ, type_row
 from .config import Config
 from .lake import Store, ingest_date, lookup_latest, open_store
 from .pipeline import DatasetCheck, run, validate_rows
-from .schemas import DATASETS, X_FEED, X_SIGNALS
+from .schemas import DATASETS, X_FEED, X_POST_CONTEXT, X_SIGNALS
 
 
 class AppendError(RuntimeError):
@@ -59,13 +59,17 @@ def append_rows(rows_by_dataset: dict[str, list[dict[str, Any]]], *, execute: bo
         cur.ensure_schema(conn)
     run_date = now.astimezone(TZ).date()
     feed_lookup: dict[str, dict[str, Any]] = {}
-    if store is not None and typed.get(X_SIGNALS.name):
-        # Signals often arrive in a later call than their posts: fetch those posts' feed facts.
+    if store is not None and (typed.get(X_SIGNALS.name) or typed.get(X_POST_CONTEXT.name)):
+        # Signals and post context often arrive in a later call than their posts: fetch those posts'
+        # feed rows (facts for x_signals, the capture date that partitions x_post_context).
         in_batch = {str(r.values.get("post_id")) for r in typed.get(X_FEED.name, [])}
-        sigs = [r for r in typed[X_SIGNALS.name] if r.values.get("post_id")]
-        need = {str(r.values["post_id"]) for r in sigs} - in_batch
+        sigs = [r for r in typed.get(X_SIGNALS.name, []) if r.values.get("post_id")]
+        ctx = [r for r in typed.get(X_POST_CONTEXT.name, []) if r.values.get("post_id")]
+        need = {str(r.values["post_id"]) for r in sigs + ctx} - in_batch
         days = {ingest_date(r.values.get("collected_at"), run_date) for r in sigs
                 if str(r.values["post_id"]) in need}
+        if any(str(r.values["post_id"]) in need for r in ctx):
+            days.add(run_date)  # context has no timestamp: search the week before the run
         feed_lookup = lookup_latest(store, prefix or "", X_FEED, "post_id", need, days)
     try:
         result = run(typed, store=store, prefix=prefix or "", conn=conn, source="append", execute=execute,
