@@ -245,6 +245,21 @@ class RawLayerTests(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertTrue(any("raw rows with coercion errors" in x for x in r["reasons"]))
 
+    def test_every_part_is_listed_by_a_manifest_written_before_it(self):
+        order = []
+        real_put = self.store.put_new
+        self.store.put_new = lambda k, d: (order.append(k), real_put(k, d))[1]
+        self._write([feed_row("1"), feed_row("2", collected="2026-11-04 10:00")], batch="bx")
+        parts = [k for k in order if k.endswith(".parquet")]
+        self.assertEqual(len(parts), 2)
+        for part in parts:
+            entries = [k for k in order[:order.index(part)] if "/_manifests/x_feed/bx/" in k]
+            self.assertTrue(any(json.loads(self.store.read(e))["key"] == part for e in entries), part)
+
+    def test_validate_refuses_without_db_url_unless_raw_only(self):
+        with patch.dict(os.environ, {"X_LAKE_DB_URL": ""}), self.assertRaises(SystemExit):
+            validate.main(["--datasets", "x_signals"])
+
     def test_dry_run_writes_nothing(self):
         self._write([feed_row("1")], execute=False)
         self.assertEqual(self.store.list(""), [])

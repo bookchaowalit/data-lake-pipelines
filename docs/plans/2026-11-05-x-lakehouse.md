@@ -65,7 +65,7 @@ Out of scope (never read or written): `AI Summaries`, `AI Summaries Latest`, eve
 
 ```
 r2://<bucket>/raw/<dataset>/date=YYYY-MM-DD/part-NNNN.parquet   immutable, zstd level 6, explicit Arrow schema
-r2://<bucket>/_manifests/<dataset>/<batch_id>.json              what one batch wrote (keys, rows, dates)
+r2://<bucket>/_manifests/<dataset>/<batch_id>/date=D-part-N.json  one entry per part, written before the part
 postgres  schema x_intel                                        curated tables
 sheet     "Serve · X Signals 7d", "Serve · Open Claims"         the only tabs this code may write
 ```
@@ -174,7 +174,7 @@ last 7 days of raw `x_feed` partitions (context uses the post's capture date as 
 "Serve · X Signals 7d" (`collected_at` within 7 days, 23 columns including author and text) and
 "Serve · Open Claims" (`queue_state` not in closed/done/resolved/archived/dismissed).
 It creates a tab with its header once; each refresh clears and rewrites rows 2+ only. A changed
-column list is skipped with an error, never a header rewrite. `assert_writable()` refuses every
+column list is skipped with an error and exit 1 (never a header rewrite), so a scheduler sees it. `assert_writable()` refuses every
 other tab, including all existing data tabs, `AI Summaries*` and `Chief *`. Dry run by default.
 The existing X tabs are left as they are; trimming or archiving them is a separate owner decision.
 
@@ -259,7 +259,8 @@ Built into every run and into `validate.py` (read-only, exit 1 on failure):
 `validate` fails, listing the reasons, on: a missing tab or column, any coercion error, duplicate
 natural keys or post_ids, Sheet rows missing from raw, and keys missing from Postgres.
 Coercion errors count whether they are in the Sheet or only in raw (post-cutover appends).
-`validate --since <date>` checks only recent partitions (the daily parallel-run check); X Post
+`validate` refuses to run without `X_LAKE_DB_URL` unless `--raw-only` is passed (which prints that
+Postgres was not checked). `validate --since <date>` checks only recent partitions (the daily parallel-run check); X Post
 Context rows are scoped by the partition they were stored in.
 
 ## 11. Cutover plan
@@ -291,8 +292,10 @@ Context rows are scoped by the partition they were stored in.
 **Rollback**
 - *Before the switch:* nothing to undo for the Sheet, which was never changed. To reset the new
   path, drop schema `x_intel` and/or empty the bucket, then run the backfill again.
-- *A bad batch in raw:* its manifest lists the exact part keys. Delete only those parts (owner
-  approval), then rerun the backfill or append.
+- *A bad batch in raw:* `_manifests/<dataset>/<batch_id>/` lists the exact part keys (each entry is
+  written before its part, so a crashed batch is fully listed; every row also carries `_batch_id`).
+  Delete only those parts (owner approval), then rerun the backfill or append. The two Day 0
+  batches predate this layout and have one `<batch_id>.json` per dataset; both completed.
 - *Curated corrupted:* `drop schema x_intel cascade`, then `backfill --execute` rebuilds it
   (the Sheet is the source until the switch; a rebuild-from-R2 script is a follow-up).
 - *After the switch, back to the Sheet:* point the daily runs back at the Sheet append (keep the old

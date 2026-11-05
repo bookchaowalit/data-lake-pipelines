@@ -152,8 +152,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--datasets", default=",".join(DATASETS))
     p.add_argument("--since", type=date.fromisoformat)
     p.add_argument("--lake-uri")
+    p.add_argument("--raw-only", action="store_true",
+                   help="check Sheet vs raw only; Postgres is reported as not checked")
     args = p.parse_args(argv)
-    report = reconcile(Config(), [n for n in args.datasets.split(",") if n], args.since, args.lake_uri)
+    cfg = Config()
+    names = [n for n in args.datasets.split(",") if n]
+    if not args.raw_only and not cfg.db_url and any(n in CURATED for n in names):
+        p.error("set X_LAKE_DB_URL to check the curated layer, or pass --raw-only")
+    if args.raw_only:
+        cfg.env = {k: v for k, v in cfg.env.items() if k != "X_LAKE_DB_URL"}
+    report = reconcile(cfg, names, args.since, args.lake_uri)
+    if args.raw_only:
+        print("raw-only: Postgres NOT checked")
     print(f"{'dataset':22} {'sheet':>7} {'raw':>7} {'missing':>7} {'pg':>7} {'pgMiss':>7} {'dupPost':>7} {'coerceErr':>9}  ok")
     for n, r in report["datasets"].items():
         dup = max(r.get("duplicate_post_ids_sheet") or 0, r.get("raw_duplicate_post_ids") or 0,

@@ -81,16 +81,18 @@ def main(argv: list[str] | None = None) -> int:
     with httpx.Client(timeout=120) as http:
         w = SheetWriter(cfg, http)
         titles = w.titles()
+        skipped = []
         for tab, (header, rows) in views.items():
             if tab not in titles:
                 w.create_tab(tab, header)
             elif w.header(tab) != header:
                 # Header is never rewritten; a changed column list needs a human decision.
                 print(f"!! {tab}: header differs from the code's column list; skipped", file=sys.stderr)
+                skipped.append(tab)
                 continue
             w.replace_body(tab, rows)
             print(f"wrote {tab}: {len(rows)} rows")
-    return 0
+    return 1 if skipped else 0  # a stale view must not look like a successful refresh
 
 
 if __name__ == "__main__":

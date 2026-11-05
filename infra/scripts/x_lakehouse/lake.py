@@ -3,7 +3,8 @@
 Layout::
 
     <prefix>/raw/<dataset>/date=YYYY-MM-DD/part-NNNN.parquet     zstd, explicit Arrow schema
-    <prefix>/_manifests/<dataset>/<batch_id>.json                 what one batch wrote
+    <prefix>/_manifests/<dataset>/<batch_id>/date=D-part-NNNN.json   one entry per part, written
+                                                                    before the part (rollback list)
 
 Idempotent and resumable: before writing a partition, the writer reads the ``_row_key`` column of
 the parts already there and writes only rows whose key is new, as the next part number. A part is
@@ -197,7 +198,6 @@ def write_raw(dataset: Dataset, rows: list[TypedRow], partition_ts: list[Any], *
                 known_elsewhere.update(k for k in tbl.column("_row_key").to_pylist() if k in undated)
 
     report = WriteReport(dataset.name, batch_id)
-    manifest_parts = []
     for day in sorted(by_date):
         batch = by_date[day]
         part_dir = _join(prefix, "raw", dataset.name, f"date={day}")
@@ -221,14 +221,16 @@ def write_raw(dataset: Dataset, rows: list[TypedRow], partition_ts: list[Any], *
                 if store is None:
                     raise LakeError("execute needs a store")
                 table = to_table(dataset, fresh, batch_id=batch_id, source=source, ingested_at=now)
+                # Intent first: the manifest entry exists before the part, so a crash can never leave
+                # a part that no manifest lists (an entry whose part is missing is harmless).
+                entry = {"dataset": dataset.name, "batch_id": batch_id, "source": source,
+                         "written_at": now.isoformat(), "contract": f"{dataset.name}.v1",
+                         "key": plan.key, "rows": len(fresh), "date": day}
+                store.put_new(_join(prefix, "_manifests", dataset.name, batch_id,
+                                    f"date={day}-part-{next_part:04d}.json"),
+                              json.dumps(entry, indent=1).encode())
                 store.put_new(plan.key, parquet_bytes(table))
-                manifest_parts.append({"key": plan.key, "rows": len(fresh), "date": day})
         report.partitions.append(plan)
-    if execute and store is not None and manifest_parts:
-        manifest = {"dataset": dataset.name, "batch_id": batch_id, "source": source,
-                    "written_at": now.isoformat(), "contract": f"{dataset.name}.v1", "parts": manifest_parts}
-        store.put_new(_join(prefix, "_manifests", dataset.name, f"{batch_id}.json"),
-                      json.dumps(manifest, indent=1).encode())
     return report
 
 
