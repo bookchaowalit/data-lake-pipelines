@@ -168,6 +168,9 @@ class SilverProductContract:
     # Bronze rows whose payload ``provider`` is listed here are test captures
     # that reached a real lake; they are counted but never published.
     excluded_providers: tuple[str, ...] = ("offline_fixture",)
+    # True publishes every kept Bronze row (a history view) instead of the
+    # newest row per record.
+    keep_all_versions: bool = False
 
 
 def _pyarrow():
@@ -640,7 +643,10 @@ def transform_bronze_to_silver(
         is_excluded = _text(parse_payload_json(row).get("provider")) in excluded
         (excluded_rows if is_excluded else kept_rows).append(row)
     excluded_count = len(excluded_rows)
-    latest_rows = select_latest_bronze_rows(kept_rows) if kept_rows else []
+    if contract.keep_all_versions:
+        latest_rows = list(kept_rows)
+    else:
+        latest_rows = select_latest_bronze_rows(kept_rows) if kept_rows else []
     # The v1 manifest shape is kept byte-for-byte unless this run actually
     # quarantines or excludes, so replays of existing runs stay idempotent.
     extended_quality = bool(contract.max_invalid_ratio or excluded_count)
@@ -793,6 +799,8 @@ def transform_bronze_to_silver(
             "excluded_count": excluded_count,
             "excluded_providers": sorted(excluded),
         })
+    if contract.keep_all_versions:
+        manifest["quality"]["keep_all_versions"] = True
     if rejects_result:
         manifest["rejects"] = {
             "key": rejects_key,

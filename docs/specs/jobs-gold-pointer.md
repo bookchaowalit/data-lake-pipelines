@@ -42,6 +42,12 @@ hash, and the object store is write-once, so a mutable `latest.json` is not allo
    for `job_postings` and every envelope dataset that succeeded; a failed dataset is absent.
    The top-level `silver_*` fields stay (they describe `job_postings`), so it is still
    `pointer_version` `"1"`.
+8. (2026-11-05) The run also publishes envelope Silver for `job_postings_history`,
+   `job_matches_history` and `job_leads_history` with `keep_all_versions`: every Bronze row is
+   kept (no newest-per-record step), `offline_fixture` is still excluded, and the transform
+   version is `jobs-envelope-history-silver.v1`. They are best-effort like item 6 and are listed
+   in `datasets` the same way. A Silver run without `keep_all_versions` keeps its manifest and
+   run id byte-for-byte; with it, the manifest's `quality` gains `"keep_all_versions": true`.
 
 ## Reader contract
 
@@ -52,4 +58,4 @@ empty data.
 
 ## Out of scope
 
-Silver for the `_history` datasets; pointers for other domains; pruning old pointers (each is a few hundred bytes, ~12 a day).
+Pointers for other domains; pruning old pointers (each is a few hundred bytes, ~12 a day).

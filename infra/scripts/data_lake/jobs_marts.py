@@ -46,6 +46,9 @@ GOLD_POINTER_PREFIX = f"control/pointers/gold/source={GOLD_SOURCE}/domain=jobs/"
 # Datasets that get a common-columns Silver part beside job_postings (pointer `datasets`).
 ENVELOPE_DATASETS = ("job_matches", "job_leads")
 ENVELOPE_TRANSFORM_VERSION = "jobs-envelope-silver.v1"
+# History datasets keep every Bronze row (docs/specs/jobs-gold-pointer.md item 8).
+HISTORY_DATASETS = ("job_postings_history", "job_matches_history", "job_leads_history")
+HISTORY_TRANSFORM_VERSION = "jobs-envelope-history-silver.v1"
 # Mart name → columns that order its rows, so exported bytes are stable.
 JOBS_MARTS: dict[str, tuple[str, ...]] = {
     "jobs_postings_daily": ("posted_date", "board"),
@@ -248,7 +251,8 @@ def run_jobs_marts(
         }
     }
     envelope_silver: dict[str, dict[str, Any]] = {}
-    for name in ENVELOPE_DATASETS:
+    for name in ENVELOPE_DATASETS + HISTORY_DATASETS:
+        history = name in HISTORY_DATASETS
         # Best-effort: the API reads these, the marts do not, so a failure here
         # falls back to Bronze in the API instead of blocking Gold.
         try:
@@ -257,9 +261,10 @@ def run_jobs_marts(
                     bronze_dataset=name,
                     silver_dataset=name,
                     normalizer="jobs_envelope",
-                    transform_version=ENVELOPE_TRANSFORM_VERSION,
+                    transform_version=HISTORY_TRANSFORM_VERSION if history else ENVELOPE_TRANSFORM_VERSION,
                     required_fields=("source_record_id",),
                     max_invalid_ratio=max_invalid_ratio,
+                    keep_all_versions=history,
                 ),
                 data_lake_uri=uri,
             )

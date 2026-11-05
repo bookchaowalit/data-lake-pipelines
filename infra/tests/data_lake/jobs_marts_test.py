@@ -316,6 +316,30 @@ class JobsMartsTests(unittest.TestCase):
             self.assertIn("error", result["envelope_silver"]["job_leads"])
             self.assertEqual(result["envelope_silver"]["job_matches"]["record_count"], 2)
 
+    def test_history_datasets_get_all_versions_silver_listed_in_the_pointer(self):
+        with tempfile.TemporaryDirectory() as root:
+            _ingest(root, FIXTURE_JOBS)
+            _ingest(
+                root,
+                [_job(1, score="9"), _job(1, score="10", event_time="2026-10-22T07:00:00Z"), _job(2)],
+                raw=b"matches-history",
+                dataset="job_matches_history",
+            )
+            result = self._run(root)
+            pointer = json.loads(ObjectStore(root).get_bytes(result["pointer_key"]))
+            history = pointer["datasets"]["job_matches_history"]
+            self.assertEqual(history["record_count"], 3)
+            self.assertTrue(
+                history["silver_key"].startswith(
+                    "silver/domain=jobs/dataset=job_matches_history/schema_version=1/event_date="
+                )
+            )
+            self.assertEqual(result["envelope_silver"]["job_matches_history"]["record_count"], 3)
+            # No Bronze for the other history datasets: reported, not fatal, absent from the pointer.
+            self.assertIn("error", result["envelope_silver"]["job_postings_history"])
+            self.assertNotIn("job_postings_history", pointer["datasets"])
+            self.assertEqual(result["status"], "success")
+
     def test_same_time_retry_after_an_envelope_recovers_does_not_conflict(self):
         with tempfile.TemporaryDirectory() as root:
             _ingest(root, FIXTURE_JOBS)

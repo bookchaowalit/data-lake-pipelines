@@ -230,6 +230,41 @@ class SilverTests(unittest.TestCase):
                 {"status", "invalid_count", "duplicate_count", "output_record_count", "required_fields"},
             )
 
+    def test_keep_all_versions_keeps_every_row_and_marks_the_manifest(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._ingest_jobs(
+                root,
+                [
+                    self._job(1),
+                    self._job(1, title="Engineer 1 v2", event_time="2026-08-09T00:00:00Z"),
+                    self._job(2),
+                    self._job(3, provider="offline_fixture"),
+                ],
+            )
+            contract = SilverProductContract(
+                normalizer="jobs_envelope",
+                required_fields=("source_record_id",),
+                transform_version="jobs-envelope-history-silver.v1",
+                keep_all_versions=True,
+            )
+            result = transform_bronze_to_silver(contract, data_lake_uri=root)
+            self.assertEqual(result["record_count"], 3)  # both job-1 versions; fixture still excluded
+            self.assertEqual(result["duplicate_count"], 0)
+            rows = query_parquet(
+                str(Path(root) / result["silver_key"]),
+                "SELECT source_record_id, event_time FROM lake_table ORDER BY event_time, source_record_id",
+            )
+            self.assertEqual(
+                [(r["source_record_id"], r["event_time"][:10]) for r in rows],
+                [("job-1", "2026-08-08"), ("job-2", "2026-08-08"), ("job-1", "2026-08-09")],
+            )
+            manifest = json.loads(ObjectStore(root).get_bytes(result["manifest_key"]))
+            self.assertIs(manifest["quality"]["keep_all_versions"], True)
+            self.assertEqual(manifest["input"]["deduplicated_record_count"], 3)
+            again = transform_bronze_to_silver(contract, data_lake_uri=root)
+            self.assertEqual(again["silver_run_id"], result["silver_run_id"])
+            self.assertTrue(again["silver_existed"])
+
     def test_new_excluded_row_alone_does_not_conflict(self):
         with tempfile.TemporaryDirectory() as root:
             self._ingest_jobs(root, [self._job(1), self._job(2)])
