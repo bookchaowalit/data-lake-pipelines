@@ -32,6 +32,19 @@ dashboard if needed; the pipeline does not use it). `backfill --execute` wrote 4
 Run: `infisical run --path /sheet-summaries -- infisical run --path /x-lakehouse -- python -m x_lakehouse.<cmd>`
 from `infra/scripts`.
 
+**Parallel run started (2026-11-05 evening):** Railway project `data-schedules`, cron service
+`x-lakehouse`, `20 1,9,15 * * *` UTC (08:20 / 16:20 / 22:20 ICT), restart NEVER, CLI-uploaded
+(`railway up` of a `git archive` of main, `RAILWAY_DOCKERFILE_PATH=deploy/x-lakehouse/Dockerfile`,
+so a push to main does not redeploy it). Each run is `python -m x_lakehouse.scheduled`: catch-up
+`backfill --execute`, then `validate --since <yesterday ICT>` on all 12 datasets, then the serving
+view as a dry run (counts only). Logs carry counts only. Uptime heartbeat `x-lakehouse` (11 h,
+platform-uptime-worker f973686): `ok:false` alerts at once on Telegram, a missed run after 11 h.
+Railway variables: `GOOGLE_SERVICE_ACCOUNT_JSON`, `HEARTBEAT_TOKEN`, `R2_ACCOUNT_ID`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `X_LAKE_URI`, `X_LAKE_DB_URL` (Supabase pooler, IPv4),
+`SENTRY_ENVIRONMENT` (no `SENTRY_DSN` yet, so Sentry is off). First runs: local 12:40 UTC wrote 505
+X Feed / 317 context / 20 trends TH / 174 signals rows, validate ok; Railway one-shot 12:50 UTC wrote
+0 (already caught up), validate ok, 130 s. Day 1 of the 7-day clock is 2026-11-06.
+
 ## 1. Context
 
 The X pipeline's bots append to the "Chief Findings Warehouse" Google Sheet
@@ -277,8 +290,9 @@ Context rows are scoped by the partition they were stored in.
 - The bots keep appending to the Sheet exactly as today. The new path catches up 3×/day by
   re-running `backfill --execute`. It is idempotent, so it writes only rows it has not seen
   (an `append-…` caller can be added to a bot in parallel where that is easy).
-- Each morning: `validate --since <yesterday>` and `run_queries 04_rows_per_partition`; log the
-  result (date, per-dataset sheet/raw/pg counts, ok). Any `FAIL`, duplicate or unexplained coercion
+- Every run validates (`validate --since <yesterday>` inside `x_lakehouse.scheduled`) and posts
+  the result to heartbeat `x-lakehouse`; the monitor's `/status` and the Railway logs are the log
+  (date, per-dataset sheet rows, ok). `run_queries 04_rows_per_partition` stays a manual spot check. Any `FAIL`, duplicate or unexplained coercion
   error resets the 7-day clock.
 - `serve_sheet` runs in **dry run** only during this week.
 
