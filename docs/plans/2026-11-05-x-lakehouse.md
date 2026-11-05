@@ -307,7 +307,7 @@ Context rows are scoped by the partition they were stored in.
 - *Before the switch:* nothing to undo for the Sheet, which was never changed. To reset the new
   path, drop schema `x_intel` and/or empty the bucket, then run the backfill again.
 - *A bad batch in raw:* `_manifests/<dataset>/<batch_id>/` lists the exact part keys (each entry is
-  written before its part, so a crashed batch is fully listed; every row also carries `_batch_id`).
+  written before its part, so a crashed batch is fully listed; every row also carries `_batch_id`; a part number named by any manifest entry is never reused, even when that part was never published, so a crashed batch's entry can never point at a later batch's part).
   Delete only those parts (owner approval), then rerun the backfill or append. The two Day 0
   batches predate this layout and have one `<batch_id>.json` per dataset; both completed.
 - *Curated corrupted:* `drop schema x_intel cascade`, then `backfill --execute` rebuilds it

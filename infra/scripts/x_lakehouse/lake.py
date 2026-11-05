@@ -34,6 +34,9 @@ from .config import Config
 from .schemas import Dataset
 
 PART = re.compile(r"part-(\d{4,})\.parquet$")
+# Per-part manifest entry ``.../<batch_id>/date=YYYY-MM-DD-part-NNNN.json``: it reserves that part
+# number even when its part was never published (crash between manifest and part).
+MANIFEST_PART = re.compile(r"/date=(\d{4}-\d{2}-\d{2})-part-(\d{4,})\.json$")
 
 
 class LakeError(RuntimeError):
@@ -212,6 +215,12 @@ def write_raw(dataset: Dataset, rows: list[TypedRow], partition_ts: list[Any], *
                 tbl = pq.read_table(io.BytesIO(store.read(key)), columns=["_row_key"])
                 known_elsewhere.update(k for k in tbl.column("_row_key").to_pylist() if k in undated)
 
+    reserved: dict[str, int] = {}  # day -> next part number not claimed by any manifest entry
+    if store is not None:
+        for key in store.list(_join(prefix, "_manifests", dataset.name) + "/"):
+            if m := MANIFEST_PART.search(key):
+                reserved[m.group(1)] = max(reserved.get(m.group(1), 0), int(m.group(2)) + 1)
+
     report = WriteReport(dataset.name, batch_id)
     for day in sorted(by_date):
         batch = by_date[day]
@@ -227,6 +236,7 @@ def write_raw(dataset: Dataset, rows: list[TypedRow], partition_ts: list[Any], *
                 next_part = max(next_part, int(m.group(1)) + 1)
                 tbl = pq.read_table(io.BytesIO(store.read(key)), columns=["_row_key"])
                 existing_keys.update(tbl.column("_row_key").to_pylist())
+        next_part = max(next_part, reserved.get(day, 0))
         fresh = [r for r in batch if r.row_key not in existing_keys and r.row_key not in known_elsewhere]
         plan.already_present = len(batch) - len(fresh)
         plan.to_write = len(fresh)

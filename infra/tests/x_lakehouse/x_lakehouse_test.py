@@ -276,6 +276,25 @@ class RawLayerTests(unittest.TestCase):
         self._write([feed_row("1")], execute=False)
         self.assertEqual(self.store.list(""), [])
 
+    def test_part_number_of_a_crashed_batch_is_not_reused(self):
+        real_put = self.store.put_new
+
+        def crash_on_part(key, data):
+            if key.endswith(".parquet"):
+                raise OSError("crash after manifest")
+            real_put(key, data)
+
+        rows = [type_row(X_FEED, feed_row("1"))]
+        ts = [datetime(2026, 11, 5, 3, tzinfo=timezone.utc)]
+        with patch.object(self.store, "put_new", crash_on_part), self.assertRaises(OSError):
+            write_raw(X_FEED, rows, ts, store=self.store, prefix="", source="t", execute=True,
+                      run_date=date(2026, 11, 5), batch_id="b1")
+        rep = write_raw(X_FEED, rows, ts, store=self.store, prefix="", source="t", execute=True,
+                        run_date=date(2026, 11, 5), batch_id="b2")
+        self.assertTrue(rep.partitions[0].key.endswith("part-0001.parquet"))  # 0000 stays b1's
+        b1 = [k for k in self.store.list("_manifests/") if "/b1/" in k]
+        self.assertTrue(b1 and b1[0].endswith("part-0000.json"))
+
     def test_parts_are_never_overwritten(self):
         self.store.put_new("k", b"1")
         with self.assertRaises(LakeError):
