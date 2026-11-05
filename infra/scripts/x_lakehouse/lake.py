@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import uuid
 from collections import defaultdict
@@ -61,8 +62,22 @@ class LocalStore:
     def put_new(self, key: str, data: bytes) -> None:
         path = self.root / key
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "xb") as fh:  # "x": fail rather than overwrite
-            fh.write(data)
+        if path.exists():
+            raise LakeError(f"refusing to overwrite {key}")
+        # Write a temp file, then publish it with a hard link: atomic, and it fails rather than
+        # overwrite. A crash leaves only a .tmp file, never a truncated part under the final name.
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(tmp, "xb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                raise LakeError(f"refusing to overwrite {key}") from None
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 class R2Store:

@@ -170,6 +170,18 @@ class ServeWriterTests(unittest.TestCase):
 
 
 class RawLayerTests(unittest.TestCase):
+    def test_local_put_is_atomic_and_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = LocalStore(Path(d))
+            with patch("os.link", side_effect=OSError("crash")):
+                with self.assertRaises(OSError):
+                    store.put_new("raw/a/part-0000.parquet", b"x")
+            self.assertEqual(store.list("raw/"), [])  # nothing under the final name, no temp left
+            store.put_new("raw/a/part-0000.parquet", b"x")
+            with self.assertRaises(LakeError):
+                store.put_new("raw/a/part-0000.parquet", b"y")
+            self.assertEqual(store.read("raw/a/part-0000.parquet"), b"x")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = LocalStore(Path(self.tmp.name))
@@ -266,7 +278,7 @@ class RawLayerTests(unittest.TestCase):
 
     def test_parts_are_never_overwritten(self):
         self.store.put_new("k", b"1")
-        with self.assertRaises(FileExistsError):
+        with self.assertRaises(LakeError):
             self.store.put_new("k", b"2")
         self.assertEqual(self.store.read("k"), b"1")
         with self.assertRaises(LakeError):
