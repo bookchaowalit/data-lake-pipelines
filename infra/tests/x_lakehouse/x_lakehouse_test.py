@@ -274,6 +274,49 @@ class RawLayerTests(unittest.TestCase):
                       execute=True, run_date=date(2026, 11, 5))
 
 
+class ScheduledTests(unittest.TestCase):
+    """The cron wrapper logs counts only and fails (with an ok:false heartbeat) on any problem."""
+
+    def _fake_backfill(self, argv):
+        print(json.dumps({"checks": {"x_feed": {"missing_columns": []}},
+                          "raw": {"x_feed": {"partitions": [{"to_write": 3, "already_present": 5}]}},
+                          "curated": {}, "missing_tabs": []}))
+        print("SECRET ROW TEXT", file=sys.stderr)
+        return 0
+
+    def _run(self, ok: bool):
+        from x_lakehouse import scheduled
+        report = {"ok": ok, "datasets": {"x_feed": {"ok": ok, "reasons": [] if ok else ["1 Sheet rows missing from raw"],
+                                                     "sheet_rows": 8}}}
+        beats = []
+        out = io.StringIO()
+        with patch.object(scheduled.backfill, "main", self._fake_backfill), \
+                patch.object(scheduled, "reconcile", return_value=report), \
+                patch.object(scheduled, "_serve_counts", return_value={}), \
+                patch.object(scheduled, "_heartbeat", beats.append), \
+                patch("sys.stdout", out), patch("sys.stderr", io.StringIO()):
+            code = scheduled.main([])
+        return code, beats, out.getvalue()
+
+    def test_ok_run(self):
+        code, beats, out = self._run(True)
+        self.assertEqual((code, beats), (0, [True]))
+        self.assertIn('"new": 3', out)
+
+    def test_validate_failure_fails_the_run(self):
+        code, beats, _ = self._run(False)
+        self.assertEqual((code, beats), (1, [False]))
+
+    def test_crash_sends_failed_heartbeat(self):
+        from x_lakehouse import scheduled
+        beats = []
+        with patch.object(scheduled, "_backfill", side_effect=RuntimeError("boom")), \
+                patch.object(scheduled, "_heartbeat", beats.append):
+            with self.assertRaises(RuntimeError):
+                scheduled.main([])
+        self.assertEqual(beats, [False])
+
+
 @unittest.skipUnless(os.environ.get("X_LAKE_TEST_DB_URL"), "set X_LAKE_TEST_DB_URL to a throwaway Postgres")
 class PostgresTests(unittest.TestCase):
     def setUp(self):
