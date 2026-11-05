@@ -63,6 +63,7 @@ class ContractTests(unittest.TestCase):
     def test_ddl_has_primary_keys_and_indexes(self):
         ddl = postgres_ddl()
         self.assertIn("create table if not exists x_intel.x_signals", ddl)
+        self.assertNotIn("create schema if not exists", ddl)
         self.assertIn("primary key (post_id)", ddl)
         self.assertIn("x_signals_domain_collected_at_idx", ddl)
         self.assertIn("x_signals_cred_tier_idx", ddl)

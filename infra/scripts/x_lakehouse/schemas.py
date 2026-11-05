@@ -263,7 +263,10 @@ CURATED: dict[str, Curated] = {
 
 def postgres_ddl() -> str:
     """Idempotent DDL for the curated layer (safe to run on every deploy)."""
-    out = [f"create schema if not exists {PG_SCHEMA};"]
+    # Check first: "create schema if not exists" still needs CREATE on the database, which the
+    # least-privilege role that owns only this schema does not have.
+    out = [f"do $$ begin if not exists (select 1 from pg_namespace where nspname = '{PG_SCHEMA}') "
+           f"then create schema {PG_SCHEMA}; end if; end $$;"]
     for c in CURATED.values():
         cols = [f"    {name} {POSTGRES[kind]}{' not null' if name in c.pk else ''}"
                 for name, kind in c.data_columns]
