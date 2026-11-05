@@ -37,6 +37,12 @@ def _assert_envelope(body: Any, *, label: str) -> dict[str, Any]:
     return body
 
 
+HOSTED_STORAGE = {
+    "silver_s3_parquet": "lake_first_job_silver_s3_duckdb",
+    "bronze_s3_parquet": "lake_first_job_bronze_s3_duckdb",
+}
+
+
 def verify(base_url: str, *, token: str, timeout: float) -> dict[str, Any]:
     base = base_url.rstrip("/")
     metadata = _assert_envelope(
@@ -56,14 +62,17 @@ def verify(base_url: str, *, token: str, timeout: float) -> dict[str, Any]:
         raise RuntimeError(f"records: unexpected data_status={records.get('data_status')}")
     if not records["items"]:
         raise RuntimeError("records: hosted API returned no job_postings rows")
-    if metadata_item.get("records_source_kind") != "bronze_s3_parquet":
+    # job_postings is served from the newest jobs Silver part, or Bronze when
+    # Silver is unavailable (career-job-market-data silver-job-postings-read spec).
+    expected = HOSTED_STORAGE.get(metadata_item.get("records_source_kind"))
+    if expected is None:
         raise RuntimeError(
-            "metadata: expected records_source_kind=bronze_s3_parquet; "
-            f"got {metadata_item.get('records_source_kind')!r}"
+            "metadata: expected records_source_kind in "
+            f"{sorted(HOSTED_STORAGE)}; got {metadata_item.get('records_source_kind')!r}"
         )
-    if metadata_item.get("storage_model") != "lake_first_job_bronze_s3_duckdb":
+    if metadata_item.get("storage_model") != expected:
         raise RuntimeError(
-            "metadata: expected storage_model=lake_first_job_bronze_s3_duckdb; "
+            f"metadata: expected storage_model={expected}; "
             f"got {metadata_item.get('storage_model')!r}"
         )
     return {

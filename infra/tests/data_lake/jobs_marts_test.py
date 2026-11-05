@@ -239,6 +239,42 @@ class JobsMartsTests(unittest.TestCase):
                 {name: mart["key"] for name, mart in first["marts"].items()},
             )
 
+    def test_each_run_publishes_a_sortable_pointer_to_its_gold_and_silver(self):
+        prefix = "control/pointers/gold/source=book-job-data/domain=jobs/"
+        with tempfile.TemporaryDirectory() as root:
+            _ingest(root, FIXTURE_JOBS)
+            first = self._run(root)
+            self.assertEqual(
+                first["pointer_key"],
+                f"{prefix}published_at=20261022T120000Z-{first['gold_run_id']}.json",
+            )
+            self.assertFalse(first["pointer_existed"])
+            pointer = json.loads(ObjectStore(root).get_bytes(first["pointer_key"]))
+            self.assertEqual(
+                pointer,
+                {
+                    "pointer_version": "1",
+                    "layer": "gold",
+                    "source": "book-job-data",
+                    "domain": "jobs",
+                    "published_at": "2026-10-22T12:00:00Z",
+                    "gold_run_id": first["gold_run_id"],
+                    "manifest_key": first["manifest_key"],
+                    "silver_run_id": first["silver_run_id"],
+                    "silver_key": first["silver"]["key"],
+                    "silver_record_count": 4,
+                },
+            )
+
+            # Same `now`: identical object, a no-op. Later `now`: a new, greater key
+            # even though the Gold run is the same.
+            self.assertTrue(self._run(root)["pointer_existed"])
+            later = self._run(root, now=datetime(2026, 10, 22, 14, 0, tzinfo=timezone.utc))
+            self.assertEqual(later["gold_run_id"], first["gold_run_id"])
+            keys = ObjectStore(root).list_keys(prefix)
+            self.assertEqual(len(keys), 2)
+            self.assertEqual(max(keys), later["pointer_key"])
+
     def test_new_bronze_batch_gets_new_gold_run(self):
         with tempfile.TemporaryDirectory() as root:
             _ingest(root, FIXTURE_JOBS)
@@ -269,6 +305,7 @@ class JobsMartsTests(unittest.TestCase):
             with self.assertRaises(SilverQualityError):
                 self._run(root, max_invalid_ratio=0.02)
             self.assertEqual(ObjectStore(root).list_keys("gold/"), [])
+            self.assertEqual(ObjectStore(root).list_keys("control/pointers/"), [])
 
 
 if __name__ == "__main__":

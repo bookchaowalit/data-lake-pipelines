@@ -42,6 +42,7 @@ from data_lake.storage import ObjectStore  # noqa: E402
 DBT_PROJECT_DIR = ROOT / "infra" / "dbt"
 GOLD_SCHEMA_VERSION = "1"
 GOLD_SOURCE = "book-job-data"
+GOLD_POINTER_PREFIX = f"control/pointers/gold/source={GOLD_SOURCE}/domain=jobs/"
 # Mart name → columns that order its rows, so exported bytes are stable.
 JOBS_MARTS: dict[str, tuple[str, ...]] = {
     "jobs_postings_daily": ("posted_date", "board"),
@@ -171,6 +172,7 @@ def run_jobs_marts(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build Silver for the current Bronze, then the jobs marts, then Gold."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     uri = default_data_lake_uri(data_lake_uri=data_lake_uri)
     silver = transform_bronze_to_silver(
         SilverProductContract(max_invalid_ratio=max_invalid_ratio),
@@ -193,7 +195,7 @@ def run_jobs_marts(
         silver_part.write_bytes(store.get_bytes(silver["silver_key"]))
         dbt_result = _run_dbt(silver_part, workdir)
         database = dbt_result["database"]
-        freshness = _freshness(database, now or datetime.now(timezone.utc), stale_hours)
+        freshness = _freshness(database, now, stale_hours)
 
         marts: dict[str, dict[str, Any]] = {}
         for mart, order_by in JOBS_MARTS.items():
@@ -235,6 +237,25 @@ def run_jobs_marts(
         (_canonical_json(manifest) + "\n").encode("utf-8"),
         content_type="application/json",
     )
+    # The store is write-once, so readers find the newest run through a key that
+    # sorts by publish time (docs/specs/jobs-gold-pointer.md).
+    pointer = {
+        "pointer_version": "1",
+        "layer": "gold",
+        "source": GOLD_SOURCE,
+        "domain": "jobs",
+        "published_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "gold_run_id": gold_run_id,
+        "manifest_key": manifest_put.key,
+        "silver_run_id": silver["silver_run_id"],
+        "silver_key": silver["silver_key"],
+        "silver_record_count": silver["record_count"],
+    }
+    pointer_put = store.put_bytes(
+        f"{GOLD_POINTER_PREFIX}published_at={now.strftime('%Y%m%dT%H%M%SZ')}-{gold_run_id}.json",
+        (_canonical_json(pointer) + "\n").encode("utf-8"),
+        content_type="application/json",
+    )
     quality = silver["quality"]
     return {
         "status": "stale" if freshness["stale"] else "success",
@@ -253,6 +274,8 @@ def run_jobs_marts(
         "marts": marts,
         "manifest_key": manifest_put.key,
         "manifest_existed": manifest_put.existed,
+        "pointer_key": pointer_put.key,
+        "pointer_existed": pointer_put.existed,
         "dbt": manifest["dbt"],
         "freshness": freshness,
     }
