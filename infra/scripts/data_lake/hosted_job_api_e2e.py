@@ -64,11 +64,11 @@ def verify(base_url: str, *, token: str, timeout: float) -> dict[str, Any]:
         raise RuntimeError("records: hosted API returned no job_postings rows")
     # job_postings is served from the newest jobs Silver part, or Bronze when
     # Silver is unavailable (career-job-market-data silver-job-postings-read spec).
-    expected = HOSTED_STORAGE.get(metadata_item.get("records_source_kind"))
+    source_kind = metadata_item.get("records_source_kind")
+    expected = HOSTED_STORAGE.get(source_kind) if isinstance(source_kind, str) else None
     if expected is None:
         raise RuntimeError(
-            "metadata: expected records_source_kind in "
-            f"{sorted(HOSTED_STORAGE)}; got {metadata_item.get('records_source_kind')!r}"
+            f"metadata: expected records_source_kind in {sorted(HOSTED_STORAGE)}; got {source_kind!r}"
         )
     if metadata_item.get("storage_model") != expected:
         raise RuntimeError(
