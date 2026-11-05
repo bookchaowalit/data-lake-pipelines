@@ -46,9 +46,9 @@ sheet     "Serve · X Signals 7d", "Serve · Open Claims"         the only tabs 
 - `date=` is the **ingest date** in ICT: the row's own capture timestamp (`collected_at`,
   `snapshot_at`, `pulled_at_ict`, `last_checked`). X Post Context has no timestamp, so it uses the
   post's X Feed `collected_at` (falling back to the run date).
-- Parts are numbered per partition; a new batch writes the next number. A row with no timestamp
-  of its own (a context row whose post is not in X Feed) falls back to the run date, so its key is
-  checked against every partition of the dataset before it is written. No file is ever overwritten
+- Parts are numbered per partition; a new batch writes the next number. X Post Context has no
+  timestamp of its own (its date comes from a feed lookup that can change between runs), so its keys
+  are always checked against every partition before writing; so is any row with a blank timestamp. No file is ever overwritten
   (local: `open(..., "xb")`; R2: existence check before write — one writer at a time).
 - `batch_id` = `backfill-<UTC ts>-<rand>` or `append-<UTC ts>-<rand>`.
 - Contract name = `<dataset>.v1` (Parquet schema metadata). A breaking change means `v2` and a new
@@ -227,7 +227,9 @@ Built into every run and into `validate.py` (read-only, exit 1 on failure):
 
 `validate` fails, listing the reasons, on: a missing tab or column, any coercion error, duplicate
 natural keys or post_ids, Sheet rows missing from raw, and keys missing from Postgres.
-`validate --since <date>` checks only recent partitions (the daily parallel-run check).
+Coercion errors count whether they are in the Sheet or only in raw (post-cutover appends).
+`validate --since <date>` checks only recent partitions (the daily parallel-run check); X Post
+Context rows are scoped by the partition they were stored in.
 
 ## 11. Cutover plan
 

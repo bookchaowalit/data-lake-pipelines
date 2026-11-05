@@ -183,11 +183,12 @@ def write_raw(dataset: Dataset, rows: list[TypedRow], partition_ts: list[Any], *
         if row.row_key in seen:  # same natural key twice in one batch: keep the first
             continue
         seen.add(row.row_key)
-        if not isinstance(ts, datetime):
+        if dataset.ingest_ts is None or not isinstance(ts, datetime):
             undated.add(row.row_key)
         by_date[ingest_date(ts, run_date).isoformat()].append(row)
-    # A row without its own timestamp lands in the run-date partition, so a replay on a later day
-    # would look in a different partition: check every partition for those keys.
+    # A dataset without its own timestamp column (x_post_context) is dated by a lookup that can
+    # change between runs (feed found / not found, run date), so its keys are checked against every
+    # partition; so is any row whose timestamp is blank.
     known_elsewhere: set[str] = set()
     if undated and store is not None:
         for key in store.list(_join(prefix, "raw", dataset.name) + "/"):
@@ -231,15 +232,26 @@ def write_raw(dataset: Dataset, rows: list[TypedRow], partition_ts: list[Any], *
     return report
 
 
+def _part_date(key: str) -> date | None:
+    m = re.search(r"date=(\d{4}-\d{2}-\d{2})/", key)
+    return date.fromisoformat(m.group(1)) if m else None
+
+
 def read_dataset(store: Store, prefix: str, dataset: Dataset, since: date | None = None) -> pa.Table | None:
-    """Committed parts of a raw dataset, optionally only partitions dated ``since`` or later."""
+    """Committed parts of a raw dataset, optionally only partitions dated ``since`` or later.
+
+    Adds ``_partition_date`` (the part's ``date=`` value) so callers can scope by where a row is stored.
+    """
     keys = [k for k in store.list(_join(prefix, "raw", dataset.name) + "/") if PART.search(k)]
     if since is not None:
-        keys = [k for k in keys if (m := re.search(r"date=(\d{4}-\d{2}-\d{2})/", k))
-                and date.fromisoformat(m.group(1)) >= since]
+        keys = [k for k in keys if (d := _part_date(k)) is not None and d >= since]
     if not keys:
         return None
-    return pa.concat_tables(pq.read_table(io.BytesIO(store.read(k))) for k in keys)
+    tables = []
+    for k in keys:
+        t = pq.read_table(io.BytesIO(store.read(k)))
+        tables.append(t.append_column("_partition_date", pa.array([_part_date(k)] * t.num_rows, pa.date32())))
+    return pa.concat_tables(tables)
 
 
 def lookup_latest(store: Store, prefix: str, dataset: Dataset, column: str, values: set[str],

@@ -190,6 +190,42 @@ class RawLayerTests(unittest.TestCase):
         self.assertEqual((rep.written, rep.skipped), (0, 1))
         self.assertEqual(read_dataset(self.store, "", X_POST_CONTEXT).num_rows, 1)
 
+    def test_context_row_is_not_rewritten_when_its_feed_date_appears_later(self):
+        rows = [type_row(X_POST_CONTEXT, {"post_id": "9", "media_count": 1})]
+        write_raw(X_POST_CONTEXT, rows, [None], store=self.store, prefix="", source="t", execute=True,
+                  run_date=date(2026, 11, 6), now=NOW)
+        older = datetime(2026, 11, 1, 3, 0, tzinfo=timezone.utc)
+        rep = write_raw(X_POST_CONTEXT, rows, [older], store=self.store, prefix="", source="t", execute=True,
+                        run_date=date(2026, 11, 7), now=NOW)
+        self.assertEqual((rep.written, rep.skipped), (0, 1))
+
+    def _reconcile(self, sheet_rows, ds, since):
+        cfg = type("C", (), {"db_url": ""})()
+        chk = DatasetCheck(ds.name, ds.tab)
+        with patch.object(validate, "load", return_value=({ds.name: sheet_rows}, {ds.name: chk}, [])), \
+                patch.object(validate, "open_store", return_value=(self.store, "")):
+            return validate.reconcile(cfg, [ds.name], since, None)["datasets"][ds.name]
+
+    def test_validate_scopes_context_rows_by_their_stored_partition(self):
+        rows = [type_row(X_POST_CONTEXT, {"post_id": "9", "media_count": 1}, sheet_row=2)]
+        write_raw(X_POST_CONTEXT, rows, [None], store=self.store, prefix="", source="t", execute=True,
+                  run_date=date(2026, 11, 5), now=NOW)
+        later = self._reconcile(rows, X_POST_CONTEXT, date(2026, 11, 6))
+        self.assertEqual((later["sheet_rows"], later["ok"]), (0, True))
+        same = self._reconcile(rows, X_POST_CONTEXT, date(2026, 11, 5))
+        self.assertEqual((same["sheet_rows"], same["sheet_rows_missing_from_raw"], same["ok"]), (1, 0, True))
+        unstored = [type_row(X_POST_CONTEXT, {"post_id": "10"}, sheet_row=3)]
+        self.assertEqual(self._reconcile(rows + unstored, X_POST_CONTEXT, date(2026, 11, 6))
+                         ["sheet_rows_missing_from_raw"], 1)
+
+    def test_validate_fails_on_coercion_errors_that_exist_only_in_raw(self):
+        bad = type_row(X_FEED, feed_row("5", likes="lots"))
+        write_raw(X_FEED, [bad], [bad.values["collected_at"]], store=self.store, prefix="", source="append",
+                  execute=True, run_date=date(2026, 11, 5), now=NOW)
+        r = self._reconcile([], X_FEED, None)
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("raw rows with coercion errors" in x for x in r["reasons"]))
+
     def test_dry_run_writes_nothing(self):
         self._write([feed_row("1")], execute=False)
         self.assertEqual(self.store.list(""), [])

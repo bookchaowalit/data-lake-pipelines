@@ -43,7 +43,16 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
         for n in names:
             ds = DATASETS[n]
             rows = typed.get(n, [])
-            if since:
+            stored_on: dict[str, date] = {}
+            if since and ds.raw and ds.ingest_ts is None:
+                # No timestamp column: scope by the partition each row was actually stored in.
+                # Rows not in raw at all stay in scope, so they are reported as missing.
+                full = read_dataset(store, prefix, ds)
+                if full is not None:
+                    stored_on = dict(zip(full.column("_row_key").to_pylist(),
+                                         full.column("_partition_date").to_pylist()))
+                rows = [r for r in rows if r.row_key not in stored_on or stored_on[r.row_key] >= since]
+            elif since:
                 parts = partition_values(ds, rows, feed_ts)
                 rows = [r for r, ts in zip(rows, parts) if ingest_date(ts, date.max) >= since]
             validate_rows(ds, rows, checks[n], sample=0)
@@ -91,7 +100,9 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
             if chk.missing_columns:
                 reasons.append(f"missing columns {chk.missing_columns}")
             if chk.rows_with_errors:
-                reasons.append(f"{chk.rows_with_errors} rows with coercion errors {chk.coerce_errors}")
+                reasons.append(f"{chk.rows_with_errors} Sheet rows with coercion errors {chk.coerce_errors}")
+            if rep.get("raw_rows_with_coerce_errors"):  # after cutover raw may hold rows the Sheet never had
+                reasons.append(f"{rep['raw_rows_with_coerce_errors']} raw rows with coercion errors")
             if chk.duplicate_keys:
                 reasons.append(f"{chk.duplicate_keys} duplicate natural keys in the Sheet")
             if chk.duplicate_post_ids:
@@ -129,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
                   r.get("postgres_duplicate_post_ids") or 0)
         print(f"{n:22} {r['sheet_rows']:>7} {r.get('raw_rows', '-'):>7} {r.get('sheet_rows_missing_from_raw', '-'):>7} "
               f"{r.get('postgres_rows', '-'):>7} {r.get('postgres_missing_keys', '-'):>7} {dup:>7} "
-              f"{r['coerce_error_rows']:>9}  {'ok' if r['ok'] else 'FAIL: ' + '; '.join(r['reasons'])}")
+              f"{max(r['coerce_error_rows'], r.get('raw_rows_with_coerce_errors') or 0):>9}  {'ok' if r['ok'] else 'FAIL: ' + '; '.join(r['reasons'])}")
     print(json.dumps({"ok": report["ok"], "missing_tabs": report["missing_tabs"]}))
     return 0 if report["ok"] else 1
 
