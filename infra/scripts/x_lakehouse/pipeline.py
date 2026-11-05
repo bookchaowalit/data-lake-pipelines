@@ -59,7 +59,8 @@ def validate_rows(ds: Dataset, rows: list[TypedRow], chk: DatasetCheck, sample: 
                 continue
             errs[col] += 1
             if len(chk.coerce_samples) < 10:
-                chk.coerce_samples.append({"sheet_row": r.sheet_row, "column": col, **info})
+                chk.coerce_samples.append({"sheet_row": r.sheet_row, "column": col,
+                                           "raw": _short(info["raw"], 200), "reason": info["reason"]})
         if any(info["reason"] == "key column is blank" for info in r.errors.values()):
             chk.blank_key_rows += 1
     chk.coerce_errors = dict(errs)

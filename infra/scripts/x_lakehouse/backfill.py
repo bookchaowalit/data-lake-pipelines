@@ -36,8 +36,8 @@ from . import curated as cur  # noqa: E402
 from .coerce import TZ  # noqa: E402
 from .config import Config  # noqa: E402
 from .lake import LocalStore, open_store  # noqa: E402
-from .pipeline import DatasetCheck, RunResult, check_header, run, type_tab, validate_rows  # noqa: E402
-from .schemas import DATASETS, is_protected  # noqa: E402
+from .pipeline import DatasetCheck, RunResult, check_header, feed_index, run, type_tab, validate_rows  # noqa: E402
+from .schemas import DATASETS, X_FEED, X_POST_CONTEXT, X_SIGNALS, is_protected  # noqa: E402
 from .sheet import SheetReader  # noqa: E402
 
 
@@ -131,6 +131,14 @@ def main(argv: list[str] | None = None) -> int:
     typed, checks, missing_tabs = load(cfg, names)
     for n, rows in typed.items():
         validate_rows(DATASETS[n], rows, checks[n], args.sample)
+    feed_lookup: dict[str, dict[str, Any]] = {}
+    if X_FEED.name not in names and ({X_POST_CONTEXT.name, X_SIGNALS.name} & set(names)):
+        # Context is partitioned by its post's capture date and signals take author/text from X Feed:
+        # read X Feed too (lookup only, not written) so a dataset-scoped backfill matches a full one.
+        feed_typed, feed_checks, feed_missing = load(cfg, [X_FEED.name])
+        if feed_missing or feed_checks[X_FEED.name].missing_columns:
+            missing_tabs += feed_missing or [f"{X_FEED.tab} (columns {feed_checks[X_FEED.name].missing_columns})"]
+        feed_lookup = feed_index(feed_typed.get(X_FEED.name, []))
     blocking = [f"{n}: missing columns {c.missing_columns}" for n, c in checks.items() if c.missing_columns]
     blocking += [f"tab not found: {t}" for t in missing_tabs]
     if blocking and (args.execute or args.local_out):
@@ -165,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
                     targets[f"postgres x_intel.{t}"] = f"n/a ({type(exc).__name__})"
         result = run(typed, store=store, prefix=prefix, conn=conn if args.execute else None,
                      source="sheet-backfill", execute=write_files, batch_id=batch_id,
-                     run_date=now.astimezone(TZ).date(), now=now)
+                     run_date=now.astimezone(TZ).date(), now=now, feed_lookup=feed_lookup)
     finally:
         if conn is not None:
             conn.close()

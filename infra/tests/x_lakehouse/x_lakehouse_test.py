@@ -99,6 +99,10 @@ class CoerceTests(unittest.TestCase):
         with self.assertRaises(CoerceError):
             coerce(2**63, "int")
 
+    def test_long_bad_value_is_kept_whole_in_coerce_errors(self):
+        long = "x" * 5000
+        self.assertEqual(type_row(X_FEED, feed_row("1", likes=long)).errors["likes"]["raw"], long)
+
     def test_post_context_needs_only_post_id(self):
         row = type_row(X_POST_CONTEXT, {"post_id": "9", "media_count": 1})
         self.assertEqual(row.errors, {})
@@ -123,6 +127,20 @@ class BackfillGuardTests(unittest.TestCase):
             self.assertEqual(backfill.main(["--execute", "--datasets", "x_feed"]), 2)
         open_store.assert_not_called()
         connect.assert_not_called()
+
+
+    def test_scoped_backfill_reads_x_feed_for_context_dates(self):
+        feed = [type_row(X_FEED, feed_row("66", collected="2026-11-01 10:00"))]
+        ctx = [type_row(X_POST_CONTEXT, {"post_id": "66", "media_count": 1}, sheet_row=2)]
+
+        def fake_load(cfg, names):
+            if names == ["x_feed"]:
+                return {"x_feed": feed}, {"x_feed": DatasetCheck("x_feed", "X Feed")}, []
+            return {"x_post_context": ctx}, {"x_post_context": DatasetCheck("x_post_context", "X Post Context")}, []
+        with tempfile.TemporaryDirectory() as tmp, patch.object(backfill, "load", side_effect=fake_load):
+            self.assertEqual(backfill.main(["--datasets", "x_post_context", "--local-out", tmp]), 0)
+            self.assertTrue((Path(tmp) / "raw/x_post_context/date=2026-11-01/part-0000.parquet").exists())
+            self.assertFalse((Path(tmp) / "raw/x_feed").exists())  # lookup only
 
 
 class ServeWriterTests(unittest.TestCase):

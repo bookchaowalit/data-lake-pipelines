@@ -126,7 +126,7 @@ def type_row(dataset: Dataset, cells: dict[str, Any], sheet_row: int | None = No
             values[name] = coerce(cells.get(name), kind)
         except CoerceError as exc:
             values[name] = None
-            errors[name] = {"raw": raw_text(cells.get(name))[:200], "reason": str(exc)}
+            errors[name] = {"raw": raw_text(cells.get(name)), "reason": str(exc)}  # full value: the only copy
     for name in dataset.required_columns:
         if values.get(name) is None and name not in errors:
             errors[name] = {"raw": "", "reason": "key column is blank"}
