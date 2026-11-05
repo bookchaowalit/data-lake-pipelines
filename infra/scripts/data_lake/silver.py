@@ -676,6 +676,10 @@ def transform_bronze_to_silver(
         for row in latest_rows
     ]
     fingerprint_body: dict[str, Any] = {"transform": contract.transform_version, "rows": fingerprint_input}
+    if contract.keep_all_versions:
+        # The manifest records the mode, so a history run must not share a run id
+        # with a latest run over the same rows (absent otherwise: old ids are kept).
+        fingerprint_body["keep_all_versions"] = True
     if extended_quality:
         # The manifest records the policy and the excluded rows, and objects
         # are write-once, so any change to either must get its own run id.

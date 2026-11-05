@@ -47,7 +47,8 @@ hash, and the object store is write-once, so a mutable `latest.json` is not allo
    kept (no newest-per-record step), `offline_fixture` is still excluded, and the transform
    version is `jobs-envelope-history-silver.v1`. They are best-effort like item 6 and are listed
    in `datasets` the same way. A Silver run without `keep_all_versions` keeps its manifest and
-   run id byte-for-byte; with it, the manifest's `quality` gains `"keep_all_versions": true`.
+   run id byte-for-byte; with it, the run-id fingerprint and the manifest's `quality` both gain
+   `"keep_all_versions": true`, so the two modes never share a write-once object.
 
 ## Reader contract
 

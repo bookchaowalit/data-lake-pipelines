@@ -265,6 +265,14 @@ class SilverTests(unittest.TestCase):
             self.assertEqual(again["silver_run_id"], result["silver_run_id"])
             self.assertTrue(again["silver_existed"])
 
+    def test_keep_all_versions_alone_gets_its_own_run_id(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._ingest_jobs(root, [self._job(1), self._job(2)])  # no duplicates: same rows either way
+            latest = transform_bronze_to_silver(SilverProductContract(), data_lake_uri=root)
+            history = transform_bronze_to_silver(SilverProductContract(keep_all_versions=True), data_lake_uri=root)
+            self.assertNotEqual(latest["silver_run_id"], history["silver_run_id"])
+            self.assertFalse(history["manifest_existed"])
+
     def test_new_excluded_row_alone_does_not_conflict(self):
         with tempfile.TemporaryDirectory() as root:
             self._ingest_jobs(root, [self._job(1), self._job(2)])
