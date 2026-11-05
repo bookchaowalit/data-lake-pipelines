@@ -49,13 +49,13 @@ FIXTURE_JOBS = [
 ]
 
 
-def _ingest(root, records, raw=b"jobs-marts-fixture"):
+def _ingest(root, records, raw=b"jobs-marts-fixture", dataset="job_postings"):
     ingest_payload(
         raw,
         records,
         source="book-job-data",
         domain="jobs",
-        dataset="job_postings",
+        dataset=dataset,
         data_lake_uri=root,
         input_format="text",
         event_time_field="event_time",
@@ -263,6 +263,13 @@ class JobsMartsTests(unittest.TestCase):
                     "silver_run_id": first["silver_run_id"],
                     "silver_key": first["silver"]["key"],
                     "silver_record_count": 4,
+                    "datasets": {
+                        "job_postings": {
+                            "silver_key": first["silver"]["key"],
+                            "silver_run_id": first["silver_run_id"],
+                            "record_count": 4,
+                        }
+                    },
                 },
             )
 
@@ -274,6 +281,39 @@ class JobsMartsTests(unittest.TestCase):
             keys = ObjectStore(root).list_keys(prefix)
             self.assertEqual(len(keys), 2)
             self.assertEqual(max(keys), later["pointer_key"])
+
+    def test_matches_and_leads_get_envelope_silver_listed_in_the_pointer(self):
+        with tempfile.TemporaryDirectory() as root:
+            _ingest(root, FIXTURE_JOBS)
+            # Leads often lack title/url; only source_record_id is required.
+            _ingest(
+                root,
+                [_job(1, score="9"), _job(1, score="10", event_time="2026-10-22T07:00:00Z"), _job(2, title="", url="")],
+                raw=b"matches",
+                dataset="job_matches",
+            )
+            result = self._run(root)
+            store = ObjectStore(root)
+            pointer = json.loads(store.get_bytes(result["pointer_key"]))
+            self.assertEqual(set(pointer["datasets"]), {"job_postings", "job_matches"})
+            self.assertEqual(pointer["datasets"]["job_postings"]["silver_key"], result["silver"]["key"])
+            matches = pointer["datasets"]["job_matches"]
+            self.assertEqual(matches["record_count"], 2)
+            self.assertTrue(
+                matches["silver_key"].startswith(
+                    "silver/domain=jobs/dataset=job_matches/schema_version=1/event_date="
+                )
+            )
+            rows = query_parquet(
+                str(Path(root) / matches["silver_key"]),
+                "SELECT source_record_id, payload_json FROM lake_table ORDER BY source_record_id",
+            )
+            self.assertEqual([row["source_record_id"] for row in rows], ["job-1", "job-2"])
+            self.assertEqual(json.loads(rows[0]["payload_json"])["score"], "10")
+            # job_leads has no Bronze here: reported, not fatal, and absent from the pointer.
+            self.assertEqual(result["status"], "success")
+            self.assertIn("error", result["envelope_silver"]["job_leads"])
+            self.assertEqual(result["envelope_silver"]["job_matches"]["record_count"], 2)
 
     def test_new_bronze_batch_gets_new_gold_run(self):
         with tempfile.TemporaryDirectory() as root:

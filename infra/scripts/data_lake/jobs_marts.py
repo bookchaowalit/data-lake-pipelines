@@ -43,6 +43,9 @@ DBT_PROJECT_DIR = ROOT / "infra" / "dbt"
 GOLD_SCHEMA_VERSION = "1"
 GOLD_SOURCE = "book-job-data"
 GOLD_POINTER_PREFIX = f"control/pointers/gold/source={GOLD_SOURCE}/domain=jobs/"
+# Datasets that get a common-columns Silver part beside job_postings (pointer `datasets`).
+ENVELOPE_DATASETS = ("job_matches", "job_leads")
+ENVELOPE_TRANSFORM_VERSION = "jobs-envelope-silver.v1"
 # Mart name → columns that order its rows, so exported bytes are stable.
 JOBS_MARTS: dict[str, tuple[str, ...]] = {
     "jobs_postings_daily": ("posted_date", "board"),
@@ -237,9 +240,42 @@ def run_jobs_marts(
         (_canonical_json(manifest) + "\n").encode("utf-8"),
         content_type="application/json",
     )
+    datasets = {
+        "job_postings": {
+            "silver_key": silver["silver_key"],
+            "silver_run_id": silver["silver_run_id"],
+            "record_count": silver["record_count"],
+        }
+    }
+    envelope_silver: dict[str, dict[str, Any]] = {}
+    for name in ENVELOPE_DATASETS:
+        # Best-effort: the API reads these, the marts do not, so a failure here
+        # falls back to Bronze in the API instead of blocking Gold.
+        try:
+            built = transform_bronze_to_silver(
+                SilverProductContract(
+                    bronze_dataset=name,
+                    silver_dataset=name,
+                    normalizer="jobs_envelope",
+                    transform_version=ENVELOPE_TRANSFORM_VERSION,
+                    required_fields=("source_record_id",),
+                    max_invalid_ratio=max_invalid_ratio,
+                ),
+                data_lake_uri=uri,
+            )
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            envelope_silver[name] = {"error": f"{type(exc).__name__}: {exc}"}
+            continue
+        datasets[name] = {
+            "silver_key": built["silver_key"],
+            "silver_run_id": built["silver_run_id"],
+            "record_count": built["record_count"],
+        }
+        envelope_silver[name] = dict(datasets[name])
     # The store is write-once, so readers find the newest run through a key that
     # sorts by publish time (docs/specs/jobs-gold-pointer.md).
     pointer = {
+        "datasets": datasets,
         "pointer_version": "1",
         "layer": "gold",
         "source": GOLD_SOURCE,
@@ -276,6 +312,7 @@ def run_jobs_marts(
         "manifest_existed": manifest_put.existed,
         "pointer_key": pointer_put.key,
         "pointer_existed": pointer_put.existed,
+        "envelope_silver": envelope_silver,
         "dbt": manifest["dbt"],
         "freshness": freshness,
     }
@@ -312,6 +349,8 @@ def main() -> int:
         print(f"  Silver: {result['silver']['record_count']} rows ({result['silver_run_id']})")
         for name, mart in result["marts"].items():
             print(f"  {name}: {mart['rows']} rows → {mart['key']}")
+        for name, built in result["envelope_silver"].items():
+            print(f"  {name} Silver: {built.get('record_count', built.get('error'))}")
         print(f"  manifest: {result['manifest_key']}")
         print(f"  freshness: {result['freshness']}")
     # Stale data is still published (it is correct for its input), but the

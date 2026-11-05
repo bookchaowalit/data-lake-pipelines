@@ -521,7 +521,25 @@ def normalize_crypto_funding_row(
     return output, errors
 
 
+def normalize_jobs_envelope_row(
+    row: dict[str, Any],
+    *,
+    silver_run_id: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Common Silver columns only: job_matches and job_leads keep their payload verbatim."""
+    payload = parse_payload_json(row)
+    fields = _common_silver_fields(row, silver_run_id=silver_run_id, payload=payload)
+    errors = [] if fields["source_record_id"] else ["missing source_record_id"]
+    output = {
+        **fields,
+        "quality_status": "invalid" if errors else "valid",
+        "quality_errors": _canonical_json(errors),
+    }
+    return output, errors
+
+
 NORMALIZERS = {
+    "jobs_envelope": (normalize_jobs_envelope_row, COMMON_SILVER_COLUMNS),
     "crypto_ohlcv": (normalize_crypto_ohlcv_row, CRYPTO_OHLCV_SILVER_COLUMNS),
     "crypto_funding": (normalize_crypto_funding_row, CRYPTO_FUNDING_SILVER_COLUMNS),
 }
