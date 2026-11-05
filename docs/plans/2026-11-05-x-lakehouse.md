@@ -1,7 +1,7 @@
 # X-intelligence lakehouse: Sheet → R2 raw + Supabase curated + small Sheet view
 
-Status: **design approved 2026-11-05 (owner delegated the open decisions; see §0).** Nothing has been
-written to R2, Supabase or the Sheet yet. Code: `infra/scripts/x_lakehouse/`. Tests: `infra/tests/x_lakehouse/`.
+Status: **Day 0 done 2026-11-05.** Backfill executed and validated (see §0 "Day 0"). Parallel run
+(days 1–7) is next; the bots still write the Sheet, which was only read. Code: `infra/scripts/x_lakehouse/`. Tests: `infra/tests/x_lakehouse/`.
 
 ## 0. Decisions (2026-11-05)
 
@@ -20,6 +20,17 @@ written to R2, Supabase or the Sheet yet. Code: `infra/scripts/x_lakehouse/`. Te
 5. **Targets:** R2 bucket `x-intel-lake` with a token scoped to that bucket; a new free Supabase
    project `x-intel` (ap-southeast-1; all 5 existing projects are paused, so it is the only active
    one); variables in Infisical `/x-lakehouse`.
+
+**Day 0 (2026-11-05, owner said go):** R2 bucket `x-intel-lake` (APAC) + account token
+`x-intel-lake-rw` (Object Read/Write on that bucket only); Supabase project `x-intel`
+(ref `qdfnqfrlhlargihrpqgc`, org personal, ap-southeast-1) with role `x_lake` that owns only schema
+`x_intel` (no CREATE on the database); `X_LAKE_URI`, `R2_*`, `X_LAKE_DB_URL`, `SUPABASE_X_INTEL_REF`
+in Infisical `/x-lakehouse`. The project's `postgres` password was never stored (reset it in the
+dashboard if needed; the pipeline does not use it). `backfill --execute` wrote 49,417 raw rows
+(81 parts) and inserted 4,301 curated rows. `validate` was ok on all 12 datasets, and a second
+`--execute` wrote 0 rows and updated 0.
+Run: `infisical run --path /sheet-summaries -- infisical run --path /x-lakehouse -- python -m x_lakehouse.<cmd>`
+from `infra/scripts`.
 
 ## 1. Context
 
