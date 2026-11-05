@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -244,9 +245,9 @@ class JobsMartsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             _ingest(root, FIXTURE_JOBS)
             first = self._run(root)
-            self.assertEqual(
+            self.assertRegex(
                 first["pointer_key"],
-                f"{prefix}published_at=20261022T120000Z-{first['gold_run_id']}.json",
+                rf"^{re.escape(prefix)}published_at=20261022T120000Z-{first['gold_run_id']}-[0-9a-f]{{12}}\.json$",
             )
             self.assertFalse(first["pointer_existed"])
             pointer = json.loads(ObjectStore(root).get_bytes(first["pointer_key"]))
@@ -314,6 +315,18 @@ class JobsMartsTests(unittest.TestCase):
             self.assertEqual(result["status"], "success")
             self.assertIn("error", result["envelope_silver"]["job_leads"])
             self.assertEqual(result["envelope_silver"]["job_matches"]["record_count"], 2)
+
+    def test_same_time_retry_after_an_envelope_recovers_does_not_conflict(self):
+        with tempfile.TemporaryDirectory() as root:
+            _ingest(root, FIXTURE_JOBS)
+            first = self._run(root)
+            self.assertIn("error", first["envelope_silver"]["job_matches"])
+            _ingest(root, [_job(1)], raw=b"matches", dataset="job_matches")
+            second = self._run(root)  # same `now`, same Gold, new `datasets`
+            self.assertEqual(second["gold_run_id"], first["gold_run_id"])
+            self.assertNotEqual(second["pointer_key"], first["pointer_key"])
+            pointer = json.loads(ObjectStore(root).get_bytes(second["pointer_key"]))
+            self.assertIn("job_matches", pointer["datasets"])
 
     def test_new_bronze_batch_gets_new_gold_run(self):
         with tempfile.TemporaryDirectory() as root:

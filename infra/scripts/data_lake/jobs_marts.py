@@ -287,9 +287,13 @@ def run_jobs_marts(
         "silver_key": silver["silver_key"],
         "silver_record_count": silver["record_count"],
     }
+    body = (_canonical_json(pointer) + "\n").encode("utf-8")
+    # The digest keeps a same-second retry whose envelope results changed from
+    # colliding with the earlier, write-once pointer; identical retries stay no-ops.
     pointer_put = store.put_bytes(
-        f"{GOLD_POINTER_PREFIX}published_at={now.strftime('%Y%m%dT%H%M%SZ')}-{gold_run_id}.json",
-        (_canonical_json(pointer) + "\n").encode("utf-8"),
+        f"{GOLD_POINTER_PREFIX}published_at={now.strftime('%Y%m%dT%H%M%SZ')}-{gold_run_id}-"
+        f"{hashlib.sha256(body).hexdigest()[:12]}.json",
+        body,
         content_type="application/json",
     )
     quality = silver["quality"]

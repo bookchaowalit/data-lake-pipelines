@@ -18,9 +18,12 @@ hash, and the object store is write-once, so a mutable `latest.json` is not allo
 ## Behaviour
 
 1. After the Gold manifest is written, `run_jobs_marts` writes one pointer object:
-   `control/pointers/gold/source=book-job-data/domain=jobs/published_at=<YYYYMMDDTHHMMSSZ>-<gold_run_id>.json`
-   where the timestamp is the run's `now` in UTC. Keys sort lexically in publish order, so the
-   newest pointer is the greatest key under the prefix.
+   `control/pointers/gold/source=book-job-data/domain=jobs/published_at=<YYYYMMDDTHHMMSSZ>-<gold_run_id>-<sha12>.json`
+   where the timestamp is the run's `now` in UTC and `<sha12>` is the first 12 hex characters of
+   the sha256 of the pointer body (added 2026-11-05, so a same-second retry whose `datasets`
+   changed gets its own key instead of a write-once conflict). Keys sort lexically in publish
+   order, so the newest pointer is the greatest key under the prefix; within one second either
+   pointer is valid.
 2. The pointer is canonical JSON with `pointer_version` (`"1"`), `layer` (`"gold"`),
    `source`, `domain`, `published_at` (ISO 8601 UTC, `Z`), `gold_run_id`, `manifest_key`,
    `silver_run_id`, `silver_key` and `silver_record_count`.
