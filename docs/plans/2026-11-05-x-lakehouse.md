@@ -1,7 +1,25 @@
 # X-intelligence lakehouse: Sheet → R2 raw + Supabase curated + small Sheet view
 
-Status: **design + dry run, awaiting owner approval.** Nothing has been written to R2, Supabase or
-the Sheet. Code: `infra/scripts/x_lakehouse/`. Tests: `infra/tests/x_lakehouse/`.
+Status: **design approved 2026-11-05 (owner delegated the open decisions; see §0).** Nothing has been
+written to R2, Supabase or the Sheet yet. Code: `infra/scripts/x_lakehouse/`. Tests: `infra/tests/x_lakehouse/`.
+
+## 0. Decisions (2026-11-05)
+
+1. **Timezone: ICT confirmed.** Checked against the time encoded in each X post id (Snowflake):
+   reading `posted_at` as Asia/Bangkok puts all 27,950 X Feed rows and all 2,048 `ref_posted_at`
+   values within 2 minutes of the id time (the Sheet drops seconds); none fit UTC.
+2. **Keep raw `x_signals` and `claims`.** The curated tables stay rebuildable from R2, and every
+   claim version is kept.
+3. **Intake overlap:** this `raw/` layer is the X Feed store from now on. When Grok Bot pushes to
+   intake-api, `x_feed_lake_export` stays as the intake cell's export, and one writer for analysis
+   is chosen then. Nothing changes in the intake path now.
+4. **Writer bridge:** the bots keep writing the Sheet; a scheduled catch-up `backfill --execute`
+   (idempotent) runs 3×/day as a Railway cron in `data-schedules`, next to `sheet-summaries`, which
+   already has the Sheet credentials. A FastAPI wrapper around `append_rows` is built only when a bot
+   is ready to call it.
+5. **Targets:** R2 bucket `x-intel-lake` with a token scoped to that bucket; a new free Supabase
+   project `x-intel` (ap-southeast-1; all 5 existing projects are paused, so it is the only active
+   one); variables in Infisical `/x-lakehouse`.
 
 ## 1. Context
 
@@ -274,9 +292,7 @@ Context rows are scoped by the partition they were stored in.
 
 ## 12. Risks and open decisions
 
-1. **Timezone of `posted_at` / `ref_posted_at`.** It's assumed to be ICT, like the capture columns.
-   If the bot writes X's UTC time, those two columns are 7 h off. Confirm with the writer before
-   `--execute` (it is a one-line change in `schemas.SHEET_TZ` per column).
+1. **Timezone of `posted_at` / `ref_posted_at`.** Resolved: ICT, verified against post-id time (§0).
 2. **Overlap with the intake path.** `x_feed_lake_export.py` already lands intake x-feed pulls into
    Bronze `domain=social/dataset=x_feed` (envelope format). Once Grok Bot pushes to intake-api,
    there will be two lake copies of X Feed. Recommendation: this `raw/` layer is the typed history
