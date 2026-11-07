@@ -16,6 +16,14 @@ vars:
   # Exactly one jobs Silver part; required for the jobs models (see
   # stg_job_postings). The jobs_marts runner sets it.
   jobs_silver_part: ""
+  # Sales marts (docs/specs/sales-marts.md).
+  sales_timezone: "Asia/Bangkok"
+  sales_late_after_hours: 24
+  # Running net revenue (minor units) at or above which a customer is VIP, per currency.
+  # A currency missing here never makes a customer VIP.
+  sales_vip_threshold_minor:
+    THB: 10000000
+    USD: 300000
 
 models:
   solo_empire_lake:

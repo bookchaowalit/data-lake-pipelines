@@ -1,0 +1,105 @@
+version: 2
+
+# Sales marts on the commerce event stream. Spec: docs/specs/sales-marts.md.
+# Money columns are integer minor units of `currency` (satang, cents); never summed across currencies.
+
+models:
+  - name: sales_rejected_events
+    description: Payment and refund events that failed validation, one row per envelope, with the reason.
+    columns:
+      - name: event_key
+        tests: [unique, not_null]
+      - name: reject_reason
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [missing_id, invalid_amount, invalid_currency, invalid_time, orphan_refund, currency_mismatch]
+
+  - name: int_sales_payments
+    description: Valid payments, one row per intent_id.
+    columns:
+      - name: intent_id
+        tests: [unique, not_null]
+
+  - name: int_sales_refunds
+    description: Valid refunds of a known payment, one row per refund_id.
+    columns:
+      - name: refund_id
+        tests: [unique, not_null]
+
+  - name: dim_customer
+    description: >
+      SCD Type 2 customer (paying workspace) dimension. A new version opens whenever the tier
+      changes; tier is derived from running net revenue per currency, so it is rebuildable.
+    columns:
+      - name: customer_sk
+        description: Surrogate key, md5 of customer_id and valid_from.
+        tests: [unique, not_null]
+      - name: customer_id
+        tests: [not_null]
+      - name: tier
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [standard, vip]
+      - name: valid_from
+        tests: [not_null]
+    tests:
+      - unique_combination_of_columns:
+          arguments:
+            columns: [customer_id, version]
+
+  - name: fact_sales
+    description: One row per payment intent, with refunds attributed back to the sale.
+    columns:
+      - name: intent_id
+        tests: [unique, not_null]
+      - name: customer_sk
+        description: The dim_customer version valid when the sale happened.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_sk
+      - name: sale_date
+        description: occurred_at date in var sales_timezone.
+        tests: [not_null]
+      - name: currency
+        tests: [not_null]
+
+  - name: sales_daily_revenue
+    description: Revenue per business date and currency; restated view and cash view of refunds side by side.
+    tests:
+      - unique_combination_of_columns:
+          arguments:
+            columns: [business_date, currency]
+    columns:
+      - name: business_date
+        tests: [not_null]
+      - name: currency
+        tests: [not_null]
+    meta:
+      # Semantic definitions: every consumer (BI, API, agents) uses these, not its own SQL.
+      metrics:
+        gross_revenue:
+          label: Gross revenue
+          expression: sum(gross_minor)
+          time_dimension: business_date
+          grain_note: by sale date; split by currency
+        net_revenue:
+          label: Net revenue
+          expression: sum(net_minor)
+          time_dimension: business_date
+          grain_note: by sale date; restated when a refund arrives later
+        refunds_booked:
+          label: Refunds booked
+          expression: sum(refunds_booked_minor)
+          time_dimension: business_date
+          grain_note: by the day the refund happened (cash view)
+        vip_customers:
+          label: VIP customers
+          model: dim_customer
+          expression: count(distinct customer_id) filter (where is_current and tier = 'vip')

@@ -89,3 +89,19 @@ models:
           - accepted_values:
               arguments:
                 values: ["private"]
+
+  - name: stg_commerce_events
+    description: >
+      One row per ADR-0008 envelope from the commerce event stream (Bronze domain=commerce/dataset=events),
+      manifest-committed parts only, earliest delivery of each envelope id.
+    columns:
+      - name: event_key
+        description: The envelope id; consumers dedupe on it.
+        tests: [unique, not_null]
+      - name: event_type
+        # Warn, not error: one malformed envelope must not stop every mart from building.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+

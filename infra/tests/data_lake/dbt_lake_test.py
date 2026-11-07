@@ -82,7 +82,11 @@ def check_metadata_outputs(target_dir: Path) -> list[str]:
     problems: list[str] = []
     manifest = json.loads((target_dir / "manifest.json").read_text(encoding="utf-8"))
     built = {node["name"] for node in manifest["nodes"].values() if node["resource_type"] == "model"}
-    problems += [f"model {name} missing from dbt docs manifest" for name in METADATA_MODELS if name not in built]
+    problems += [
+        f"model {name} missing from dbt docs manifest"
+        for name in (*METADATA_MODELS, *SALES_MODELS)
+        if name not in built
+    ]
     if not (target_dir / "catalog.json").is_file():
         problems.append("dbt docs generate wrote no catalog.json")
 
@@ -285,6 +289,148 @@ def build_synthetic_x_feed(lake_root: Path) -> None:
         )
 
 
+SALES_MODELS = (
+    "stg_commerce_events",
+    "sales_rejected_events",
+    "dim_customer",
+    "fact_sales",
+    "sales_daily_revenue",
+)
+
+
+def _envelope(event_id: str, kind: str, occurred_at: str, **data: object) -> dict:
+    return {
+        "id": event_id,
+        "type": kind,
+        "version": 1,
+        "occurred_at": occurred_at,
+        "producer": "platform-payment",
+        "correlation_id": str(data.get("intent_id") or event_id),
+        "causation_id": None,
+        "data": data,
+    }
+
+
+def build_synthetic_commerce_events(lake_root: Path) -> None:
+    """Fake payment events through the real lake writer (see docs/specs/sales-marts.md).
+
+    Customer ws-a: 60k + 50k baht -> VIP, then a 30k refund -> standard again.
+    The 50k sale is delivered twice. Customer ws-b: a USD sale that arrives 3 days late.
+    Three bad events (zero amount, missing intent_id, refund of an unknown intent).
+    """
+    import data_lake.ingest as ingest_module
+    from data_lake.ingest import ingest_records
+
+    s1 = _envelope("payment.intent.succeeded:s1", "payment.intent.succeeded", "2026-11-01T03:00:00Z",
+                   workspace_id="ws-a", intent_id="s1", amount=6_000_000, currency="THB", provider="stripe")
+    # 18:30 UTC on 11-01 is 01:30 on 11-02 in Bangkok.
+    s2 = _envelope("payment.intent.succeeded:s2", "payment.intent.succeeded", "2026-11-01T18:30:00Z",
+                   workspace_id="ws-a", intent_id="s2", amount=5_000_000, currency="THB", provider="stripe")
+    r1 = _envelope("payment.refund.succeeded:r1", "payment.refund.succeeded", "2026-11-04T02:00:00Z",
+                   workspace_id="ws-a", intent_id="s2", refund_id="r1", amount=3_000_000, currency="THB")
+    b1 = _envelope("payment.intent.succeeded:b1", "payment.intent.succeeded", "2026-11-03T05:00:00Z",
+                   workspace_id="ws-b", intent_id="b1", amount=50_000, currency="USD", provider="stripe")
+    bad_amount = _envelope("payment.intent.succeeded:z1", "payment.intent.succeeded", "2026-11-02T05:00:00Z",
+                           workspace_id="ws-a", intent_id="z1", amount=0, currency="THB", provider="stripe")
+    bad_intent = _envelope("payment.intent.succeeded:z2", "payment.intent.succeeded", "2026-11-02T06:00:00Z",
+                           workspace_id="ws-a", amount=1_000, currency="THB", provider="stripe")
+    orphan = _envelope("payment.refund.succeeded:r9", "payment.refund.succeeded", "2026-11-04T03:00:00Z",
+                       workspace_id="ws-a", intent_id="nope", refund_id="r9", amount=100, currency="THB")
+    other = _envelope("platform.noise:1", "commerce.cart.viewed", "2026-11-02T07:00:00Z", workspace_id="ws-a")
+
+    # Bronze received_at is the lake writer's clock, so each batch lands at its own fake time.
+    batches = [
+        ("2026-11-01T04:00:00Z", [s1]),
+        ("2026-11-01T19:00:00Z", [s2]),
+        ("2026-11-02T08:00:00Z", [bad_amount, bad_intent, other]),
+        # Redelivery of s2 (at-least-once) in a later batch, together with its refund.
+        ("2026-11-04T02:30:00Z", [s2, r1]),
+        ("2026-11-04T03:30:00Z", [orphan]),
+        # b1 happened on 11-03 but reaches the lake on 11-06.
+        ("2026-11-06T09:00:00Z", [b1]),
+    ]
+    original_clock = ingest_module.utc_now
+    try:
+        for at, batch in batches:
+            ingest_module.utc_now = lambda at=at: at
+            ingest_records(
+                batch,
+                source="aiven-kafka",
+                domain="commerce",
+                dataset="events",
+                data_lake_uri=str(lake_root),
+                source_record_id_field="id",
+                event_time_field="occurred_at",
+                metadata={"adapter": "dbt_lake_test", "contract": "envelope-1.0.0"},
+            )
+    finally:
+        ingest_module.utc_now = original_clock
+
+
+def check_sales_outputs() -> list[str]:
+    """Problems with the sales marts' results on the synthetic commerce fixture."""
+    import duckdb
+
+    problems: list[str] = []
+
+    def expect(name: str, sql: str, expected: list) -> None:
+        try:
+            got = con.execute(sql).fetchall()
+        except duckdb.Error as exc:
+            problems.append(f"{name}: query failed: {exc}")
+            return
+        if got != expected:
+            problems.append(f"{name}: expected {expected}, got {got}")
+
+    with duckdb.connect(str(DBT_PROJECT_DIR / "local.duckdb"), read_only=True) as con:
+        # Same zone as the dbt profile, so timestamps render the same on every machine.
+        con.execute("set TimeZone = 'UTC'")
+        expect(
+            "fact_sales",
+            "select intent_id, customer_id, cast(sale_date as varchar), currency, gross_minor, refunded_minor, "
+            "net_minor, refund_count, over_refunded, arrived_late, customer_tier_at_sale "
+            "from fact_sales order by intent_id",
+            [
+                ("b1", "ws-b", "2026-11-03", "USD", 50_000, 0, 50_000, 0, False, True, "standard"),
+                ("s1", "ws-a", "2026-11-01", "THB", 6_000_000, 0, 6_000_000, 0, False, False, "standard"),
+                ("s2", "ws-a", "2026-11-02", "THB", 5_000_000, 3_000_000, 2_000_000, 1, False, False, "vip"),
+            ],
+        )
+        expect(
+            "dim_customer",
+            "select customer_id, version, tier, cast(valid_from as varchar), cast(valid_to as varchar), is_current "
+            "from dim_customer order by customer_id, version",
+            [
+                ("ws-a", 1, "standard", "2026-11-01 03:00:00+00", "2026-11-01 18:30:00+00", False),
+                ("ws-a", 2, "vip", "2026-11-01 18:30:00+00", "2026-11-04 02:00:00+00", False),
+                ("ws-a", 3, "standard", "2026-11-04 02:00:00+00", None, True),
+                ("ws-b", 1, "standard", "2026-11-03 05:00:00+00", None, True),
+            ],
+        )
+        expect(
+            "sales_daily_revenue",
+            "select cast(business_date as varchar), currency, orders, customers, gross_minor, "
+            "refunded_against_sales_minor, net_minor, refunds_booked_minor, late_orders "
+            "from sales_daily_revenue order by business_date, currency",
+            [
+                ("2026-11-01", "THB", 1, 1, 6_000_000, 0, 6_000_000, 0, 0),
+                ("2026-11-02", "THB", 1, 1, 5_000_000, 3_000_000, 2_000_000, 0, 0),
+                ("2026-11-03", "USD", 1, 1, 50_000, 0, 50_000, 0, 1),
+                ("2026-11-04", "THB", 0, 0, 0, 0, 0, 3_000_000, 0),
+            ],
+        )
+        expect(
+            "sales_rejected_events",
+            "select event_type, reject_reason from sales_rejected_events order by reject_reason",
+            [
+                ("payment.intent.succeeded", "invalid_amount"),
+                ("payment.intent.succeeded", "missing_id"),
+                ("payment.refund.succeeded", "orphan_refund"),
+            ],
+        )
+    return problems
+
+
 def run() -> bool:
     if DBT_BIN is None:
         message = "dbt not on PATH (install infra/requirements-data-lake.txt)"
@@ -300,6 +446,7 @@ def run() -> bool:
         export_registry_fixture(Path(tmp))
         jobs_silver_part = build_jobs_silver_fixture(Path(tmp))
         build_synthetic_x_feed(Path(tmp))
+        build_synthetic_commerce_events(Path(tmp))
         target_dir = Path(tmp) / "target"
         # dbt-duckdb does not create the target directory itself before
         # opening the database file there.
@@ -371,7 +518,7 @@ def run() -> bool:
             print("FAIL: dbt docs generate failed")
             return False
 
-        problems = check_metadata_outputs(target_dir)
+        problems = check_metadata_outputs(target_dir) + check_sales_outputs()
         for problem in problems:
             print(f"FAIL: {problem}")
         if problems:
