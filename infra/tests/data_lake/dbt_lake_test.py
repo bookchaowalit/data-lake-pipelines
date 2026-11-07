@@ -336,6 +336,23 @@ def build_synthetic_commerce_events(lake_root: Path) -> None:
                            workspace_id="ws-a", amount=1_000, currency="THB", provider="stripe")
     orphan = _envelope("payment.refund.succeeded:r9", "payment.refund.succeeded", "2026-11-04T03:00:00Z",
                        workspace_id="ws-a", intent_id="nope", refund_id="r9", amount=100, currency="THB")
+    # Review cases (Codex, 2026-11-07): two payments at the same instant; amounts that are not JSON
+    # integers; a later duplicate success in another currency; refunds whose currency or workspace
+    # differ from the retained payment.
+    c1 = _envelope("payment.intent.succeeded:c1", "payment.intent.succeeded", "2026-11-05T03:00:00Z",
+                   workspace_id="ws-c", intent_id="c1", amount=6_000_000, currency="THB", provider="stripe")
+    c2 = _envelope("payment.intent.succeeded:c2", "payment.intent.succeeded", "2026-11-05T03:00:00Z",
+                   workspace_id="ws-c", intent_id="c2", amount=5_000_000, currency="THB", provider="stripe")
+    bad_fraction = _envelope("payment.intent.succeeded:z3", "payment.intent.succeeded", "2026-11-02T05:00:00Z",
+                             workspace_id="ws-a", intent_id="z3", amount=12.5, currency="THB", provider="stripe")
+    bad_string = _envelope("payment.intent.succeeded:z4", "payment.intent.succeeded", "2026-11-02T05:00:00Z",
+                           workspace_id="ws-a", intent_id="z4", amount="1200", currency="THB", provider="stripe")
+    s1_usd = _envelope("payment.intent.succeeded:s1-usd", "payment.intent.succeeded", "2026-11-01T05:00:00Z",
+                       workspace_id="ws-a", intent_id="s1", amount=6_000_000, currency="USD", provider="stripe")
+    usd_refund = _envelope("payment.refund.succeeded:r2", "payment.refund.succeeded", "2026-11-04T04:00:00Z",
+                           workspace_id="ws-a", intent_id="s1", refund_id="r2", amount=100, currency="USD")
+    other_ws_refund = _envelope("payment.refund.succeeded:r3", "payment.refund.succeeded", "2026-11-04T05:00:00Z",
+                                workspace_id="ws-b", intent_id="s1", refund_id="r3", amount=100, currency="THB")
     other = _envelope("platform.noise:1", "commerce.cart.viewed", "2026-11-02T07:00:00Z", workspace_id="ws-a")
 
     # Bronze received_at is the lake writer's clock, so each batch lands at its own fake time.
@@ -348,6 +365,10 @@ def build_synthetic_commerce_events(lake_root: Path) -> None:
         ("2026-11-04T03:30:00Z", [orphan]),
         # b1 happened on 11-03 but reaches the lake on 11-06.
         ("2026-11-06T09:00:00Z", [b1]),
+        # Review cases. s1-usd arrives first so a non-deterministic pick could prefer it.
+        ("2026-11-01T03:30:00Z", [s1_usd]),
+        ("2026-11-05T03:10:00Z", [c1, c2, bad_fraction, bad_string]),
+        ("2026-11-05T03:20:00Z", [usd_refund, other_ws_refund]),
     ]
     original_clock = ingest_module.utc_now
     try:
@@ -392,6 +413,8 @@ def check_sales_outputs() -> list[str]:
             "from fact_sales order by intent_id",
             [
                 ("b1", "ws-b", "2026-11-03", "USD", 50_000, 0, 50_000, 0, False, True, "standard"),
+                ("c1", "ws-c", "2026-11-05", "THB", 6_000_000, 0, 6_000_000, 0, False, False, "vip"),
+                ("c2", "ws-c", "2026-11-05", "THB", 5_000_000, 0, 5_000_000, 0, False, False, "vip"),
                 ("s1", "ws-a", "2026-11-01", "THB", 6_000_000, 0, 6_000_000, 0, False, False, "standard"),
                 ("s2", "ws-a", "2026-11-02", "THB", 5_000_000, 3_000_000, 2_000_000, 1, False, False, "vip"),
             ],
@@ -405,6 +428,7 @@ def check_sales_outputs() -> list[str]:
                 ("ws-a", 2, "vip", "2026-11-01 18:30:00+00", "2026-11-04 02:00:00+00", False),
                 ("ws-a", 3, "standard", "2026-11-04 02:00:00+00", None, True),
                 ("ws-b", 1, "standard", "2026-11-03 05:00:00+00", None, True),
+                ("ws-c", 1, "vip", "2026-11-05 03:00:00+00", None, True),
             ],
         )
         expect(
@@ -417,15 +441,20 @@ def check_sales_outputs() -> list[str]:
                 ("2026-11-02", "THB", 1, 1, 5_000_000, 3_000_000, 2_000_000, 0, 0),
                 ("2026-11-03", "USD", 1, 1, 50_000, 0, 50_000, 0, 1),
                 ("2026-11-04", "THB", 0, 0, 0, 0, 0, 3_000_000, 0),
+                ("2026-11-05", "THB", 2, 1, 11_000_000, 0, 11_000_000, 0, 0),
             ],
         )
         expect(
             "sales_rejected_events",
-            "select event_type, reject_reason from sales_rejected_events order by reject_reason",
+            "select event_key, reject_reason from sales_rejected_events order by event_key",
             [
-                ("payment.intent.succeeded", "invalid_amount"),
-                ("payment.intent.succeeded", "missing_id"),
-                ("payment.refund.succeeded", "orphan_refund"),
+                ("payment.intent.succeeded:z1", "invalid_amount"),
+                ("payment.intent.succeeded:z2", "missing_id"),
+                ("payment.intent.succeeded:z3", "invalid_amount"),
+                ("payment.intent.succeeded:z4", "invalid_amount"),
+                ("payment.refund.succeeded:r2", "currency_mismatch"),
+                ("payment.refund.succeeded:r3", "workspace_mismatch"),
+                ("payment.refund.succeeded:r9", "orphan_refund"),
             ],
         )
     return problems
@@ -522,6 +551,45 @@ def run() -> bool:
         for problem in problems:
             print(f"FAIL: {problem}")
         if problems:
+            return False
+
+        # An empty VIP threshold map turns VIP off: the sales marts still build, everyone is standard.
+        no_vip = subprocess.run(
+            [
+                str(DBT_BIN),
+                "build",
+                "--select",
+                "+sales_daily_revenue",
+                "--profiles-dir",
+                str(DBT_PROJECT_DIR),
+                "--project-dir",
+                str(DBT_PROJECT_DIR),
+                "--target-path",
+                str(target_dir),
+                "--vars",
+                json.dumps(
+                    {
+                        "bronze_root": str(bronze_root),
+                        "bronze_manifest_root": str(Path(tmp) / "control" / "manifests"),
+                        "jobs_silver_part": str(jobs_silver_part),
+                        "sales_vip_threshold_minor": {},
+                    }
+                ),
+            ],
+            cwd=str(DBT_PROJECT_DIR),
+            capture_output=True,
+            text=True,
+        )
+        if no_vip.returncode != 0:
+            print(no_vip.stdout[-2000:])
+            print("FAIL: sales marts do not build with an empty sales_vip_threshold_minor")
+            return False
+        import duckdb
+
+        with duckdb.connect(str(DBT_PROJECT_DIR / "local.duckdb"), read_only=True) as con:
+            tiers = con.execute("select distinct tier from dim_customer").fetchall()
+        if tiers != [("standard",)]:
+            print(f"FAIL: empty sales_vip_threshold_minor should leave only standard tiers, got {tiers}")
             return False
 
         print("PASS: dbt build, quality tests, metadata models and dbt docs succeeded against synthetic fixtures")

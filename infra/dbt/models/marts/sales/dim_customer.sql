@@ -20,11 +20,16 @@ running as (
             order by occurred_at, event_key
             rows between unbounded preceding and current row
         ) as running_net_minor,
+        {%- if thresholds %}
         case currency
             {%- for code, minor in thresholds.items() %}
             when '{{ code }}' then {{ minor | int }}
             {%- endfor %}
-        end as vip_threshold_minor
+        end
+        {%- else %}
+        -- No thresholds configured: nobody is VIP.
+        cast(null as bigint)
+        {%- endif %} as vip_threshold_minor
     from movements
 ),
 
@@ -67,9 +72,17 @@ tiered as (
     from counted
 ),
 
-changes as (
+instants as (
+    -- Movements at the same instant are one change: keep the state after the last of them,
+    -- so no version opens and closes at the same timestamp.
     select *
     from tiered
+    qualify row_number() over (partition by customer_id, occurred_at order by event_key desc) = 1
+),
+
+changes as (
+    select *
+    from instants
     qualify lag(tier) over (partition by customer_id order by occurred_at, event_key) is distinct from tier
 ),
 

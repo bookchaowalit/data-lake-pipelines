@@ -14,7 +14,7 @@ models:
           - not_null
           - accepted_values:
               arguments:
-                values: [missing_id, invalid_amount, invalid_currency, invalid_time, orphan_refund, currency_mismatch]
+                values: [missing_id, invalid_amount, invalid_currency, invalid_time, orphan_refund, currency_mismatch, workspace_mismatch]
 
   - name: int_sales_payments
     description: Valid payments, one row per intent_id.

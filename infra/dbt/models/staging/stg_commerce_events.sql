@@ -40,8 +40,12 @@ envelopes as (
         nullif(trim(json_extract_string(payload_json, '$.data.workspace_id')), '') as workspace_id,
         nullif(trim(json_extract_string(payload_json, '$.data.intent_id')), '') as intent_id,
         nullif(trim(json_extract_string(payload_json, '$.data.refund_id')), '') as refund_id,
-        -- Minor units must be whole numbers: "12.5" or a string fails the cast and is rejected later.
-        try_cast(json_extract(payload_json, '$.data.amount') as bigint) as amount_minor,
+        -- Minor units must be a JSON integer. DuckDB's JSON cast would turn 12.5 into 12, true
+        -- into 1 and "12" into 12, so check the JSON type first; anything else is null and rejected.
+        case
+            when json_type(payload_json, '$.data.amount') in ('BIGINT', 'UBIGINT')
+                then try_cast(json_extract(payload_json, '$.data.amount') as bigint)
+        end as amount_minor,
         upper(trim(json_extract_string(payload_json, '$.data.currency'))) as currency,
         json_extract_string(payload_json, '$.data.provider') as provider,
         privacy_class,

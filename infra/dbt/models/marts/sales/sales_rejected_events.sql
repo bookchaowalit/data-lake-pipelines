@@ -16,10 +16,12 @@ with checked as (
 ),
 
 valid_payments as (
-    select intent_id, any_value(currency) as currency
+    -- The payment int_sales_payments keeps (same ordering), so a refund is checked against the
+    -- payment it will be subtracted from.
+    select intent_id, currency, workspace_id
     from checked
     where event_type = 'payment.intent.succeeded' and field_reject_reason is null
-    group by intent_id
+    qualify row_number() over (partition by intent_id order by occurred_at, received_at, event_key) = 1
 ),
 
 reasons as (
@@ -32,10 +34,12 @@ reasons as (
                     then 'orphan_refund'
                 when event_type = 'payment.refund.succeeded' and valid_payments.currency <> checked.currency
                     then 'currency_mismatch'
+                when event_type = 'payment.refund.succeeded' and valid_payments.workspace_id <> checked.workspace_id
+                    then 'workspace_mismatch'
             end
         ) as reject_reason
     from checked
-    left join valid_payments using (intent_id)
+    left join valid_payments on valid_payments.intent_id = checked.intent_id
 )
 
 select

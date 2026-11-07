@@ -1,6 +1,6 @@
 # Spec: sales marts (fact_sales, dim_customer SCD2, sales_daily_revenue)
 
-Status: proposed (2026-11-07). Standard: ADR-0004 (spec, then failing test, then code).
+Status: proposed (2026-11-07; review fixes same day). Standard: ADR-0004 (spec, then failing test, then code).
 Code: `infra/dbt/models/staging/stg_commerce_events.sql`, `infra/dbt/models/marts/sales/`.
 Tests: `infra/dbt/tests/sales_marts_quality.sql`, `infra/tests/data_lake/dbt_lake_test.py`
 (`check_sales_outputs`). Platform rules: ADR-0013 (one R2 lake, DuckDB + dbt, no warehouse).
@@ -38,9 +38,12 @@ data is read; envelopes carry reference ids only.
    same `refund_id`, also counts once.
 2. **Validation.** A payment or refund is rejected when `intent_id` (or `refund_id` for
    refunds) or `workspace_id` is missing, `amount` is not a positive integer, `currency` is not
-   three letters, or `occurred_at` does not parse. A refund is also rejected as `orphan_refund`
-   when no valid payment has its `intent_id`, or as `currency_mismatch` when its currency differs
-   from the payment's. Rejects go to `sales_rejected_events` with a `reject_reason`. They are
+   three letters, or `occurred_at` does not parse. `amount` must be a JSON integer: `12.5`, `"1200"`
+   and `true` are rejected, not rounded or coerced. A refund is also rejected as `orphan_refund`
+   when no valid payment has its `intent_id`, as `currency_mismatch` when its currency differs
+   from the payment's, or as `workspace_mismatch` when its workspace differs. It is checked
+   against the payment that is kept (the earliest valid success of that intent), never another
+   duplicate. Rejects go to `sales_rejected_events` with a `reject_reason`. They are
    never silently dropped.
 3. **Business date.** `sale_date` / `refund_date` is the `occurred_at` date in
    `var('sales_timezone')` (default `Asia/Bangkok`), not UTC and not the arrival date.
@@ -57,10 +60,13 @@ data is read; envelopes carry reference ids only.
 6. **dim_customer (SCD Type 2)**: `tier` is `vip` while the customer's running net revenue in a
    currency is at or above that currency's threshold in `var('sales_vip_threshold_minor')`
    (default THB 10,000,000 = 100,000 baht; USD 300,000 = 3,000 dollars), otherwise `standard`.
-   A currency without a threshold never makes a customer VIP. Payments raise the running net and
+   A currency without a threshold never makes a customer VIP, and an empty map (`{}`) turns VIP
+   off for everyone. Payments raise the running net and
    refunds lower it, so tier can go up and back down. Each tier change opens a new version:
    `customer_sk` (md5 of `customer_id` and `valid_from`), `customer_id`, `version`, `tier`,
-   `valid_from`, `valid_to` (null on the current row), `is_current`, `first_sale_at`. A
+   `valid_from`, `valid_to` (null on the current row), `is_current`, `first_sale_at`. Movements at
+   the same instant count as one change (the state after all of them), so a version never opens
+   and closes at the same timestamp. A
    customer's versions never overlap and leave no gaps, and exactly one is current. The
    dimension is derived from facts only, so a rebuild from Bronze reproduces it.
 7. **Point-in-time join.** `fact_sales.customer_tier_at_sale` is the version valid at the sale's
