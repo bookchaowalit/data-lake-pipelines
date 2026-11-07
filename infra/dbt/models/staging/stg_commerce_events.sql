@@ -1,5 +1,6 @@
 -- Staging model: one row per ADR-0008 envelope from domain=commerce/dataset=events (the hourly
--- lake sink of commerce.events.v1). Only manifest-committed Bronze parts are eligible.
+-- lake sink of commerce.events.v1). Only manifest-committed Bronze parts are eligible (stream
+-- conversion manifests in production, batch manifests for other writers).
 --
 -- Kafka delivers at least once, so one envelope `id` can land in several batches. The envelope id
 -- is the event's identity; the earliest delivery wins, so received_at is when it first arrived.
@@ -8,8 +9,14 @@
 with committed_manifests as (
     select distinct
         cast(bronze.key as varchar) as bronze_key
+    -- The hourly lake sink (event-sink.yml) commits Bronze through stream_sink.convert_avro_file,
+    -- which writes stream-parquet conversion manifests; batch ingests write source=*/batch_id=*.
+    -- Both kinds carry domain, dataset, schema_version and bronze.key.
     from read_json_auto(
-        '{{ var("bronze_manifest_root") }}/source=*/batch_id=*.json',
+        [
+            '{{ var("bronze_manifest_root") }}/stream-parquet/source=*/conversion_id=*.json',
+            '{{ var("bronze_manifest_root") }}/source=*/batch_id=*.json'
+        ],
         union_by_name = true
     )
     where domain = 'commerce'

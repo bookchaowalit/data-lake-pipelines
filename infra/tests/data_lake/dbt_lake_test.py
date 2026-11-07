@@ -312,14 +312,13 @@ def _envelope(event_id: str, kind: str, occurred_at: str, **data: object) -> dic
 
 
 def build_synthetic_commerce_events(lake_root: Path) -> None:
-    """Fake payment events through the real lake writer (see docs/specs/sales-marts.md).
+    """Fake payment events through the real stream sink + converter (docs/specs/sales-marts.md).
 
     Customer ws-a: 60k + 50k baht -> VIP, then a 30k refund -> standard again.
     The 50k sale is delivered twice. Customer ws-b: a USD sale that arrives 3 days late.
     Three bad events (zero amount, missing intent_id, refund of an unknown intent).
     """
-    import data_lake.ingest as ingest_module
-    from data_lake.ingest import ingest_records
+    from data_lake.stream_sink import StreamMessage, convert_avro_file, sink_messages
 
     s1 = _envelope("payment.intent.succeeded:s1", "payment.intent.succeeded", "2026-11-01T03:00:00Z",
                    workspace_id="ws-a", intent_id="s1", amount=6_000_000, currency="THB", provider="stripe")
@@ -355,7 +354,9 @@ def build_synthetic_commerce_events(lake_root: Path) -> None:
                                 workspace_id="ws-b", intent_id="s1", refund_id="r3", amount=100, currency="THB")
     other = _envelope("platform.noise:1", "commerce.cart.viewed", "2026-11-02T07:00:00Z", workspace_id="ws-a")
 
-    # Bronze received_at is the lake writer's clock, so each batch lands at its own fake time.
+    # Through the production path: the lake sink lands each Kafka micro-batch as Avro, then the
+    # converter writes Bronze Parquet + a stream-parquet conversion manifest (event-sink.yml).
+    # received_at is the sink's clock, so each batch lands at its own fake time.
     batches = [
         ("2026-11-01T04:00:00Z", [s1]),
         ("2026-11-01T19:00:00Z", [s2]),
@@ -370,22 +371,21 @@ def build_synthetic_commerce_events(lake_root: Path) -> None:
         ("2026-11-05T03:10:00Z", [c1, c2, bad_fraction, bad_string]),
         ("2026-11-05T03:20:00Z", [usd_refund, other_ws_refund]),
     ]
-    original_clock = ingest_module.utc_now
-    try:
-        for at, batch in batches:
-            ingest_module.utc_now = lambda at=at: at
-            ingest_records(
-                batch,
-                source="aiven-kafka",
-                domain="commerce",
-                dataset="events",
-                data_lake_uri=str(lake_root),
-                source_record_id_field="id",
-                event_time_field="occurred_at",
-                metadata={"adapter": "dbt_lake_test", "contract": "envelope-1.0.0"},
-            )
-    finally:
-        ingest_module.utc_now = original_clock
+    offset = 0
+    for at, batch in batches:
+        messages = []
+        for envelope in batch:
+            messages.append(StreamMessage(topic="commerce.events.v1", partition=0, offset=offset, value=envelope))
+            offset += 1
+        landed = sink_messages(
+            messages,
+            data_lake_uri=str(lake_root),
+            source="aiven-kafka",
+            domain="commerce",
+            dataset="events",
+            received_at=at,
+        )
+        convert_avro_file(data_lake_uri=str(lake_root), avro_key=landed["avro_key"])
 
 
 def check_sales_outputs() -> list[str]:

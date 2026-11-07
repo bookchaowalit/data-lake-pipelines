@@ -18,7 +18,11 @@ day was reported, and malformed events.
 
 ## Source contract
 
-Bronze rows from `domain=commerce/dataset=events`, manifest-committed parts only. `payload_json`
+Bronze rows from `domain=commerce/dataset=events`, manifest-committed parts only. In production
+the lake sink commits them through `stream_sink.convert_avro_file`, whose manifests live under
+`control/manifests/stream-parquet/source=*/conversion_id=*.json`; batch manifests
+(`control/manifests/source=*/batch_id=*.json`) are read too. The test fixture lands its events
+through the same sink and converter. `payload_json`
 is an ADR-0008 envelope: `id`, `type`, `version`, `occurred_at`, `producer`, `data`.
 `received_at` is when the lake sink landed it.
 
