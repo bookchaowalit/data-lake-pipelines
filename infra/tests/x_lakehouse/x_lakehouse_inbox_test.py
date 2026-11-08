@@ -420,6 +420,28 @@ class InboxPostgresTests(unittest.TestCase):
             self.run_scheduled()
         self.assertEqual(seen, [False])
 
+    def test_a_retried_config_file_does_not_roll_back_a_later_run(self):
+        qp = {"query_id": "Q1", "query": "duckdb", "last_since_id": "100"}
+        self.ingest("x_query_plan", [qp], run_id="runA")
+        self.ingest("x_query_plan", [qp | {"last_since_id": "200"}], run_id="runB")
+        retry = self.ingest("x_query_plan", [qp], run_id="runA")
+        self.assertEqual((retry["inserted"], retry["skipped"]), (0, 1))
+        self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("200",)])
+        self.assertEqual(self.q("select row ->> 'last_since_id' from x_intel.ingest_inbox"), [("200",)])
+        # A changed payload within one run still applies (run-state written twice in a run).
+        self.ingest("x_query_plan", [qp | {"last_since_id": "300"}], run_id="runB")
+        self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("300",)])
+
+    def test_a_raw_key_resent_with_other_values_is_refused_not_half_applied(self):
+        self.ingest("x_signals", [signal_row("5", category="news")])
+        out = self.ingest("x_signals", [signal_row("5", category="opinion")])
+        self.assertEqual(out["errors"][0]["error"], "key already stored with different values; send a new version")
+        self.assertEqual(self.ingest("x_signals", [signal_row("5", category="news")])["skipped"], 1)  # retry
+        inbox.drain(self.conn, store=self.store, prefix="", now=NOW)
+        self.assertEqual(self.q("select category from x_intel.x_signals"), [("news",)])
+        later = self.ingest("x_signals", [signal_row("5", "2026-11-13 09:00", category="opinion")])
+        self.assertEqual(later["upserted"]["updated"], 1)  # a new version is how a correction arrives
+
     # -- T4 --------------------------------------------------------------------------------------
     def test_t4_inbox_drain_writes_raw_and_curated_once_and_validates(self):
         self.ingest("x_feed", [feed_row("1"), feed_row("2")])
@@ -546,6 +568,7 @@ class InboxPostgresTests(unittest.TestCase):
         for role in ("anon", "authenticated"):
             for sql in ("select x_intel.ingest('x_feed', '[]'::jsonb, 'r1')",
                         "select count(*) from x_intel.ingest_inbox",
+                        "select count(*) from x_intel.ingest_deliveries",
                         "select count(*) from x_intel.v_query_plan_sheet",
                         "select x_intel._ingest_upsert_claims('[]'::jsonb, 'b')"):
                 with self.conn.cursor() as c:

@@ -52,6 +52,7 @@ INBOX = f"{S}.ingest_inbox"
 DRAIN_LOCK = 0x786C616B65  # "xlake": pg_try_advisory_lock key held by the one drainer
 CONFIG_LOCK = 0x786C616B6563  # "xlakec": transaction lock serialising config ingest() with the replay
 KEEP_DRAINED = timedelta(days=3)
+KEEP_DELIVERIES = timedelta(days=30)  # longer than any bot retry
 # Datasets whose stored inbox row is replaced by a newer version of the same key (no raw history:
 # the drain must apply the latest edit, not the first one).
 REPLACEABLE = tuple(n for n, d in DATASETS.items() if not d.raw)
@@ -194,6 +195,15 @@ create table if not exists {INBOX} (
     drained_at timestamptz,
     unique (dataset, row_key)
 );
+-- Config deliveries already applied: a retried file from an earlier run must not replace a later edit.
+create table if not exists {S}.ingest_deliveries (
+    dataset text not null,
+    row_key text not null,
+    run_id text not null,
+    payload_md5 text not null,
+    received_at timestamptz not null default now(),
+    primary key (dataset, row_key, run_id, payload_md5)
+);
 create index if not exists ingest_inbox_undrained_idx on {INBOX} (id) where drained_at is null;
 create index if not exists ingest_inbox_drained_at_idx on {INBOX} (drained_at) where drained_at is not null;
 create index if not exists ingest_inbox_run_idx on {INBOX} (run_id, dataset);
@@ -323,18 +333,36 @@ begin
     end if;
     rk := row_key(p_dataset, keys, r);
     if p_dataset = any({_arr(REPLACEABLE)}) then
+      -- The same delivery again (a retried file): skip it, even if a later run changed the row since.
+      insert into ingest_deliveries (dataset, row_key, run_id, payload_md5)
+      values (p_dataset, rk, p_run_id, md5(r::text)) on conflict do nothing;
+      get diagnostics n = row_count;
+      if n = 0 then skipped := skipped + 1; continue; end if;
       insert into ingest_inbox as t (dataset, run_id, row, row_key) values (p_dataset, p_run_id, r, rk)
       on conflict (dataset, row_key) do update
         set row = excluded.row, run_id = excluded.run_id, received_at = clock_timestamp(),
             drained_batch_id = null, drained_at = null
         where t.row is distinct from excluded.row;
+      get diagnostics n = row_count;
+      if n > 0 then ins := ins + 1; else skipped := skipped + 1; end if;
+      good := good || jsonb_build_array(r);
     else
       insert into ingest_inbox (dataset, run_id, row, row_key) values (p_dataset, p_run_id, r, rk)
       on conflict (dataset, row_key) do nothing;
+      get diagnostics n = row_count;
+      if n > 0 then
+        ins := ins + 1;
+        good := good || jsonb_build_array(r);  -- only new rows reach the curated upsert
+      elsif exists (select 1 from ingest_inbox x where x.dataset = p_dataset and x.row_key = rk
+                    and x.row is distinct from r) then
+        -- Raw keeps the first version of a key; applying the changed values to curated only would be
+        -- rolled back by the drain. A correction must come as a new version (e.g. a new collected_at).
+        errors := errors || jsonb_build_object('row', i, 'error',
+          'key already stored with different values; send a new version');
+      else
+        skipped := skipped + 1;
+      end if;
     end if;
-    get diagnostics n = row_count;
-    if n > 0 then ins := ins + 1; else skipped := skipped + 1; end if;
-    good := good || jsonb_build_array(r);
   end loop;
   case p_dataset
 {upserts}
@@ -378,7 +406,7 @@ def _views() -> str:
 def _grants() -> str:
     """EXECUTE / SELECT for the connector role ``postgres`` only; nothing for anon or authenticated."""
     fns = [f"{S}.ingest(text, jsonb, text)"]
-    rels = [INBOX, f"{S}.v_query_plan_sheet", f"{S}.v_watchlist_sheet", f"{S}.v_claims_open"]
+    rels = [INBOX, f"{S}.ingest_deliveries", f"{S}.v_query_plan_sheet", f"{S}.v_watchlist_sheet", f"{S}.v_claims_open"]
     revoke = "\n".join(
         f"  if exists (select 1 from pg_roles where rolname = {_lit(role)}) then\n"
         + "".join(f"    revoke all on function {f} from {role};\n" for f in fns)
@@ -387,7 +415,7 @@ def _grants() -> str:
     grant = ("  if exists (select 1 from pg_roles where rolname = 'postgres') and current_user <> 'postgres' then\n"
              f"    grant usage on schema {S} to postgres;\n"  # do not rely on postgres being a member of x_lake
              + "".join(f"    grant execute on function {f} to postgres;\n" for f in fns)
-             + "".join(f"    grant select on {r} to postgres;\n" for r in rels[1:])
+             + "".join(f"    grant select on {r} to postgres;\n" for r in rels[2:])
              + "  end if;")
     return f"do $$ begin\n{revoke}\n{grant}\nend $$;\n"
 
@@ -532,6 +560,7 @@ def prune(conn: Any, now: datetime | None = None) -> int:
     with conn.cursor() as c:
         c.execute(f"delete from {INBOX} where drained_at < %s", (now - KEEP_DRAINED,))
         n = c.rowcount
+        c.execute(f"delete from {S}.ingest_deliveries where received_at < %s", (now - KEEP_DELIVERIES,))
     conn.commit()
     return n
 

@@ -401,6 +401,10 @@ tabs (copy first), build the 180-day x_signals retention job before ~month 9.
    keyed on `last_checked` precisely so every new version is kept.
 9. **Untrusted text.** `text`, `ref_text` and `claim` are X content. Keep them as data; never render
    them unescaped in a web view.
+    Inbox: a raw key resent with different values while the first version is still in the inbox
+    (3 days after its drain) is refused with "send a new version"; after that it behaves like a
+    Sheet edit. A retried config file (same run, same payload) is skipped, so it cannot roll back a
+    later run's query-plan cursor (`x_intel.ingest_deliveries`, kept 30 days).
 10. **Sheet row numbers in config.** `x_query_plan.watchlist_rows` and
     `x_account_snapshots.watchlist_row` point at X Watchlist *Sheet row numbers*. Postgres has no
     row number, so once the watchlist is edited in Postgres (Phase 2) those references need a stable
