@@ -30,6 +30,36 @@ def ensure_schema(conn: Any) -> None:
     conn.commit()
 
 
+def is_protected_value(curated: Curated, value: Any) -> bool:
+    return bool(curated.protect) and str(value or "").strip().lower() == curated.protect[1]  # type: ignore[index]
+
+
+def protected_pks(curated: Curated, pairs: list[tuple[tuple[Any, ...], Any]]) -> set[tuple[Any, ...]]:
+    """Primary keys with at least one protected (pk, guard value) pair."""
+    return {pk for pk, g in pairs if is_protected_value(curated, g)} if curated.protect else set()
+
+
+def stored_protected(conn: Any, curated: Curated) -> set[tuple[Any, ...]]:
+    if not curated.protect:
+        return set()
+    col, val = curated.protect
+    with conn.cursor() as c:
+        c.execute(f"select {', '.join(curated.pk)} from {PG_SCHEMA}.{curated.table} "
+                  f"where lower(coalesce({col}, '')) = %s", (val,))
+        return {tuple(r) for r in c.fetchall()}
+
+
+def eligible(curated: Curated, rows: list[TypedRow], stored: set[tuple[Any, ...]] = frozenset()) -> list[TypedRow]:  # type: ignore[assignment]
+    """Drop rows that may not replace a protected claim, BEFORE picking each key's newest row: once
+    Book checked a claim (stored, or any row of this batch), only Book's rows are candidates."""
+    if not curated.protect:
+        return rows
+    col = curated.protect[0]
+    pk_of = [tuple(r.values.get(k) for k in curated.pk) for r in rows]
+    prot = set(stored) | protected_pks(curated, [(pk, r.values.get(col)) for pk, r in zip(pk_of, rows)])
+    return [r for pk, r in zip(pk_of, rows) if pk not in prot or is_protected_value(curated, r.values.get(col))]
+
+
 def dedupe_latest(curated: Curated, rows: list[TypedRow]) -> list[TypedRow]:
     """One row per primary key: the highest ``version`` wins, then the later Sheet row / list position."""
     out: dict[tuple[Any, ...], TypedRow] = {}
@@ -104,4 +134,5 @@ def count(conn: Any, table: str) -> int:
         return int(cur.fetchone()[0])
 
 
-__all__ = ["CURATED", "connect", "count", "dedupe_latest", "ensure_schema", "join_feed", "upsert"]
+__all__ = ["CURATED", "connect", "count", "dedupe_latest", "eligible", "ensure_schema", "is_protected_value",
+           "join_feed", "protected_pks", "stored_protected", "upsert"]

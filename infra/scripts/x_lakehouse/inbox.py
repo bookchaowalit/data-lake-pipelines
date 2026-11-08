@@ -227,6 +227,17 @@ def _upsert_fn(c: Curated) -> str:
         guard += (f" and not (lower(coalesce(t.{col}, '')) = {_lit(val)}"
                   f" and lower(coalesce(excluded.{col}, '')) <> {_lit(val)})")
     col_list = ", ".join(cols)
+    elig = ""
+    if c.protect:
+        # Mirrors curated.eligible: once Book checked the claim (stored or in this call), only Book's
+        # rows are candidates, so a later bot row cannot hide an earlier Book row of the same call.
+        col, val = c.protect
+        on = " and ".join(f"s.{k} = src.{k}" for k in c.pk)
+        same = " and ".join(f"o.{k} = src.{k}" for k in c.pk)
+        mine = f"lower(coalesce(src.{col}, '')) = {_lit(val)}"
+        elig = (f", elig as (\n    select src.* from src left join {S}.{c.table} s on {on}\n"
+                f"    where {mine} or not (lower(coalesce(s.{col}, '')) = {_lit(val)}"
+                f" or exists (select 1 from src o where {same} and lower(coalesce(o.{col}, '')) = {_lit(val)}))\n  )")
     return f"""
 create or replace function {S}._ingest_upsert_{c.table}(p_rows jsonb, p_batch text) returns jsonb
 language plpgsql security definer set search_path = pg_catalog, {S} as $f$
@@ -235,8 +246,8 @@ begin
   with src as (
     select r.ord, {', '.join(src)}
     from jsonb_array_elements(p_rows) with ordinality r(j, ord){feed}
-  ), latest as (
-    select distinct on ({', '.join(c.pk)}) * from src
+  ){elig}, latest as (
+    select distinct on ({', '.join(c.pk)}) * from {'elig' if c.protect else 'src'}
     where {' and '.join(f'{k} is not null' for k in c.pk)}
     order by {order}
   ), up as (
@@ -411,28 +422,48 @@ def undrained(conn: Any) -> list[tuple[int, str, dict[str, Any], datetime]]:
 
 
 def drain(conn: Any, *, store: Any, prefix: str, cfg: Any = None, now: datetime | None = None) -> dict[str, Any]:
-    """Undrained inbox rows -> append_rows (R2 raw + curated) -> mark drained. Counts only in the result."""
+    """Undrained inbox rows -> append_rows (R2 raw + curated) -> mark drained. Counts only in the result.
+
+    Config datasets (no raw) are NOT upserted again: ingest() already applied them, and re-applying a
+    snapshot read here could roll back an edit a bot made while the drain ran. They are only typed;
+    a config row with a coercion error stays undrained (never pruned) and is reported until a
+    corrected row replaces it.
+    """
     from .append import append_rows
+    from .coerce import type_row
 
     now = now or datetime.now(timezone.utc)
     pending = undrained(conn)
     if not pending:
-        return {"rows": 0, "datasets": {}, "batch_id": None}
+        return {"rows": 0, "marked": 0, "datasets": {}, "batch_id": None, "config_coerce_errors": {}}
     by_ds: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for _, ds, row, _ in pending:
-        by_ds[ds].append(row)
-    report = append_rows(dict(by_ds), cfg=cfg, store=store, prefix=prefix, conn=conn, now=now)
+    done: list[tuple[int, datetime]] = []
+    config_errors: dict[str, int] = defaultdict(int)
+    for rid, ds, row, ra in pending:
+        if DATASETS[ds].raw:
+            by_ds[ds].append(row)
+            done.append((rid, ra))
+        elif type_row(DATASETS[ds], row).errors:
+            config_errors[ds] += 1
+        else:
+            done.append((rid, ra))
+    report: dict[str, Any] = {"batch_id": f"drain-{now:%Y%m%dT%H%M%SZ}", "raw": {}, "curated": {}, "coerce_errors": {}}
+    if by_ds:
+        report = append_rows(dict(by_ds), cfg=cfg, store=store, prefix=prefix, conn=conn, now=now)
     with conn.cursor() as c:
         # Matching received_at too: a config row replaced after it was read stays undrained.
         c.execute(f"update {INBOX} i set drained_batch_id = %s, drained_at = %s "
                   "from unnest(%s::bigint[], %s::timestamptz[]) u(id, ra) "
                   "where i.id = u.id and i.received_at = u.ra and i.drained_at is null",
-                  (report["batch_id"], now, [p[0] for p in pending], [p[3] for p in pending]))
+                  (report["batch_id"], now, [d[0] for d in done], [d[1] for d in done]))
         marked = c.rowcount
     conn.commit()
-    return {"rows": len(pending), "marked": marked, "batch_id": report["batch_id"],
-            "datasets": {n: len(r) for n, r in by_ds.items()}, "raw": report["raw"],
-            "curated": report["curated"], "coerce_errors": report["coerce_errors"]}
+    counts: dict[str, int] = defaultdict(int)
+    for _, ds, _, _ in pending:
+        counts[ds] += 1
+    return {"rows": len(pending), "expected": len(done), "marked": marked, "batch_id": report["batch_id"],
+            "datasets": dict(counts), "raw": report["raw"], "curated": report["curated"],
+            "coerce_errors": report["coerce_errors"], "config_coerce_errors": dict(config_errors)}
 
 
 def landed(conn: Any, store: Any, prefix: str, since: datetime) -> dict[str, int]:

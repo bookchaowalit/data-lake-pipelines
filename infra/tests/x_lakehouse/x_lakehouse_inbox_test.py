@@ -271,6 +271,56 @@ class InboxPostgresTests(unittest.TestCase):
         view = self.q("select query_id, last_since_id, runs, last_run_at from x_intel.v_query_plan_sheet")
         self.assertEqual(view, [("Q1", "200", "2", "")])
 
+    # -- review fixes (Codex, 2026-11-08) -------------------------------------------------------
+    def test_book_update_in_a_batch_wins_over_a_later_bot_row_sql_and_python(self):
+        self.ingest("claims", [claim_row("CL-5", "2026-11-13 08:00", checked_by="book", verification_status="a")])
+        out = self.ingest("claims", [claim_row("CL-5", "2026-11-13 10:00", checked_by="book", verification_status="b"),
+                                     claim_row("CL-5", "2026-11-13 12:00", checked_by="rule", verification_status="c")])
+        self.assertEqual(out["upserted"]["updated"], 1)
+        self.assertEqual(self.q("select verification_status from x_intel.claims"), [("b",)])
+        # No stored row: a Book row in the batch still beats a later bot row (order-independent).
+        self.ingest("claims", [claim_row("CL-6", "2026-11-13 12:00", checked_by="rule", verification_status="c"),
+                               claim_row("CL-6", "2026-11-13 10:00", checked_by="book", verification_status="b")])
+        self.assertEqual(self.q("select verification_status from x_intel.claims where claim_id = 'CL-6'"), [("b",)])
+        # The Python path (drain / Sheet backfill) picks the same winner.
+        self.q("update x_intel.claims set verification_status = 'a', last_checked = '2026-11-13 01:00+00' returning 1")
+        inbox.drain(self.conn, store=self.store, prefix="", now=NOW)
+        self.assertEqual(self.q("select claim_id, verification_status from x_intel.claims order by 1"),
+                         [("CL-5", "b"), ("CL-6", "b")])
+
+    def test_validate_flags_a_missed_book_update_behind_a_later_bot_version(self):
+        from x_lakehouse.lake import write_raw
+        self.ingest("claims", [claim_row("CL-7", "2026-11-13 08:00", checked_by="book")])
+        rows = [type_row(DATASETS["claims"], claim_row("CL-7", t, checked_by=g))
+                for t, g in (("2026-11-13 10:00", "book"), ("2026-11-13 12:00", "rule"))]
+        write_raw(DATASETS["claims"], rows, [r.values["last_checked"] for r in rows], store=self.store, prefix="",
+                  source="append", execute=True, run_date=NOW.date(), now=NOW)  # Book's upsert "failed"
+        cfg = type("C", (), {"db_url": DB})()
+        with patch.object(validate, "open_store", return_value=(self.store, "")):
+            r = validate.reconcile(cfg, ["claims"], None, None, sheet=False)["datasets"]["claims"]
+        self.assertEqual((r["postgres_stale_versions"], r["postgres_protected_held"], r["ok"]), (1, 1, False))
+
+    def test_drain_never_rolls_back_a_config_edit_made_while_it_ran(self):
+        qp = {"query_id": "Q1", "query": "duckdb", "last_since_id": "100"}
+        self.ingest("x_query_plan", [qp])
+        snapshot = inbox.undrained(self.conn)  # the drain read v1 ...
+        self.ingest("x_query_plan", [qp | {"last_since_id": "200"}])  # ... then a bot wrote v2
+        with patch.object(inbox, "undrained", return_value=snapshot):
+            rep = inbox.drain(self.conn, store=self.store, prefix="", now=NOW)
+        self.assertEqual(rep["marked"], 0)  # v1 no longer exists, v2 stays undrained
+        self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("200",)])
+        self.assertEqual(self.q("select count(*) from x_intel.ingest_inbox where drained_at is null")[0][0], 1)
+
+    def test_config_coercion_error_fails_the_run_and_keeps_the_row(self):
+        self.ingest("x_query_plan", [{"query_id": "Q1", "query": "duckdb", "runs": "oops"}])
+        code, beats, ev = self.run_scheduled()
+        self.assertEqual((code, beats), (1, [False]))
+        self.assertEqual(ev["drain"]["config_coerce_errors"], {"x_query_plan": 1})
+        self.assertNotIn("prune", ev)
+        self.assertEqual(self.q("select count(*) from x_intel.ingest_inbox where drained_at is null")[0][0], 1)
+        self.ingest("x_query_plan", [{"query_id": "Q1", "query": "duckdb", "runs": 3}])  # corrected row
+        self.assertEqual(self.run_scheduled()[0], 0)
+
     # -- T4 --------------------------------------------------------------------------------------
     def test_t4_inbox_drain_writes_raw_and_curated_once_and_validates(self):
         self.ingest("x_feed", [feed_row("1"), feed_row("2")])

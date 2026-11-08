@@ -129,7 +129,8 @@ def run(typed: dict[str, list[TypedRow]], *, store: Store | None, prefix: str, c
         if name not in CURATED:
             continue
         c = CURATED[name]
-        latest = cur.dedupe_latest(c, rows)
+        stored = cur.stored_protected(conn, c) if execute and conn is not None else set()
+        latest = cur.dedupe_latest(c, cur.eligible(c, rows, stored))
         records = cur.join_feed(latest, feed, c) if c.joined else [dict(r.values) for r in latest]
         if execute and conn is not None:
             result.curated[name] = cur.upsert(conn, c, records, batch_id)

@@ -151,8 +151,11 @@ def _run_inbox(cfg: Config) -> int:
         drained = inbox.drain(lock, store=store, prefix=prefix, cfg=cfg, now=started)
         _log(event="drain", source=source, rows=drained["rows"], marked=drained.get("marked", 0),
              datasets=drained["datasets"], coerce_errors=drained.get("coerce_errors", {}),
-             raw={n: r["written"] for n, r in drained.get("raw", {}).items()}, curated=drained.get("curated", {}))
-        ok = drained.get("marked", 0) == drained["rows"]
+             raw={n: r["written"] for n, r in drained.get("raw", {}).items()}, curated=drained.get("curated", {}),
+             config_coerce_errors=drained.get("config_coerce_errors", {}))
+        # Every accepted row marked, and no config row held back for a coercion error (those stay in
+        # the inbox and fail each run until a corrected row replaces them).
+        ok = drained.get("marked", 0) == drained.get("expected", 0) and not drained.get("config_coerce_errors")
         since = (started.astimezone(TZ) - timedelta(days=1)).date()
         if source == "both":
             code, summary = _backfill()

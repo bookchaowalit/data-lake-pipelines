@@ -60,7 +60,10 @@ X Feed / 317 context / 20 trends TH / 174 signals rows, validate ok; Railway one
    is left out of the duplicate-`post_id` checks.
 8. **Claims Book checked are protected:** a stored claim with `checked_by = 'book'` is replaced only
    by a row that also says `book` (`Curated.protect`, in both the Python upsert and `ingest()`).
-   `validate` does not count such a held-back row as stale (`postgres_protected_held`). On 2026-11-08
+   Once Book checked a claim (stored, or any row of the batch), only Book's rows are candidates
+   when a batch's newest row is picked, so a later bot row cannot hide Book's update. `validate`
+   compares Postgres with the newest *eligible* version and reports skipped bot versions as
+   `postgres_protected_held`. On 2026-11-08
    all 20 claims had `checked_by = 'rule'`, so the parallel run is unaffected.
 
 ## 1. Context
@@ -344,7 +347,10 @@ run is not a FAIL, but the owner decides whether day 2 counts.
    `x_intel.v_query_plan_sheet`, `x_intel.v_watchlist_sheet` (Sheet column order, Sheet cell format)
    and `x_intel.v_claims_open`; config edits go through `ingest('x_query_plan' | 'x_watchlist', …)`.
 2. `X_LAKE_SOURCE=inbox`: drain, validate raw vs Postgres, and check every drained row reached R2
-   (`drained_missing_from_raw`). After an ok run, inbox rows drained more than 3 days ago are deleted.
+   (`drained_missing_from_raw`). Config rows (query plan, watchlist, taxonomy) are applied by
+   `ingest()` only; the drain types them but never re-upserts a snapshot (that could roll back an
+   edit made during the drain). A config row with a coercion error stays in the inbox and fails
+   every run (`config_coerce_errors`) until a corrected row replaces it. After an ok run, inbox rows drained more than 3 days ago are deleted.
 3. `X_LAKE_SERVE=execute`: "Serve · X Signals 7d", "Serve · Open Claims", "Serve · X Query Plan".
 4. The old X tabs stay in the Sheet, frozen. Nothing is deleted.
 

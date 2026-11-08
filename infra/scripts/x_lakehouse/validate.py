@@ -101,29 +101,31 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 rep["postgres_missing_sample"] = [list(k) for k in pg_missing[:5]]
                 if c.version:
                     # A newer version can reach raw while its upsert fails: the key exists, the row is stale.
-                    newest: dict[tuple[Any, ...], Any] = {}
-                    newest_guard: dict[tuple[Any, ...], Any] = {}
                     gcol = c.protect[0] if c.protect else c.version
                     pairs = [(tuple(r.values.get(k) for k in c.pk), r.values.get(c.version), r.values.get(gcol))
                              for r in rows]
                     if ds.raw and tbl is not None:
                         pairs += list(zip(zip(*(tbl.column(k).to_pylist() for k in c.pk)),
                                           tbl.column(c.version).to_pylist(), tbl.column(gcol).to_pylist()))
-                    for pk, v, g in pairs:
-                        if v is not None and all(x is not None for x in pk) and (pk not in newest or v > newest[pk]):
-                            newest[pk] = v
-                            newest_guard[pk] = g
+                    pairs = [(pk, v, g) for pk, v, g in pairs if v is not None and all(x is not None for x in pk)]
                     with conn.cursor() as q:
                         q.execute(f"select {', '.join(c.pk)}, {gcol}, {c.version} from {PG_SCHEMA}.{n}")
                         stored_rows = [(tuple(row[:-2]), row[-2], row[-1]) for row in q.fetchall()]
                     stored_v = {pk: v for pk, _, v in stored_rows}
-                    # A protected row (claims Book checked) is meant to stay behind a bot's newer version.
-                    held = ({pk for pk, g, _ in stored_rows if str(g or "").lower() == c.protect[1]
-                             and str(newest_guard.get(pk) or "").lower() != c.protect[1]}
-                            if c.protect else set())
+                    # Protected claims: once Book checked a claim (stored or any version), only Book's
+                    # versions are eligible; the newest eligible one is what Postgres must hold.
+                    prot = cur.protected_pks(c, [(pk, g) for pk, g, _ in stored_rows] + [(pk, g) for pk, _, g in pairs])
+                    newest: dict[tuple[Any, ...], Any] = {}
+                    held: set[tuple[Any, ...]] = set()
+                    for pk, v, g in pairs:
+                        if pk in prot and not cur.is_protected_value(c, g):
+                            held.add(pk)
+                            continue
+                        if pk not in newest or v > newest[pk]:
+                            newest[pk] = v
                     stale = sorted(pk for pk, v in newest.items()
-                                   if pk in stored_v and pk not in held and (stored_v[pk] is None or stored_v[pk] < v))
-                    rep["postgres_protected_held"] = len(held & set(newest))
+                                   if pk in stored_v and (stored_v[pk] is None or stored_v[pk] < v))
+                    rep["postgres_protected_held"] = len(held)
                     rep["postgres_stale_versions"] = len(stale)
                     rep["postgres_stale_sample"] = [list(k) for k in stale[:5]]
                 if "post_id" in c.pk:
