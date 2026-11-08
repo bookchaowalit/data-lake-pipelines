@@ -308,7 +308,7 @@ class InboxPostgresTests(unittest.TestCase):
         self.ingest("x_query_plan", [qp | {"last_since_id": "200"}])  # ... then a bot wrote v2
         with patch.object(inbox, "undrained", return_value=snapshot):
             rep = inbox.drain(self.conn, store=self.store, prefix="", now=NOW)
-        self.assertEqual(rep["marked"], 0)  # v1 no longer exists, v2 stays undrained
+        self.assertEqual((rep["marked"], rep["superseded"], rep["unmarked"]), (0, 1, 0))  # v2 stays undrained
         self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("200",)])
         self.assertEqual(self.q("select count(*) from x_intel.ingest_inbox where drained_at is null")[0][0], 1)
 
@@ -390,6 +390,35 @@ class InboxPostgresTests(unittest.TestCase):
             self.assertEqual(self.ingest("x_query_plan", [{"query_id": "Q1", "query": "q"}])["inserted"], 1)
         finally:
             other.close()
+
+    def test_a_config_edit_during_the_drain_does_not_fail_the_run(self):
+        qp = {"query_id": "Q1", "query": "duckdb", "last_since_id": "100"}
+        self.ingest("x_query_plan", [qp])
+        real = inbox.undrained
+
+        def read_then_bot_edits(conn):
+            rows = real(conn)
+            self.ingest("x_query_plan", [qp | {"last_since_id": "200"}])
+            return rows
+
+        with patch.object(inbox, "undrained", read_then_bot_edits):
+            code, beats, ev = self.run_scheduled()
+        self.assertEqual((code, beats, ev["drain"]["superseded"]), (0, [True], 1), ev)
+
+    def test_the_lock_is_held_through_the_serving_refresh(self):
+        seen = []
+
+        def finish(ok, started, cfg):
+            other = cur.connect(DB)
+            try:
+                seen.append(inbox.try_lock(other))
+            finally:
+                other.close()
+            return 0
+
+        with patch.object(scheduled, "_finish", finish):
+            self.run_scheduled()
+        self.assertEqual(seen, [False])
 
     # -- T4 --------------------------------------------------------------------------------------
     def test_t4_inbox_drain_writes_raw_and_curated_once_and_validates(self):

@@ -442,7 +442,8 @@ def drain(conn: Any, *, store: Any, prefix: str, cfg: Any = None, now: datetime 
     now = now or datetime.now(timezone.utc)
     pending = undrained(conn)
     if not pending:
-        return {"rows": 0, "marked": 0, "datasets": {}, "batch_id": None, "config_coerce_errors": {}}
+        return {"rows": 0, "marked": 0, "superseded": 0, "unmarked": 0, "datasets": {}, "batch_id": None,
+                "config_coerce_errors": {}}
     by_ds: dict[str, list[dict[str, Any]]] = defaultdict(list)
     done: list[tuple[int, datetime]] = []
     config_errors: dict[str, int] = defaultdict(int)
@@ -464,11 +465,18 @@ def drain(conn: Any, *, store: Any, prefix: str, cfg: Any = None, now: datetime 
                   "where i.id = u.id and i.received_at = u.ra and i.drained_at is null",
                   (report["batch_id"], now, [d[0] for d in done], [d[1] for d in done]))
         marked = c.rowcount
+        # A config row ingest() replaced while the drain ran is superseded, not lost: its newer
+        # version stays undrained for the next run (the received_at check above skipped it).
+        c.execute(f"select count(*) from {INBOX} i join unnest(%s::bigint[], %s::timestamptz[]) u(id, ra) "
+                  "on i.id = u.id where i.drained_at is null and i.received_at <> u.ra",
+                  ([d[0] for d in done], [d[1] for d in done]))
+        superseded = int(c.fetchone()[0])
     conn.commit()
     counts: dict[str, int] = defaultdict(int)
     for _, ds, _, _ in pending:
         counts[ds] += 1
-    return {"rows": len(pending), "expected": len(done), "marked": marked, "batch_id": report["batch_id"],
+    return {"rows": len(pending), "expected": len(done), "marked": marked, "superseded": superseded,
+            "unmarked": len(done) - marked - superseded, "batch_id": report["batch_id"],
             "datasets": dict(counts), "raw": report["raw"], "curated": report["curated"],
             "coerce_errors": report["coerce_errors"], "config_coerce_errors": dict(config_errors)}
 
