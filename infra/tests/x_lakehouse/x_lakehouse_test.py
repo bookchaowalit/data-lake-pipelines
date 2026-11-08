@@ -34,7 +34,11 @@ from x_lakehouse.schemas import (  # noqa: E402
 from x_lakehouse.pipeline import DatasetCheck  # noqa: E402
 from x_lakehouse.sheet import SheetError, SheetWriter, assert_writable  # noqa: E402
 
-HEADERS = json.loads((ROOT / "infra/tests/fixtures/x_lakehouse_sheet_headers_2026-11-05.json").read_text())["headers"]
+HEADERS = {
+    **json.loads((ROOT / "infra/tests/fixtures/x_lakehouse_sheet_headers_2026-11-05.json").read_text())["headers"],
+    # X Analyses / X Triage Audit joined the lakehouse on 2026-11-08 (headers read that day).
+    **json.loads((ROOT / "infra/tests/fixtures/x_lakehouse_sheet_headers_2026-11-08.json").read_text())["headers"],
+}
 NOW = datetime(2026, 11, 5, 4, 0, tzinfo=timezone.utc)
 
 

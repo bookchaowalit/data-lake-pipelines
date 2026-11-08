@@ -1,0 +1,9 @@
+{
+ "read_at": "2026-11-08T21:57+07:00",
+ "sheet": "Chief Findings Warehouse",
+ "note": "header rows only, read-only scope; the two Monday-report tabs added to the lakehouse on 2026-11-08",
+ "headers": {
+  "X Analyses": ["report_week", "analysis", "rank", "item", "post_id", "link", "topic", "book_domain", "geo", "value", "value_kind", "source_tier", "metric", "note"],
+  "X Triage Audit": ["audit_week", "logged_at", "n", "label_agree", "route_agree", "label_confusions", "route_confusions", "drift_vs_prev", "rule_version", "note"]
+ }
+}

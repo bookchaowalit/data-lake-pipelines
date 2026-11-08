@@ -29,12 +29,22 @@ from . import curated as cur  # noqa: E402
 from .backfill import load  # noqa: E402
 from .config import Config  # noqa: E402
 from .lake import ingest_date, open_store, read_dataset  # noqa: E402
-from .pipeline import feed_index, partition_values, validate_rows  # noqa: E402
+from .pipeline import DatasetCheck, feed_index, partition_values, validate_rows  # noqa: E402
 from .schemas import CURATED, DATASETS, PG_SCHEMA, X_FEED  # noqa: E402
 
 
-def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str | None) -> dict[str, Any]:
-    typed, checks, missing_tabs = load(cfg, names)
+def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str | None, *,
+              sheet: bool = True, preloaded: tuple[Any, Any, list[str]] | None = None) -> dict[str, Any]:
+    """``sheet=False``: raw vs Postgres only (after cutover the Sheet no longer grows).
+    ``preloaded``: the ``backfill.load`` result, to reuse one Sheet read."""
+    if not sheet:
+        typed, checks, missing_tabs = {}, {n: DatasetCheck(n, DATASETS[n].tab) for n in names}, []
+    elif preloaded is not None:
+        typed, checks, missing_tabs = preloaded
+        checks = {n: DatasetCheck(n, DATASETS[n].tab, missing_columns=list(checks[n].missing_columns))
+                  for n in names}  # fresh counters: validate_rows below fills them
+    else:
+        typed, checks, missing_tabs = load(cfg, names)
     store, prefix = open_store(cfg, lake_uri)
     conn = cur.connect(cfg.db_url) if cfg.db_url else None
     feed_ts = {k: v.get("collected_at") for k, v in feed_index(typed.get(X_FEED.name, [])).items()}
@@ -69,7 +79,7 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 missing = [r.sheet_row for r in rows if r.row_key not in raw_keys]
                 rep["sheet_rows_missing_from_raw"] = len(missing)
                 rep["missing_sample_sheet_rows"] = missing[:10]
-                if tbl is not None and "post_id" in ds.kinds and n != "x_post_context":
+                if tbl is not None and "post_id" in ds.kinds and n not in ("x_post_context", "x_analyses"):
                     ids = tbl.column("post_id")
                     rep["raw_duplicate_post_ids"] = len(ids) - ids.null_count - len(pc.unique(ids.drop_null()))
                 if tbl is not None:
@@ -91,19 +101,31 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 rep["postgres_missing_sample"] = [list(k) for k in pg_missing[:5]]
                 if c.version:
                     # A newer version can reach raw while its upsert fails: the key exists, the row is stale.
-                    newest: dict[tuple[Any, ...], Any] = {}
-                    pairs = [(tuple(r.values.get(k) for k in c.pk), r.values.get(c.version)) for r in rows]
+                    gcol = c.protect[0] if c.protect else c.version
+                    pairs = [(tuple(r.values.get(k) for k in c.pk), r.values.get(c.version), r.values.get(gcol))
+                             for r in rows]
                     if ds.raw and tbl is not None:
                         pairs += list(zip(zip(*(tbl.column(k).to_pylist() for k in c.pk)),
-                                          tbl.column(c.version).to_pylist()))
-                    for pk, v in pairs:
-                        if v is not None and all(x is not None for x in pk) and (pk not in newest or v > newest[pk]):
-                            newest[pk] = v
+                                          tbl.column(c.version).to_pylist(), tbl.column(gcol).to_pylist()))
+                    pairs = [(pk, v, g) for pk, v, g in pairs if v is not None and all(x is not None for x in pk)]
                     with conn.cursor() as q:
-                        q.execute(f"select {', '.join(c.pk)}, {c.version} from {PG_SCHEMA}.{n}")
-                        stored_v = {tuple(row[:-1]): row[-1] for row in q.fetchall()}
+                        q.execute(f"select {', '.join(c.pk)}, {gcol}, {c.version} from {PG_SCHEMA}.{n}")
+                        stored_rows = [(tuple(row[:-2]), row[-2], row[-1]) for row in q.fetchall()]
+                    stored_v = {pk: v for pk, _, v in stored_rows}
+                    # Protected claims: once Book checked a claim (stored or any version), only Book's
+                    # versions are eligible; the newest eligible one is what Postgres must hold.
+                    prot = cur.protected_pks(c, [(pk, g) for pk, g, _ in stored_rows] + [(pk, g) for pk, _, g in pairs])
+                    newest: dict[tuple[Any, ...], Any] = {}
+                    held: set[tuple[Any, ...]] = set()
+                    for pk, v, g in pairs:
+                        if pk in prot and not cur.is_protected_value(c, g):
+                            held.add(pk)
+                            continue
+                        if pk not in newest or v > newest[pk]:
+                            newest[pk] = v
                     stale = sorted(pk for pk, v in newest.items()
                                    if pk in stored_v and (stored_v[pk] is None or stored_v[pk] < v))
+                    rep["postgres_protected_held"] = len(held)
                     rep["postgres_stale_versions"] = len(stale)
                     rep["postgres_stale_sample"] = [list(k) for k in stale[:5]]
                 if "post_id" in c.pk:

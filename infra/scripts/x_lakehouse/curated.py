@@ -4,7 +4,8 @@ Each upsert loads the batch into a temp table with COPY, then
 ``INSERT ... SELECT ... ON CONFLICT (pk) DO UPDATE ... WHERE <row changed>`` so reruns are no-ops
 and ``updated_at`` moves only when a value really changed. Tables with a ``version`` column
 (claims: last_checked, x_signals: collected_at) also refuse an update from an older version, so a
-replayed old batch cannot roll a row back. Joined columns use
+replayed old batch cannot roll a row back. A ``protect`` rule (claims: checked_by = 'book') keeps a
+row Book checked unless the incoming row is Book's too. Joined columns use
 ``coalesce(excluded.c, t.c)`` so a batch without the joined row keeps what is stored.
 """
 
@@ -27,6 +28,36 @@ def ensure_schema(conn: Any) -> None:
     with conn.cursor() as cur:
         cur.execute(postgres_ddl())
     conn.commit()
+
+
+def is_protected_value(curated: Curated, value: Any) -> bool:
+    return bool(curated.protect) and str(value or "").strip().lower() == curated.protect[1]  # type: ignore[index]
+
+
+def protected_pks(curated: Curated, pairs: list[tuple[tuple[Any, ...], Any]]) -> set[tuple[Any, ...]]:
+    """Primary keys with at least one protected (pk, guard value) pair."""
+    return {pk for pk, g in pairs if is_protected_value(curated, g)} if curated.protect else set()
+
+
+def stored_protected(conn: Any, curated: Curated) -> set[tuple[Any, ...]]:
+    if not curated.protect:
+        return set()
+    col, val = curated.protect
+    with conn.cursor() as c:
+        c.execute(f"select {', '.join(curated.pk)} from {PG_SCHEMA}.{curated.table} "
+                  f"where lower(coalesce({col}, '')) = %s", (val,))
+        return {tuple(r) for r in c.fetchall()}
+
+
+def eligible(curated: Curated, rows: list[TypedRow], stored: set[tuple[Any, ...]] = frozenset()) -> list[TypedRow]:  # type: ignore[assignment]
+    """Drop rows that may not replace a protected claim, BEFORE picking each key's newest row: once
+    Book checked a claim (stored, or any row of this batch), only Book's rows are candidates."""
+    if not curated.protect:
+        return rows
+    col = curated.protect[0]
+    pk_of = [tuple(r.values.get(k) for k in curated.pk) for r in rows]
+    prot = set(stored) | protected_pks(curated, [(pk, r.values.get(col)) for pk, r in zip(pk_of, rows)])
+    return [r for pk, r in zip(pk_of, rows) if pk not in prot or is_protected_value(curated, r.values.get(col))]
 
 
 def dedupe_latest(curated: Curated, rows: list[TypedRow]) -> list[TypedRow]:
@@ -86,6 +117,9 @@ def upsert(conn: Any, curated: Curated, records: list[dict[str, Any]], batch_id:
             + (f" where ({changed})" if changed else " where true")
             + (f" and (t.{curated.version} is null or excluded.{curated.version} >= t.{curated.version})"
                if curated.version else "")
+            + (f" and not (lower(coalesce(t.{curated.protect[0]}, '')) = '{curated.protect[1]}'"
+               f" and lower(coalesce(excluded.{curated.protect[0]}, '')) <> '{curated.protect[1]}')"
+               if curated.protect else "")
             + " returning (xmax = 0) as inserted",
             (batch_id,),
         )
@@ -100,4 +134,5 @@ def count(conn: Any, table: str) -> int:
         return int(cur.fetchone()[0])
 
 
-__all__ = ["CURATED", "connect", "count", "dedupe_latest", "ensure_schema", "join_feed", "upsert"]
+__all__ = ["CURATED", "connect", "count", "dedupe_latest", "eligible", "ensure_schema", "is_protected_value",
+           "join_feed", "protected_pks", "stored_protected", "upsert"]
