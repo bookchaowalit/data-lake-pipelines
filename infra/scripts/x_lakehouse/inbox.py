@@ -33,6 +33,7 @@ Read helpers for the bots, in the Sheet's column order and cell format (text, IC
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -467,6 +468,24 @@ def drain(conn: Any, *, store: Any, prefix: str, cfg: Any = None, now: datetime 
             "coerce_errors": report["coerce_errors"], "config_coerce_errors": dict(config_errors)}
 
 
+def reapply_config(conn: Any, since: datetime) -> dict[str, Any]:
+    """Re-apply config rows the bots sent since ``since`` (X_LAKE_SOURCE=both, right after the Sheet
+    catch-up). The catch-up upserts the Sheet as it read it; a bot edit that reached the Sheet and the
+    inbox after that read would otherwise be rolled back. Newest received row per key wins."""
+    out: dict[str, Any] = {}
+    with conn.cursor() as c:
+        for n in REPLACEABLE:
+            c.execute(f"select coalesce(jsonb_agg(row order by received_at, id), '[]'::jsonb) from {INBOX} "
+                      "where dataset = %s and received_at >= %s", (n, since))
+            rows = c.fetchone()[0]
+            if rows:
+                c.execute(f"select {S}._ingest_upsert_{n}(%s::jsonb, %s)",
+                          (json.dumps(rows), f"reapply-{since:%Y%m%dT%H%M%SZ}"))
+                out[n] = c.fetchone()[0]
+    conn.commit()
+    return out
+
+
 def landed(conn: Any, store: Any, prefix: str, since: datetime) -> dict[str, int]:
     """Raw datasets: inbox rows drained since ``since`` whose row_key is missing from R2 (must be 0)."""
     import io
@@ -590,7 +609,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["POSTGRES", "compare", "stored_dates", "drain", "ensure_inbox", "inbox_ddl", "landed", "prune", "try_lock"]
+__all__ = ["POSTGRES", "compare", "reapply_config", "stored_dates", "drain", "ensure_inbox", "inbox_ddl", "landed", "prune", "try_lock"]
 
 if __name__ == "__main__":
     sys.exit(main())

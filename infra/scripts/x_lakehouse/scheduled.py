@@ -158,9 +158,12 @@ def _run_inbox(cfg: Config) -> int:
         ok = drained.get("marked", 0) == drained.get("expected", 0) and not drained.get("config_coerce_errors")
         since = (started.astimezone(TZ) - timedelta(days=1)).date()
         if source == "both":
+            catchup_at = datetime.now(timezone.utc) - timedelta(minutes=1)  # before the Sheet read
             code, summary = _backfill()
             _log(event="backfill", exit_code=code, **summary)
             ok = ok and code == 0
+            # The catch-up wrote config as the Sheet looked when it was read; put back bot edits sent since.
+            _log(event="reapply_config", upserted=inbox.reapply_config(lock, catchup_at))
             snapshot_at = datetime.now(timezone.utc)  # rows the bots send after this may miss the read
             sheet = backfill.load(cfg, list(DATASETS))
             report = reconcile(cfg, list(DATASETS), since, None, preloaded=sheet)

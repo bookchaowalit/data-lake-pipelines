@@ -354,6 +354,24 @@ class InboxPostgresTests(unittest.TestCase):
                             snapshot_at=datetime.now(timezone.utc) + timedelta(minutes=5))["x_feed"]
         self.assertEqual(rep["missing_in_sheet"], 1)
 
+    def test_both_mode_catch_up_does_not_roll_back_a_newer_bot_config_edit(self):
+        from x_lakehouse.append import append_rows
+        qp = {"query_id": "Q1", "query": "duckdb", "last_since_id": "100"}
+        self.ingest("x_query_plan", [qp])
+        typed = {n: [] for n in DATASETS}
+        checks = {n: validate.DatasetCheck(n, DATASETS[n].tab) for n in DATASETS}
+
+        def stale_catch_up():  # Sheet read before the bot's edit, upserted after it
+            self.ingest("x_query_plan", [qp | {"last_since_id": "200"}])
+            append_rows({"x_query_plan": [qp]}, store=self.store, prefix="", conn=self.conn, now=NOW)
+            return 0, {}
+
+        with patch.object(scheduled, "_backfill", stale_catch_up), \
+                patch.object(scheduled.backfill, "load", return_value=(typed, checks, [])):
+            _, _, ev = self.run_scheduled(X_LAKE_SOURCE="both")
+        self.assertEqual(ev["reapply_config"]["upserted"]["x_query_plan"]["updated"], 1)
+        self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("200",)])
+
     # -- T4 --------------------------------------------------------------------------------------
     def test_t4_inbox_drain_writes_raw_and_curated_once_and_validates(self):
         self.ingest("x_feed", [feed_row("1"), feed_row("2")])
