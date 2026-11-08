@@ -460,6 +460,46 @@ def check_sales_outputs() -> list[str]:
     return problems
 
 
+def check_partial_commerce_lakes() -> list[str]:
+    """The sales staging model builds on a lake with only ONE manifest family: stream-only (a fresh
+    lake fed by the event sink) and batch-only (no commerce events yet). DuckDB fails on a glob that
+    matches nothing, so the model must not read a missing family."""
+    import duckdb
+
+    problems: list[str] = []
+    cases = (("stream-only", build_synthetic_commerce_events, True), ("batch-only", build_synthetic_x_feed, False))
+    for label, build, expect_rows in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            build(Path(tmp))
+            families = {"stream": any((Path(tmp) / "control/manifests/stream-parquet").glob("source=*/*.json")),
+                        "batch": any((Path(tmp) / "control/manifests").glob("source=*/batch_id=*.json"))}
+            if sum(families.values()) != 1:
+                problems.append(f"{label} fixture should hold exactly one manifest family, got {families}")
+                continue
+            target_dir = Path(tmp) / "target"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            db = Path(tmp) / "partial.duckdb"
+            result = subprocess.run(
+                [str(DBT_BIN), "build", "--select", "+sales_daily_revenue",
+                 "--profiles-dir", str(DBT_PROJECT_DIR), "--project-dir", str(DBT_PROJECT_DIR),
+                 "--target-path", str(target_dir),
+                 "--vars", json.dumps({"bronze_root": str(Path(tmp) / "bronze"),
+                                       "bronze_manifest_root": str(Path(tmp) / "control" / "manifests")})],
+                cwd=str(DBT_PROJECT_DIR), capture_output=True, text=True,
+                env={**os.environ, "DBT_DUCKDB_PATH": str(db)},
+            )
+            if result.returncode != 0:
+                print(result.stdout[-2000:])
+                problems.append(f"sales marts do not build on a {label} lake")
+                continue
+            path = db if db.exists() else DBT_PROJECT_DIR / "local.duckdb"
+            with duckdb.connect(str(path), read_only=True) as con:
+                n = con.execute("select count(*) from stg_commerce_events").fetchone()[0]
+            if (n > 0) != expect_rows:
+                problems.append(f"{label} lake: stg_commerce_events has {n} rows")
+    return problems
+
+
 def run() -> bool:
     if DBT_BIN is None:
         message = "dbt not on PATH (install infra/requirements-data-lake.txt)"
@@ -590,6 +630,12 @@ def run() -> bool:
             tiers = con.execute("select distinct tier from dim_customer").fetchall()
         if tiers != [("standard",)]:
             print(f"FAIL: empty sales_vip_threshold_minor should leave only standard tiers, got {tiers}")
+            return False
+
+        partial = check_partial_commerce_lakes()
+        for problem in partial:
+            print(f"FAIL: {problem}")
+        if partial:
             return False
 
         print("PASS: dbt build, quality tests, metadata models and dbt docs succeeded against synthetic fixtures")

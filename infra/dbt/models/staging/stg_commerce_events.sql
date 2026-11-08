@@ -6,17 +6,37 @@
 -- is the event's identity; the earliest delivery wins, so received_at is when it first arrived.
 -- Envelopes carry reference ids and facts only (no personal data). Spec: docs/specs/sales-marts.md.
 
-with committed_manifests as (
+{#- DuckDB fails on a glob that matches no file, and a table function cannot take a subquery, so the
+    patterns that have files are found when the model runs. A lake with only one manifest family
+    (batch-only, or a fresh stream-only lake) or no commerce parts yet builds an empty model. -#}
+{%- set manifest_patterns = [
+    var("bronze_manifest_root") ~ "/stream-parquet/source=*/conversion_id=*.json",
+    var("bronze_manifest_root") ~ "/source=*/batch_id=*.json",
+] -%}
+{%- set parts_pattern = var("bronze_root") ~ "/domain=commerce/dataset=events/schema_version=*/ingest_date=*/source=*/part-*.parquet" -%}
+{%- set present = [] -%}
+{%- set has_parts = [] -%}
+{%- if execute -%}
+    {%- for pattern in manifest_patterns -%}
+        {%- if run_query("select count(*) from glob('" ~ pattern ~ "')").columns[0].values()[0] > 0 -%}
+            {%- do present.append(pattern) -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {%- if run_query("select count(*) from glob('" ~ parts_pattern ~ "')").columns[0].values()[0] > 0 -%}
+        {%- do has_parts.append(true) -%}
+    {%- endif -%}
+{%- endif %}
+
+with
+{%- if present and has_parts %}
+committed_manifests as (
     select distinct
         cast(bronze.key as varchar) as bronze_key
     -- The hourly lake sink (event-sink.yml) commits Bronze through stream_sink.convert_avro_file,
     -- which writes stream-parquet conversion manifests; batch ingests write source=*/batch_id=*.
     -- Both kinds carry domain, dataset, schema_version and bronze.key.
     from read_json_auto(
-        [
-            '{{ var("bronze_manifest_root") }}/stream-parquet/source=*/conversion_id=*.json',
-            '{{ var("bronze_manifest_root") }}/source=*/batch_id=*.json'
-        ],
+        [{% for pattern in present %}'{{ pattern }}'{% if not loop.last %}, {% endif %}{% endfor %}],
         union_by_name = true
     )
     where domain = 'commerce'
@@ -27,7 +47,7 @@ with committed_manifests as (
 source as (
     select parts.*
     from read_parquet(
-        '{{ var("bronze_root") }}/domain=commerce/dataset=events/schema_version=*/ingest_date=*/source=*/part-*.parquet',
+        '{{ parts_pattern }}',
         filename = true
     ) as parts
     inner join committed_manifests as manifests
@@ -36,6 +56,18 @@ source as (
             manifests.bronze_key
         )
 ),
+{%- else %}
+-- No committed commerce manifests or no commerce parts in this lake yet: same columns, no rows.
+source as (
+    select
+        cast(null as varchar) as payload_json,
+        cast(null as varchar) as source_record_id,
+        cast(null as varchar) as received_at,
+        cast(null as varchar) as privacy_class,
+        cast(null as varchar) as ingest_run_id
+    where false
+),
+{%- endif %}
 
 envelopes as (
     select
