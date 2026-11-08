@@ -50,6 +50,7 @@ from .coerce import TZ as TZ_ICT  # noqa: E402
 S = PG_SCHEMA
 INBOX = f"{S}.ingest_inbox"
 DRAIN_LOCK = 0x786C616B65  # "xlake": pg_try_advisory_lock key held by the one drainer
+CONFIG_LOCK = 0x786C616B6563  # "xlakec": transaction lock serialising config ingest() with the replay
 KEEP_DRAINED = timedelta(days=3)
 # Datasets whose stored inbox row is replaced by a newer version of the same key (no raw history:
 # the drain must apply the latest edit, not the first one).
@@ -296,6 +297,9 @@ begin
     return jsonb_build_object('inserted', 0, 'skipped', 0, 'upserted', null, 'errors',
       jsonb_build_array(jsonb_build_object('row', null, 'error', 'rows must be a JSON array of objects')));
   end if;
+  if p_dataset = any({_arr(REPLACEABLE)}) then
+    perform pg_advisory_xact_lock({CONFIG_LOCK});  -- one config writer at a time (see reapply_config)
+  end if;
   for r in select value from jsonb_array_elements(p_rows) loop
     i := i + 1;
     if jsonb_typeof(r) <> 'object' then
@@ -381,6 +385,7 @@ def _grants() -> str:
         + "".join(f"    revoke all on {r} from {role};\n" for r in rels)
         + "  end if;" for role in ("anon", "authenticated"))
     grant = ("  if exists (select 1 from pg_roles where rolname = 'postgres') and current_user <> 'postgres' then\n"
+             f"    grant usage on schema {S} to postgres;\n"  # do not rely on postgres being a member of x_lake
              + "".join(f"    grant execute on function {f} to postgres;\n" for f in fns)
              + "".join(f"    grant select on {r} to postgres;\n" for r in rels[1:])
              + "  end if;")
@@ -474,6 +479,8 @@ def reapply_config(conn: Any, since: datetime) -> dict[str, Any]:
     inbox after that read would otherwise be rolled back. Newest received row per key wins."""
     out: dict[str, Any] = {}
     with conn.cursor() as c:
+        # Same lock as ingest() for config rows: no bot edit can land between the read and the upsert.
+        c.execute("select pg_advisory_xact_lock(%s)", (CONFIG_LOCK,))
         for n in REPLACEABLE:
             c.execute(f"select coalesce(jsonb_agg(row order by received_at, id), '[]'::jsonb) from {INBOX} "
                       "where dataset = %s and received_at >= %s", (n, since))

@@ -139,6 +139,7 @@ class GuardTests(unittest.TestCase):
         ddl = inbox.inbox_ddl()
         self.assertIn("security definer", ddl)
         self.assertIn("revoke all on function x_intel.ingest(text, jsonb, text) from public", ddl)
+        self.assertIn("grant usage on schema x_intel to postgres", ddl)
         self.assertNotIn("to anon", ddl)
         self.assertNotIn("to authenticated", ddl)
         for t in ("x_signals", "claims", "x_query_plan", "x_watchlist", "taxonomy_map"):
@@ -371,6 +372,24 @@ class InboxPostgresTests(unittest.TestCase):
             _, _, ev = self.run_scheduled(X_LAKE_SOURCE="both")
         self.assertEqual(ev["reapply_config"]["upserted"]["x_query_plan"]["updated"], 1)
         self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("200",)])
+
+    def test_config_ingest_waits_for_the_replay_lock_but_feed_ingest_does_not(self):
+        other = cur.connect(DB)
+        try:
+            with other.cursor() as c:
+                c.execute("select pg_advisory_xact_lock(%s)", (inbox.CONFIG_LOCK,))  # replay in progress
+            with self.conn.cursor() as c:
+                c.execute("set lock_timeout = '300ms'")
+            self.conn.commit()
+            self.assertEqual(self.ingest("x_feed", [feed_row("1")])["inserted"], 1)
+            with self.assertRaises(Exception) as ctx:
+                self.ingest("x_query_plan", [{"query_id": "Q1", "query": "q"}])
+            self.assertIn("lock timeout", str(ctx.exception))
+            self.conn.rollback()
+            other.commit()  # replay done: the config write goes through
+            self.assertEqual(self.ingest("x_query_plan", [{"query_id": "Q1", "query": "q"}])["inserted"], 1)
+        finally:
+            other.close()
 
     # -- T4 --------------------------------------------------------------------------------------
     def test_t4_inbox_drain_writes_raw_and_curated_once_and_validates(self):
