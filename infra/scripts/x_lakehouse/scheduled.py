@@ -161,12 +161,14 @@ def _run_inbox(cfg: Config) -> int:
             code, summary = _backfill()
             _log(event="backfill", exit_code=code, **summary)
             ok = ok and code == 0
+            snapshot_at = datetime.now(timezone.utc)  # rows the bots send after this may miss the read
             sheet = backfill.load(cfg, list(DATASETS))
             report = reconcile(cfg, list(DATASETS), since, None, preloaded=sheet)
             window = datetime.combine(since, datetime.min.time(), TZ)
             if cfg.get("X_LAKE_COMPARE_SINCE"):
                 window = max(window, datetime.fromisoformat(cfg.get("X_LAKE_COMPARE_SINCE")).astimezone(timezone.utc))
-            cmp = inbox.compare(lock, sheet[0], window, started)
+            cmp = inbox.compare(lock, sheet[0], window, started, snapshot_at=snapshot_at,
+                                stored_on=inbox.stored_dates(store, prefix))
             mismatch = {n: r for n, r in cmp.items() if r["missing_in_sheet"] or r.get("missing_in_inbox")}
             _log(event="compare", since=window, ok=not mismatch, mismatch=mismatch,
                  inbox_rows={n: r["inbox_rows"] for n, r in cmp.items()})
@@ -177,7 +179,9 @@ def _run_inbox(cfg: Config) -> int:
         lost = {n: k for n, k in inbox.landed(lock, store, prefix, started - timedelta(days=1)).items() if k}
         _log(event="validate", since=since, source=source, ok=report["ok"] and not lost, failed=failed,
              drained_missing_from_raw=lost)
-        ok = ok and report["ok"] and not lost
+        # A drained row with a coercion error fails the run even when its ingest date is older than the
+        # validate window (a delayed or replayed row); the run then also skips the prune.
+        ok = ok and report["ok"] and not lost and not drained.get("coerce_errors")
         if ok:
             _log(event="prune", deleted=inbox.prune(lock, started))
     finally:

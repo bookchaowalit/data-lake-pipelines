@@ -321,6 +321,39 @@ class InboxPostgresTests(unittest.TestCase):
         self.ingest("x_query_plan", [{"query_id": "Q1", "query": "duckdb", "runs": 3}])  # corrected row
         self.assertEqual(self.run_scheduled()[0], 0)
 
+    def test_raw_coercion_error_on_an_old_row_fails_the_inbox_run(self):
+        self.ingest("x_feed", [feed_row("1", "2026-11-01 08:00", likes="oops")])  # dated before the window
+        code, beats, ev = self.run_scheduled()
+        self.assertEqual((code, beats), (1, [False]))
+        self.assertEqual(ev["drain"]["coerce_errors"], {"x_feed": {"likes": 1}})
+        self.assertNotIn("prune", ev)
+
+    def test_compare_checks_undated_analyses_by_their_landing_date(self):
+        from x_lakehouse.append import append_rows
+        old = {"report_week": "2026-W45", "analysis": "fad", "rank": 1, "item": "A"}
+        new = {"report_week": "2026-W46", "analysis": "fad", "rank": 1, "item": "B"}
+        append_rows({"x_analyses": [old]}, store=self.store, prefix="", conn=self.conn,
+                    now=NOW - timedelta(days=5))  # landed before the dual-write window
+        append_rows({"x_analyses": [new]}, store=self.store, prefix="", conn=self.conn, now=NOW)
+        sheet = {"x_analyses": [type_row(DATASETS["x_analyses"], r) for r in (old, new)]}
+        window = NOW - timedelta(days=1)  # missing_in_inbox for undated rows uses the landing date only
+        stored = inbox.stored_dates(self.store, "")
+        rep = inbox.compare(self.conn, sheet, window, NOW, stored_on=stored)["x_analyses"]
+        self.assertEqual((rep["sheet_rows"], rep["missing_in_inbox"]), (1, 1))  # only the new week is due
+        self.ingest("x_analyses", [new])
+        rep = inbox.compare(self.conn, sheet, window, NOW, stored_on=stored)["x_analyses"]
+        self.assertEqual(rep["missing_in_inbox"], 0)
+
+    def test_compare_ignores_inbox_rows_received_after_the_sheet_was_read(self):
+        snapshot = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self.ingest("x_feed", [feed_row("42")])  # bot wrote the Sheet after our read, then the inbox
+        window = datetime.now(timezone.utc) - timedelta(days=1)
+        rep = inbox.compare(self.conn, {"x_feed": []}, window, NOW, snapshot_at=snapshot)["x_feed"]
+        self.assertEqual(rep["missing_in_sheet"], 0)
+        rep = inbox.compare(self.conn, {"x_feed": []}, window, NOW,
+                            snapshot_at=datetime.now(timezone.utc) + timedelta(minutes=5))["x_feed"]
+        self.assertEqual(rep["missing_in_sheet"], 1)
+
     # -- T4 --------------------------------------------------------------------------------------
     def test_t4_inbox_drain_writes_raw_and_curated_once_and_validates(self):
         self.ingest("x_feed", [feed_row("1"), feed_row("2")])

@@ -44,6 +44,7 @@ if __package__ in (None, ""):
     __package__ = "x_lakehouse"
 
 from .schemas import CURATED, DATASETS, PG_SCHEMA, POSTGRES, SHEET_TZ, Curated, Dataset, Kind  # noqa: E402
+from .coerce import TZ as TZ_ICT  # noqa: E402
 
 S = PG_SCHEMA
 INBOX = f"{S}.ingest_inbox"
@@ -501,17 +502,36 @@ def prune(conn: Any, now: datetime | None = None) -> int:
     return n
 
 
+def stored_dates(store: Any, prefix: str) -> dict[str, dict[str, Any]]:
+    """row_key -> raw partition date, for raw datasets without a timestamp column of their own
+    (x_analyses): the date a row first landed is its only usable date."""
+    from .lake import read_dataset
+
+    out: dict[str, dict[str, Any]] = {}
+    for n, ds in DATASETS.items():
+        if ds.raw and ds.ingest_ts is None and n != "x_post_context":  # context is dated by its post
+            tbl = read_dataset(store, prefix, ds)
+            out[n] = ({} if tbl is None else
+                      dict(zip(tbl.column("_row_key").to_pylist(), tbl.column("_partition_date").to_pylist())))
+    return out
+
+
 def compare(conn: Any, sheet_typed: dict[str, list[Any]], window_start: datetime, now: datetime,
-            grace: timedelta = timedelta(minutes=60)) -> dict[str, dict[str, int]]:
+            grace: timedelta = timedelta(minutes=60), *, snapshot_at: datetime | None = None,
+            stored_on: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, int]]:
     """Dual-write check (X_LAKE_SOURCE=both): what reached the inbox must match what reached the Sheet.
 
-    missing_in_sheet: inbox rows received since ``window_start`` whose key the Sheet does not hold
-    (claims compare claim_id, since the Sheet keeps only a claim's latest version).
+    missing_in_sheet: inbox rows received from ``window_start`` until the Sheet was read
+    (``snapshot_at``, default ``now``; the bots write the Sheet first, so a row received after the
+    read may legitimately be missing from it) whose key the Sheet does not hold (claims compare
+    claim_id, since the Sheet keeps only a claim's latest version).
     missing_in_inbox: raw-dataset Sheet rows dated from ``window_start`` to ``now - grace`` (a bot
-    run still writing is not a miss) that never reached the inbox.
+    run still writing is not a miss) that never reached the inbox. Datasets without a timestamp
+    column use the date the row first landed in raw (``stored_on``; a row not in raw yet is due).
     """
     from .pipeline import feed_index, partition_values
 
+    upper_received = (snapshot_at or now) - timedelta(minutes=1)  # database vs cron clock skew
     with conn.cursor() as c:
         c.execute(f"select dataset, row_key, row, received_at from {INBOX}")
         inbox = c.fetchall()
@@ -523,7 +543,7 @@ def compare(conn: Any, sheet_typed: dict[str, list[Any]], window_start: datetime
         sheet_keys = {r.row_key for r in rows}
         mine = [(rk, row, ra) for d, rk, row, ra in inbox if d == n]
         all_inbox = {rk for rk, _, _ in mine}
-        recent = [(rk, row) for rk, row, ra in mine if ra >= window_start]
+        recent = [(rk, row) for rk, row, ra in mine if window_start <= ra <= upper_received]
         c = CURATED.get(n)
         if c is not None and c.version:
             from .coerce import type_row
@@ -535,9 +555,14 @@ def compare(conn: Any, sheet_typed: dict[str, list[Any]], window_start: datetime
             miss_sheet = sum(1 for rk, _ in recent if rk not in sheet_keys)
         rep = {"inbox_rows": len(recent), "missing_in_sheet": miss_sheet}
         if ds.raw:
-            upper = now - grace
-            ts = partition_values(ds, rows, feed_ts)
-            due = [r for r, t in zip(rows, ts) if isinstance(t, datetime) and window_start <= t <= upper]
+            if ds.ingest_ts is None and n != "x_post_context":
+                landed_on = (stored_on or {}).get(n, {})
+                first_day = window_start.astimezone(TZ_ICT).date()
+                due = [r for r in rows if r.row_key not in landed_on or landed_on[r.row_key] >= first_day]
+            else:
+                upper = now - grace
+                ts = partition_values(ds, rows, feed_ts)
+                due = [r for r, t in zip(rows, ts) if isinstance(t, datetime) and window_start <= t <= upper]
             rep["sheet_rows"] = len(due)
             rep["missing_in_inbox"] = sum(1 for r in due if r.row_key not in all_inbox)
         out[n] = rep
@@ -565,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["POSTGRES", "compare", "drain", "ensure_inbox", "inbox_ddl", "landed", "prune", "try_lock"]
+__all__ = ["POSTGRES", "compare", "stored_dates", "drain", "ensure_inbox", "inbox_ddl", "landed", "prune", "try_lock"]
 
 if __name__ == "__main__":
     sys.exit(main())

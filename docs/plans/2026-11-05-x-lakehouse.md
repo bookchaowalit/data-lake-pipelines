@@ -339,8 +339,10 @@ run is not a FAIL, but the owner decides whether day 2 counts.
    x_signals (the immediate x_signals upsert takes post facts from the inbox's X Feed rows). Claim
    updates go as full claim rows. A failed lake write never blocks the Sheet write or the run.
 5. Each cron run logs `event=compare`: `missing_in_inbox` (Sheet rows dated in the window, older than
-   60 min, that never reached the inbox) and `missing_in_sheet` (inbox rows the Sheet lacks; claims
-   by `claim_id`). Exit: 3+ runs with no mismatch and 0 coercion errors.
+   60 min, that never reached the inbox; `x_analyses`, which has no timestamp, by the day the row
+   first landed in raw) and `missing_in_sheet` (inbox rows received before the cron read the Sheet
+   that the Sheet lacks; claims by `claim_id`). A drained row with a coercion error fails the run
+   even when it is dated before the validate window. Exit: 3+ runs with no mismatch and 0 coercion errors.
 
 *Phase 2 — lake only (≈ from 16 Nov).*
 1. Chief Data stops the X tab appends and the X Query Plan G:P run-state write; config reads come from
