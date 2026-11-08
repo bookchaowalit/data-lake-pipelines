@@ -4,7 +4,8 @@ Each upsert loads the batch into a temp table with COPY, then
 ``INSERT ... SELECT ... ON CONFLICT (pk) DO UPDATE ... WHERE <row changed>`` so reruns are no-ops
 and ``updated_at`` moves only when a value really changed. Tables with a ``version`` column
 (claims: last_checked, x_signals: collected_at) also refuse an update from an older version, so a
-replayed old batch cannot roll a row back. Joined columns use
+replayed old batch cannot roll a row back. A ``protect`` rule (claims: checked_by = 'book') keeps a
+row Book checked unless the incoming row is Book's too. Joined columns use
 ``coalesce(excluded.c, t.c)`` so a batch without the joined row keeps what is stored.
 """
 
@@ -86,6 +87,9 @@ def upsert(conn: Any, curated: Curated, records: list[dict[str, Any]], batch_id:
             + (f" where ({changed})" if changed else " where true")
             + (f" and (t.{curated.version} is null or excluded.{curated.version} >= t.{curated.version})"
                if curated.version else "")
+            + (f" and not (lower(coalesce(t.{curated.protect[0]}, '')) = '{curated.protect[1]}'"
+               f" and lower(coalesce(excluded.{curated.protect[0]}, '')) <> '{curated.protect[1]}')"
+               if curated.protect else "")
             + " returning (xmax = 0) as inserted",
             (batch_id,),
         )

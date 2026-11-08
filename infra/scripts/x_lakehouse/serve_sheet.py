@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Rebuild the small serving view in the Sheet from the curated Postgres tables.
 
-Writes ONLY two tabs it owns: "Serve · X Signals 7d" (X Signals collected in the last 7 days) and
-"Serve · Open Claims" (claims whose queue_state is not closed). It creates a tab with its header
+Writes ONLY three tabs it owns: "Serve · X Signals 7d" (X Signals collected in the last 7 days),
+"Serve · Open Claims" (claims whose queue_state is not closed) and "Serve · X Query Plan" (a
+read-only mirror of x_intel.x_query_plan once the plan is edited in Postgres). It creates a tab with its header
 once, then each refresh clears and rewrites rows 2+ only. It never touches an existing data tab,
 "AI Summaries", "AI Summaries Latest", any "Chief *" tab, or any header row after creation.
 
@@ -36,6 +37,7 @@ SIGNAL_COLUMNS = ["post_id", "collected_at", "author_handle", "post_url", "poste
                   "content_label", "novelty", "opportunity_score", "verification_status",
                   "suggested_action", "tags", "manip_flags", "likes", "views", "post_text"]
 CLAIM_COLUMNS = [c for c, _ in CURATED["claims"].data_columns]
+QUERY_PLAN_COLUMNS = [c for c, _ in CURATED["x_query_plan"].data_columns]
 
 
 def _cell(v: Any) -> Any:
@@ -59,7 +61,10 @@ def fetch(conn: Any) -> dict[str, tuple[list[str], list[list[Any]]]]:
                   "where coalesce(lower(queue_state), '') <> all(%s) "
                   "order by priority nulls last, next_check nulls last, claim_id", (list(CLOSED_STATES),))
         claims = [[_cell(v) for v in row] for row in c.fetchall()]
-    return {SERVE_TABS["x_signals"]: (SIGNAL_COLUMNS, signals), SERVE_TABS["claims"]: (CLAIM_COLUMNS, claims)}
+        c.execute(f"select {', '.join(QUERY_PLAN_COLUMNS)} from {PG_SCHEMA}.x_query_plan order by query_id")
+        plan = [[_cell(v) for v in row] for row in c.fetchall()]
+    return {SERVE_TABS["x_signals"]: (SIGNAL_COLUMNS, signals), SERVE_TABS["claims"]: (CLAIM_COLUMNS, claims),
+            SERVE_TABS["x_query_plan"]: (QUERY_PLAN_COLUMNS, plan)}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -45,6 +45,24 @@ Railway variables: `GOOGLE_SERVICE_ACCOUNT_JSON`, `HEARTBEAT_TOKEN`, `R2_ACCOUNT
 X Feed / 317 context / 20 trends TH / 174 signals rows, validate ok; Railway one-shot 12:50 UTC wrote
 0 (already caught up), validate ok, 130 s. Day 1 of the 7-day clock is 2026-11-06.
 
+**Cutover design (2026-11-08, owner: "ปรับไปแค่ Pipeline ใหม่เลย"):**
+6. **Bots write SQL, the cron stays the only R2 writer.** The bots cannot run this package and hold
+   no R2/DB credentials, but they can run SQL through the Supabase connector (role `postgres`). So the
+   writer is `x_intel.ingest(dataset, rows jsonb, run_id)` (SECURITY DEFINER, owned by `x_lake`,
+   EXECUTE for `postgres` only) into `x_intel.ingest_inbox`, plus an immediate upsert of the curated
+   tables. The Railway cron drains the inbox through `append_rows` (`X_LAKE_SOURCE=inbox|both`).
+   Rejected: an always-on FastAPI service (new fixed cost), R2/DB secrets on the shared bot box
+   (credential rule), Postgres-only writes (no raw history). Code: `inbox.py`, `bot_sql.py`.
+7. **Two more datasets:** `x_analyses` ("X Analyses", A:N) and `x_triage_audit` ("X Triage Audit",
+   A:J), raw + curated, so no X-pipeline tab is left without a home. Headers read 2026-11-08
+   (`infra/tests/fixtures/x_lakehouse_sheet_headers_2026-11-08.json`); a read-only dry run that day:
+   60 + 1 rows, 0 coercion errors, 0 duplicate keys. `x_analyses` repeats `post_id` by design, so it
+   is left out of the duplicate-`post_id` checks.
+8. **Claims Book checked are protected:** a stored claim with `checked_by = 'book'` is replaced only
+   by a row that also says `book` (`Curated.protect`, in both the Python upsert and `ingest()`).
+   `validate` does not count such a held-back row as stale (`postgres_protected_held`). On 2026-11-08
+   all 20 claims had `checked_by = 'rule'`, so the parallel run is unaffected.
+
 ## 1. Context
 
 The X pipeline's bots append to the "Chief Findings Warehouse" Google Sheet
@@ -72,7 +90,7 @@ Findings that shaped the schema:
   is required.
 
 Out of scope (never read or written): `AI Summaries`, `AI Summaries Latest`, every `Chief *` tab,
-`README`, `All Findings`, `Datasets`, `X Analyses`, `X Triage Audit`.
+`README`, `All Findings`, `Datasets`. (`X Analyses` and `X Triage Audit` joined on 2026-11-08, §0.7.)
 
 ## 2. Layout and naming
 
@@ -249,6 +267,10 @@ daily upserts keep the project active.
 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | R2 store, DuckDB | R2 API token, Object Read & Write, **scoped to the one bucket** |
 | `X_LAKE_DB_URL` | backfill, append, validate, serve_sheet | Supabase session-pooler URL with `sslmode=require`; a role that owns schema `x_intel` only |
 
+| `X_LAKE_SOURCE` | scheduled | `sheet` (default: the parallel run as before) \| `both` (drain inbox + Sheet catch-up + compare) \| `inbox` (lake only) |
+| `X_LAKE_COMPARE_SINCE` | scheduled (`both`) | optional ISO time of the first dual-write run; the inbox/Sheet comparison starts there |
+| `X_LAKE_SERVE` | scheduled | `execute` refreshes the serving tabs after an ok run; anything else = dry run (counts only) |
+
 Proposed home: Infisical folder `/x-lakehouse`, run with `infisical run --path /x-lakehouse`.
 
 ## 10. Validation
@@ -296,12 +318,38 @@ Context rows are scoped by the partition they were stored in.
   error resets the 7-day clock.
 - `serve_sheet` runs in **dry run** only during this week.
 
-**Day 8 — switch writers (only after 7 consecutive ok days)**
-1. Each daily run calls `append_rows({...})` instead of appending to the Sheet. If a bot cannot run
-   Python, wrap `append_rows` in a small FastAPI endpoint (follow-up, not built).
-2. `serve_sheet --execute` runs after each append.
-3. The old X tabs stay in the Sheet, frozen. Nothing is deleted.
-4. `validate` now checks raw vs Postgres on recent partitions (the Sheet stops growing).
+**Parallel-run log (Railway `event=validate`, read 2026-11-08):** 11-06 08:23, 16:20, 22:23;
+11-07 16:20, 22:21; 11-08 08:21, 16:22: all `ok=true`, `failed={}`, backfill exit 0. The
+11-07 08:20 slot left no logs (its deployment was replaced at 02:29 UTC that morning); a missing
+run is not a FAIL, but the owner decides whether day 2 counts.
+
+**Day 8+ — switch writers through the bot inbox (each phase only on the owner's go)**
+
+*Phase 1 — dual write (≈ 13 → 15 Nov, at least 3 runs).*
+1. Deploy this code to the cron (CLI upload, as before). With `X_LAKE_SOURCE` unset nothing changes
+   except the two new datasets (§0.7) being caught up from the Sheet.
+2. Apply the inbox migration: `python -m x_lakehouse.inbox --apply` (or the first run in
+   `both`/`inbox` mode applies it). Review first with `--print-ddl`.
+3. Set `X_LAKE_SOURCE=both` and `X_LAKE_COMPARE_SINCE=<ISO time of the first dual-write bot run>`.
+4. Chief Data keeps every Sheet append and also sends the same rows: `bot_sql.py <dataset> <run_id>
+   rows.json out/` → one `execute_sql` call per file (≤ 500 rows, ≤ 900 KB), x_feed before
+   x_signals (the immediate x_signals upsert takes post facts from the inbox's X Feed rows). Claim
+   updates go as full claim rows. A failed lake write never blocks the Sheet write or the run.
+5. Each cron run logs `event=compare`: `missing_in_inbox` (Sheet rows dated in the window, older than
+   60 min, that never reached the inbox) and `missing_in_sheet` (inbox rows the Sheet lacks; claims
+   by `claim_id`). Exit: 3+ runs with no mismatch and 0 coercion errors.
+
+*Phase 2 — lake only (≈ from 16 Nov).*
+1. Chief Data stops the X tab appends and the X Query Plan G:P run-state write; config reads come from
+   `x_intel.v_query_plan_sheet`, `x_intel.v_watchlist_sheet` (Sheet column order, Sheet cell format)
+   and `x_intel.v_claims_open`; config edits go through `ingest('x_query_plan' | 'x_watchlist', …)`.
+2. `X_LAKE_SOURCE=inbox`: drain, validate raw vs Postgres, and check every drained row reached R2
+   (`drained_missing_from_raw`). After an ok run, inbox rows drained more than 3 days ago are deleted.
+3. `X_LAKE_SERVE=execute`: "Serve · X Signals 7d", "Serve · Open Claims", "Serve · X Query Plan".
+4. The old X tabs stay in the Sheet, frozen. Nothing is deleted.
+
+*Phase 3 — cleanup (≥ 30 days later, owner approval):* remove the `both` path, decide on the frozen
+tabs (copy first), build the 180-day x_signals retention job before ~month 9.
 
 **Rollback**
 - *Before the switch:* nothing to undo for the Sheet, which was never changed. To reset the new
@@ -312,6 +360,9 @@ Context rows are scoped by the partition they were stored in.
   batches predate this layout and have one `<batch_id>.json` per dataset; both completed.
 - *Curated corrupted:* `drop schema x_intel cascade`, then `backfill --execute` rebuilds it
   (the Sheet is the source until the switch; a rebuild-from-R2 script is a follow-up).
+- *Phase 1 (dual write):* stop the inbox step on the bot side and set `X_LAKE_SOURCE=sheet`; the
+  Sheet is still complete. Inbox rows can stay (they are idempotent against the Sheet rows: same
+  `_row_key`) or be truncated with owner approval.
 - *After the switch, back to the Sheet:* point the daily runs back at the Sheet append (keep the old
   code path behind a flag, e.g. `X_LAKE_WRITER=sheet|lake|both`, during the first month). Rows
   written only to the lake in the meantime must be copied back: export them from raw with DuckDB
@@ -342,6 +393,14 @@ Context rows are scoped by the partition they were stored in.
    keyed on `last_checked` precisely so every new version is kept.
 9. **Untrusted text.** `text`, `ref_text` and `claim` are X content. Keep them as data; never render
    them unescaped in a web view.
+10. **Sheet row numbers in config.** `x_query_plan.watchlist_rows` and
+    `x_account_snapshots.watchlist_row` point at X Watchlist *Sheet row numbers*. Postgres has no
+    row number, so once the watchlist is edited in Postgres (Phase 2) those references need a stable
+    id (e.g. `requesting_chief|type|value`) in the bots' planner. Decide before Phase 2.
+11. **Inbox row keys.** `ingest()` computes `_row_key` in SQL (`x_intel.row_key`), which must equal
+    `coerce.row_key` on what the drain reads back from jsonb. Tested on 50 generated rows per
+    dataset (Python whitespace set, Thai, ids ≥ 2^53, whole floats). Not supported: non-whole numbers
+    ≥ 10^15 in key columns (no key column holds one).
 
 ## 13. Dry run (2026-11-05, read-only against the Sheet)
 

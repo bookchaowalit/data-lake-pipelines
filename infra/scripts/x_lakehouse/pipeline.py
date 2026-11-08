@@ -66,7 +66,8 @@ def validate_rows(ds: Dataset, rows: list[TypedRow], chk: DatasetCheck, sample: 
     chk.coerce_errors = dict(errs)
     keys = Counter(r.row_key for r in rows)
     chk.duplicate_keys = sum(n - 1 for n in keys.values() if n > 1)
-    if "post_id" in ds.kinds and ds.name != X_POST_CONTEXT.name:
+    # Context rows and the weekly analyses legitimately repeat a post_id; feed and signals must not.
+    if "post_id" in ds.kinds and ds.name not in (X_POST_CONTEXT.name, "x_analyses"):
         ids = Counter(r.values.get("post_id") for r in rows if r.values.get("post_id"))
         chk.duplicate_post_ids = sum(n - 1 for n in ids.values() if n > 1)
     if rows:

@@ -190,6 +190,23 @@ X_QUERY_PLAN = Dataset(
     ingest_ts=None, raw=False,
     notes="result_cap/max_pages hold 'n/a', '25/seed', '8 calls', so they stay text",
 )
+# Weekly outputs of the Chief of Bot Monday report. Not in the 2026-11-05 scope; added 2026-11-08 so
+# no X-pipeline tab is left without a lake home at cutover (headers read from the live Sheet that day).
+X_ANALYSES = Dataset(
+    "x_analyses", "X Analyses",
+    _cols("report_week:str analysis:str rank:int item:str post_id:str link:str topic:str book_domain:str "
+          "geo:str value:str value_kind:str source_tier:str metric:str note:str"),
+    key=("report_week", "analysis", "rank", "item"),
+    ingest_ts=None,  # ISO week text only: dated by the run (backfill) and checked against every partition
+    notes="value holds counts, ratios and words depending on value_kind, so it stays text",
+)
+X_TRIAGE_AUDIT = Dataset(
+    "x_triage_audit", "X Triage Audit",
+    _cols("audit_week:str logged_at:ts n:int label_agree:float route_agree:float label_confusions:str "
+          "route_confusions:str drift_vs_prev:str rule_version:str note:str"),
+    key=("audit_week", "logged_at"),
+    ingest_ts="logged_at",
+)
 TAXONOMY_MAP = Dataset(
     "taxonomy_map", "Taxonomy Map",
     _cols("section:str v3_topic_or_type:str book_domain_or_type:str note:str"),
@@ -200,14 +217,16 @@ TAXONOMY_MAP = Dataset(
 DATASETS: dict[str, Dataset] = {
     d.name: d
     for d in (X_FEED, X_POST_CONTEXT, X_TRENDS_TH, X_TRENDS_INTL, X_TOPIC_COUNTS, X_ACCOUNT_SNAPSHOTS,
-              ALPHA_FEED, X_SIGNALS, CLAIMS, X_WATCHLIST, X_QUERY_PLAN, TAXONOMY_MAP)
+              ALPHA_FEED, X_SIGNALS, CLAIMS, X_WATCHLIST, X_QUERY_PLAN, TAXONOMY_MAP, X_ANALYSES,
+              X_TRIAGE_AUDIT)
 }
 RAW_DATASETS = [d for d in DATASETS.values() if d.raw]
 
 # Tabs this package must never write. serve_sheet.py writes only to SERVE_TABS.
 PROTECTED_TABS = frozenset({"AI Summaries", "AI Summaries Latest"})
 PROTECTED_PREFIX = "Chief "
-SERVE_TABS = {"x_signals": "Serve · X Signals 7d", "claims": "Serve · Open Claims"}
+SERVE_TABS = {"x_signals": "Serve · X Signals 7d", "claims": "Serve · Open Claims",
+              "x_query_plan": "Serve · X Query Plan"}
 
 
 def is_protected(tab: str) -> bool:
@@ -229,6 +248,9 @@ class Curated:
     indexes: tuple[tuple[str, ...], ...] = ()
     # Column that orders versions of one key: an older version never replaces a newer one.
     version: str | None = None
+    # (column, value): a stored row whose column equals value (case-insensitive) is only replaced by a
+    # row carrying the same value. Claims: a claim Book checked is never overwritten by a bot.
+    protect: tuple[str, str] | None = None
 
     @property
     def data_columns(self) -> list[tuple[str, Kind]]:
@@ -252,11 +274,14 @@ CURATED: dict[str, Curated] = {
         ),
         Curated("claims", CLAIMS, pk=("claim_id",),
                 indexes=(("first_post_id",), ("first_seen",), ("created_at",), ("queue_state", "next_check"),
-                         ("topic",)), version="last_checked"),
+                         ("topic",)), version="last_checked", protect=("checked_by", "book")),
         Curated("x_watchlist", X_WATCHLIST, pk=("requesting_chief", "type", "value"),
                 indexes=(("type", "value"), ("tag",))),
         Curated("x_query_plan", X_QUERY_PLAN, pk=("query_id",), indexes=(("status",), ("last_run_at",))),
         Curated("taxonomy_map", TAXONOMY_MAP, pk=("section", "v3_topic_or_type")),
+        Curated("x_analyses", X_ANALYSES, pk=("report_week", "analysis", "rank", "item"),
+                indexes=(("report_week",), ("post_id",))),
+        Curated("x_triage_audit", X_TRIAGE_AUDIT, pk=("audit_week", "logged_at")),
     )
 }
 
