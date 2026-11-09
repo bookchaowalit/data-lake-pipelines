@@ -1,0 +1,4 @@
+# Build outputs (sales_bi_site.py, sales_bi_snapshot.py); never committed.
+build/
+sales.duckdb
+deploy/node_modules/

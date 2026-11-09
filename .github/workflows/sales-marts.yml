@@ -1,0 +1,186 @@
+# Sales Bronze (commerce events) → dbt marts → Gold on the R2 lake (spec: docs/specs/sales-marts.md 9–11).
+# platform-payment's payment-relay cron (:50) puts payment events on Kafka and event-sink (:05) lands them
+# in Bronze; the jobs queue (ADR-0008) starts this at :20. Unchanged Bronze writes nothing new.
+#
+# Then the `bi` job rebuilds the revenue page (sales_bi_site.py → infra/bi/sales) from that Gold run and
+# deploys it to Cloudflare Pages (revenue-insights.pages.dev, behind Cloudflare Access) when that Gold run
+# and commit are not the ones already live.
+#
+# Public repository: the log shows counts and run ids only (never intent or workspace ids). Failures and
+# rejected events reach Telegram through the uptime Worker heartbeat `sales-marts`.
+name: Sales marts (Bronze → Gold)
+
+on:
+  # Scheduled by the jobs queue (platform-jobs-worker job `sales-marts`, cron "20 * * * *" UTC), ADR-0008.
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "manual forces the BI deploy; jobs-queue behaves like a scheduled run"
+        type: choice
+        options: [manual, jobs-queue]
+        default: manual
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sales-marts
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      exit_code: ${{ steps.marts.outputs.exit_code }}
+      manifest_key: ${{ steps.marts.outputs.manifest_key }}
+      gold_run_id: ${{ steps.marts.outputs.gold_run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install runtime from uv.lock
+        # Same lock as local runs, so the duckdb/pyarrow versions (part of gold_run_id) match.
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.13.1
+          uv sync --frozen --no-dev
+
+      - name: Build Silver and Gold
+        id: marts
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.JOB_DATA_R2_SECRET_ACCESS_KEY }}
+          DATA_LAKE_S3_ENDPOINT: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_ENDPOINT_URL: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+          DATA_LAKE_CLOUD_WRITE_ENABLED: "true"
+          SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
+        run: |
+          set +e
+          # stderr (dbt/aws output) stays in a runner temp file, out of the public log.
+          .venv/bin/python infra/scripts/data_lake/sales_marts.py --json \
+            > "$RUNNER_TEMP/result.json" 2> "$RUNNER_TEMP/stderr.log"
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "manifest_key=$(jq -r '.manifest_key // ""' "$RUNNER_TEMP/result.json")" >> "$GITHUB_OUTPUT"
+          echo "gold_run_id=$(jq -r '.gold_run_id // ""' "$RUNNER_TEMP/result.json")" >> "$GITHUB_OUTPUT"
+          # Counts and run ids only (public log); an error shows its exception type, not its text.
+          jq '{status, error: (if .error then (.error | split(":")[0]) else null end), gold_run_id,
+               marts: (.marts // {} | map_values({rows, existed})),
+               dbt: .dbt.statuses}' "$RUNNER_TEMP/result.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $code
+
+  bi:
+    # Stale Gold (exit 3) fails the build job but is still correct for its input,
+    # so the site shows it too (always() lets this job run after a failed build job).
+    needs: build
+    if: ${{ always() && (needs.build.outputs.exit_code == '0' || needs.build.outputs.exit_code == '3') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOLD_RUN_ID: ${{ needs.build.outputs.gold_run_id }}
+      MANIFEST_KEY: ${{ needs.build.outputs.manifest_key }}
+      PAGES_PROJECT: revenue-insights
+      DEPLOY_MARK: ${{ needs.build.outputs.gold_run_id }}@${{ github.sha }}
+    steps:
+      - name: Is this Gold run already live?
+        id: live
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.source != 'jobs-queue' }}
+        run: |
+          # Each deploy carries "<gold_run_id>@<commit>" as its commit message, so new
+          # Gold data or a new site version deploys once and nothing else does.
+          live=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PAGES_PROJECT" \
+            | jq -r '.result.canonical_deployment.deployment_trigger.metadata.commit_message // ""')
+          if [ "$live" = "$DEPLOY_MARK" ] && [ "$FORCE" != "true" ]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "$DEPLOY_MARK is already live; nothing to deploy." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "live: ${live:-none}; deploying $DEPLOY_MARK" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ steps.live.outputs.deploy == 'true' }}
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        if: ${{ steps.live.outputs.deploy == 'true' }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node
+        if: ${{ steps.live.outputs.deploy == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - name: Snapshot Gold and build the site
+        if: ${{ steps.live.outputs.deploy == 'true' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.JOB_DATA_R2_SECRET_ACCESS_KEY }}
+          DATA_LAKE_S3_ENDPOINT: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_ENDPOINT_URL: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+          SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.13.1
+          uv sync --frozen --no-dev
+          # Both print status, run ids and counts only; stderr stays out of the public log.
+          .venv/bin/python infra/scripts/data_lake/sales_bi_snapshot.py --manifest-key "$MANIFEST_KEY" 2> "$RUNNER_TEMP/snapshot.err"
+          .venv/bin/python infra/scripts/data_lake/sales_bi_site.py 2> "$RUNNER_TEMP/site.err"
+
+      - name: Deploy to Cloudflare Pages
+        if: ${{ steps.live.outputs.deploy == 'true' }}
+        working-directory: infra/bi/sales/deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # wrangler is the only npm package, pinned with its lockfile.
+          npm ci --no-audit --no-fund --ignore-scripts > "$RUNNER_TEMP/npm.log" 2>&1 || { echo "npm ci failed"; exit 1; }
+          npx --no-install wrangler pages deploy ../build --project-name "$PAGES_PROJECT" --branch main \
+            --commit-message "$DEPLOY_MARK" --commit-dirty=true > "$RUNNER_TEMP/deploy.log" 2>&1 \
+            || { echo "wrangler deploy failed"; exit 1; }
+          echo "deployed $DEPLOY_MARK to $PAGES_PROJECT" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  heartbeat:
+    needs: [build, bi]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Heartbeat
+        env:
+          HEARTBEAT_TOKEN: ${{ secrets.HEARTBEAT_TOKEN }}
+          CODE: ${{ needs.build.outputs.exit_code }}
+          BI: ${{ needs.bi.result }}
+        run: |
+          failed=()
+          case "$CODE" in
+            0) ;;
+            3) failed+=("rejects") ;;
+            *) failed+=("sales-marts") ;;
+          esac
+          # bi is skipped when the build failed; that is already reported above.
+          if [ "$BI" = "failure" ] || [ "$BI" = "cancelled" ]; then failed+=("sales-bi"); fi
+          if [ ${#failed[@]} -eq 0 ]; then
+            body='{"ok":true,"failed":[]}'
+          else
+            body=$(jq -cn '{ok:false, failed:$ARGS.positional}' --args "${failed[@]}")
+          fi
+          curl -fsS -X POST https://monitor.bookchaowalit.com/heartbeat/sales-marts \
+            -H "Authorization: Bearer $HEARTBEAT_TOKEN" -H "Content-Type: application/json" -d "$body"

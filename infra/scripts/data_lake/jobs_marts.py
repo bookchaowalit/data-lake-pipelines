@@ -98,13 +98,14 @@ def _writer_versions() -> dict[str, str]:
 
 
 def _run_dbt(
-    silver_part: Path,
+    silver_part: Path | None,
     workdir: Path,
     *,
     selector: str = DBT_SELECTOR,
     silver_var: str = "jobs_silver_part",
+    extra_vars: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Build `selector` against exactly one Silver part (shared with news_marts.py)."""
+    """Build `selector` against one Silver part and/or extra vars (shared with news/sales runners)."""
     dbt = resolve_dbt_bin()
     if dbt is None:
         raise JobsMartsError("dbt not found (install the data-lake extras: uv sync --all-extras)")
@@ -126,7 +127,7 @@ def _run_dbt(
             "--log-path",
             str(workdir / "logs"),
             "--vars",
-            json.dumps({silver_var: str(silver_part)}),
+            json.dumps({**({silver_var: str(silver_part)} if silver_part else {}), **(extra_vars or {})}),
         ],
         cwd=str(DBT_PROJECT_DIR),
         env=env,

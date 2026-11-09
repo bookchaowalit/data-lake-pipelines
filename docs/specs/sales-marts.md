@@ -1,6 +1,6 @@
 # Spec: sales marts (fact_sales, dim_customer SCD2, sales_daily_revenue)
 
-Status: proposed (2026-11-07; review fixes same day). Standard: ADR-0004 (spec, then failing test, then code).
+Status: proposed (2026-11-07; review fixes same day; Gold, schedule and revenue page added 2026-11-09). Standard: ADR-0004 (spec, then failing test, then code).
 Code: `infra/dbt/models/staging/stg_commerce_events.sql`, `infra/dbt/models/marts/sales/`.
 Tests: `infra/dbt/tests/sales_marts_quality.sql`, `infra/tests/data_lake/dbt_lake_test.py`
 (`check_sales_outputs`). Platform rules: ADR-0013 (one R2 lake, DuckDB + dbt, no warehouse).
@@ -92,10 +92,35 @@ agents) uses the same meaning:
 - **refunds booked** = sum of `refunds_booked_minor`, by refund date.
 - **VIP customers** = customers whose current `dim_customer` row has `tier = 'vip'`.
 
+## Gold, schedule and revenue page (added 2026-11-09)
+
+Trigger met: platform-payment is ready in Stripe test mode and the hosted `payment-relay` cron
+(2026-11-09) sends `payment.intent.succeeded` to Kafka every hour at :50.
+
+9. **Runner** `infra/scripts/data_lake/sales_marts.py`: copies Bronze
+   `domain=commerce/dataset=events/` and the stream conversion manifests
+   (`control/manifests/stream-parquet/`) from the lake into a scratch directory (one recursive
+   copy per prefix), runs `dbt build --select +path:models/marts/sales` against it, and publishes
+   `fact_sales`, `dim_customer`, `sales_daily_revenue` and `sales_rejected_events` as write-once
+   Gold parts `gold/domain=sales/dataset=<mart>/schema_version=1/part-<gold_run_id>.parquet`, a
+   manifest under `control/manifests/gold/source=commerce-events/domain=sales/` and a publish
+   pointer under `control/pointers/gold/source=commerce-events/domain=sales/`.
+   `gold_run_id` = hash(sha256 of every copied input object, model files incl. `dbt_project.yml`,
+   duckdb/pyarrow versions), so unchanged inputs write nothing new (the newest pointer is reused
+   when it names the same Gold run). An empty lake publishes empty marts; that is a success.
+10. **Schedule and alerting.** `.github/workflows/sales-marts.yml`, started by the jobs queue
+   (`sales-marts`, `20 * * * *`, 15 min after the lake sink). Public log: counts and run ids only,
+   never intent or workspace ids. Heartbeat `sales-marts` (3 h); `failed` = `sales-marts`,
+   `sales-bi`, or `rejects` when `sales_rejected_events` is not empty (a contract break upstream).
+11. **Revenue page** (`sales_bi_snapshot.py`, `sales_bi_site.py`): static, script-free, strict CSP,
+   Cloudflare Pages `revenue-insights` behind Access (owner policy). Per currency: orders, gross,
+   refunds booked, net (last 30 business days and all time), VIP customers; a daily revenue table
+   for the last 30 business days; the newest 20 sales (date, amount, tier, provider; customer and
+   intent ids shortened to 8 characters). Amounts are shown in major units with the currency code;
+   currencies are never added together. Deployed only when `<gold_run_id>@<commit>` is not live.
+
 ## Not in scope (named triggers)
 
-- Gold publication and a schedule for the sales marts: start when platform-payment is ready
-  (Stripe sandbox key) and real events land; copy the jobs_marts runner pattern.
 - Currency conversion: only when two currencies must be summed for a report.
 - Iceberg MERGE / incremental models: only when a full rebuild passes 5 minutes (ADR-0013).
 - Reverse ETL of VIP tier to the CRM: when the CRM has a field to receive it.
