@@ -36,5 +36,40 @@ jobs:
         for t in infra/tests/data_lake/*_test.py; do python "$t" || exit 1; done
       timeout-minutes: 30
 
+  # X lakehouse (inbox, digest, curated) tests, including the Postgres ones: they drop and recreate
+  # schema x_intel, so they get a throwaway Postgres 17 service, never a real database.
+  x-lakehouse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+        env:
+          POSTGRES_PASSWORD: t
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime from uv.lock
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.13.1
+          uv sync --frozen --all-extras
+
+      - name: Run x_lakehouse tests
+        env:
+          X_LAKE_TEST_DB_URL: postgresql://postgres:t@127.0.0.1:5432/postgres
+        run: |
+          for t in infra/tests/x_lakehouse/*_test.py; do uv run --frozen python "$t" || exit 1; done
+
   security:
     uses: bookchaowalit/platform-ci-workflows/.github/workflows/security.yml@87dc5e1c7e0416886a6371d5a101bb2ccba38edd # v1.1.1
