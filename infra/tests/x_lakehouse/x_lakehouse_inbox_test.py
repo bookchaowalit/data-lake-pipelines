@@ -474,6 +474,16 @@ class InboxPostgresTests(unittest.TestCase):
         self.assertEqual(inbox.prune(self.conn, NOW), 1)
         self.assertEqual(self.q("select row ->> 'post_id' from x_intel.ingest_inbox"), [("2",)])
 
+    def test_review3_a_changed_curated_row_is_refused_after_its_inbox_row_was_pruned(self):
+        self.ingest("x_signals", [signal_row("5", category="news")])
+        inbox.drain(self.conn, store=self.store, prefix="", now=NOW)
+        self.q("update x_intel.ingest_inbox set drained_at = %s returning id", NOW - timedelta(days=4))
+        self.assertEqual(inbox.prune(self.conn, NOW), 1)
+        out = self.ingest("x_signals", [signal_row("5", category="opinion")])
+        self.assertEqual(out["errors"][0]["error"], "key already stored with different values; send a new version")
+        self.assertEqual(self.ingest("x_signals", [signal_row("5", category="news")])["skipped"], 1)  # retry
+        self.assertEqual(self.q("select category from x_intel.x_signals"), [("news",)])
+
     def test_inbox_validate_fails_when_a_drained_row_is_missing_from_raw(self):
         self.ingest("x_feed", [feed_row("1")])
         inbox.drain(self.conn, store=self.store, prefix="", now=NOW)

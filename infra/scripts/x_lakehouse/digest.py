@@ -51,6 +51,7 @@ URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 HOST_RE = re.compile(r"((?:[\w-]+\.)+[^\W\d_][\w-]{1,62})((?:/[^\s\"'<>]*)?)")
 IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 WORD_JOINER = "\u2060"
+LINE_BREAK_RE = re.compile(r"\s*[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+\s*")
 MAX_FIELD = {"headline_th": 300, "summary": 500, "title": 200, "why": 300, "watch": 300}
 KIND_TITLE = {"morning": "ช่วงกลางคืน–เช้า", "midday": "ระหว่างวัน", "daily": "สรุปทั้งวัน", "weekly": "สรุปรายสัปดาห์"}
 SYSTEM = (
@@ -313,7 +314,10 @@ def validate_answer(answer: Any, facts: Facts, denylist: Sequence[str]) -> dict[
 def _e(v: Any) -> str:
     """Escaped free text that Telegram cannot turn into a link: a word joiner after every dot breaks
     host detection (defence in depth behind validate_answer; links come only from <a href>)."""
-    text = unicodedata.normalize("NFKC", str(v)).replace(".", "." + WORD_JOINER)
+    text = unicodedata.normalize("NFKC", str(v))
+    # One line per field: split_message breaks only at line breaks, so a break inside a field could
+    # leave an <a> or <b> open in one message and closed in the next (Telegram rejects both).
+    text = " ".join(LINE_BREAK_RE.split(text)).replace(".", "." + WORD_JOINER)
     return html.escape(text, quote=True)
 
 
@@ -376,9 +380,15 @@ def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:
 
 
 def send_telegram(http: httpx.Client, token: str, chat_id: str, text: str) -> None:
-    r = http.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=30,
-                  json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
-    if r.status_code != 200 or not r.json().get("ok"):
+    try:
+        r = http.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=30,
+                      json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
+        ok = r.status_code == 200 and (r.json() or {}).get("ok") is True
+    except (httpx.HTTPError, ValueError, AttributeError) as exc:
+        # A timeout or bad body joins the retry and partial/error bookkeeping in run(); the exception
+        # text is dropped because it can carry the token-bearing URL.
+        raise DigestError(f"telegram {type(exc).__name__}") from None
+    if not ok:
         raise DigestError(f"telegram http {r.status_code}")  # never echo the token-bearing URL
 
 

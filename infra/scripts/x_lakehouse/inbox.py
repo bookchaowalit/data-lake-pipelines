@@ -56,6 +56,10 @@ KEEP_DELIVERIES = timedelta(days=30)  # longer than any bot retry
 # Datasets whose stored inbox row is replaced by a newer version of the same key (no raw history:
 # the drain must apply the latest edit, not the first one).
 REPLACEABLE = tuple(n for n, d in DATASETS.items() if not d.raw)
+# Raw datasets with a curated table: prune keeps each pruned key's payload hash in ingest_seen, so a
+# key resent with other values is still refused once its inbox row is gone (raw keeps the first
+# version and would never take the change; curated alone would diverge from raw).
+SEEN_GUARDED = tuple(n for n, d in DATASETS.items() if d.raw and n in CURATED)
 CLOSED_STATES = ("closed", "done", "resolved", "archived", "dismissed")  # same list as serve_sheet
 
 # Python's str.strip() whitespace set, so SQL trims exactly what coerce.raw_text trims.
@@ -204,6 +208,13 @@ create table if not exists {S}.ingest_deliveries (
     received_at timestamptz not null default now(),
     primary key (dataset, row_key, run_id, payload_md5)
 );
+-- Keys pruned from the inbox (curated raw datasets only), kept so a changed resend is still refused.
+create table if not exists {S}.ingest_seen (
+    dataset text not null,
+    row_key text not null,
+    payload_md5 text not null,
+    primary key (dataset, row_key)
+);
 create index if not exists ingest_inbox_undrained_idx on {INBOX} (id) where drained_at is null;
 create index if not exists ingest_inbox_drained_at_idx on {INBOX} (drained_at) where drained_at is not null;
 create index if not exists ingest_inbox_run_idx on {INBOX} (run_id, dataset);
@@ -290,7 +301,7 @@ create or replace function {S}.ingest(p_dataset text, p_rows jsonb, p_run_id tex
 language plpgsql security definer set search_path = pg_catalog, {S} as $f$
 declare
   cols text[]; keys text[]; req text[];
-  r jsonb; i int := 0; n int; bad text[]; nested text[]; blank text[]; rk text;
+  r jsonb; i int := 0; n int; bad text[]; nested text[]; blank text[]; rk text; seen text;
   ins int := 0; skipped int := 0; errors jsonb := '[]'::jsonb; good jsonb := '[]'::jsonb; up jsonb;
 begin
   case p_dataset
@@ -347,6 +358,16 @@ begin
       if n > 0 then ins := ins + 1; else skipped := skipped + 1; end if;
       good := good || jsonb_build_array(r);
     else
+      select s.payload_md5 into seen from ingest_seen s where s.dataset = p_dataset and s.row_key = rk;
+      if seen is not null then  -- drained and pruned earlier: same rules as a key still in the inbox
+        if seen <> md5(r::text) then
+          errors := errors || jsonb_build_object('row', i, 'error',
+            'key already stored with different values; send a new version');
+        else
+          skipped := skipped + 1;
+        end if;
+        continue;
+      end if;
       insert into ingest_inbox (dataset, run_id, row, row_key) values (p_dataset, p_run_id, r, rk)
       on conflict (dataset, row_key) do nothing;
       get diagnostics n = row_count;
@@ -406,7 +427,7 @@ def _views() -> str:
 def _grants() -> str:
     """EXECUTE / SELECT for the connector role ``postgres`` only; nothing for anon or authenticated."""
     fns = [f"{S}.ingest(text, jsonb, text)"]
-    rels = [INBOX, f"{S}.ingest_deliveries", f"{S}.v_query_plan_sheet", f"{S}.v_watchlist_sheet", f"{S}.v_claims_open"]
+    rels = [INBOX, f"{S}.ingest_deliveries", f"{S}.ingest_seen", f"{S}.v_query_plan_sheet", f"{S}.v_watchlist_sheet", f"{S}.v_claims_open"]
     revoke = "\n".join(
         f"  if exists (select 1 from pg_roles where rolname = {_lit(role)}) then\n"
         + "".join(f"    revoke all on function {f} from {role};\n" for f in fns)
@@ -415,7 +436,7 @@ def _grants() -> str:
     grant = ("  if exists (select 1 from pg_roles where rolname = 'postgres') and current_user <> 'postgres' then\n"
              f"    grant usage on schema {S} to postgres;\n"  # do not rely on postgres being a member of x_lake
              + "".join(f"    grant execute on function {f} to postgres;\n" for f in fns)
-             + "".join(f"    grant select on {r} to postgres;\n" for r in rels[2:])
+             + "".join(f"    grant select on {r} to postgres;\n" for r in rels[3:])  # the views only
              + "  end if;")
     return f"do $$ begin\n{revoke}\n{grant}\nend $$;\n"
 
@@ -558,6 +579,10 @@ def landed(conn: Any, store: Any, prefix: str, since: datetime) -> dict[str, int
 def prune(conn: Any, now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     with conn.cursor() as c:
+        c.execute(f"insert into {S}.ingest_seen (dataset, row_key, payload_md5) "
+                  f"select dataset, row_key, md5(row::text) from {INBOX} "
+                  f"where drained_at < %s and dataset = any(%s) on conflict do nothing",
+                  (now - KEEP_DRAINED, list(SEEN_GUARDED)))
         c.execute(f"delete from {INBOX} where drained_at < %s", (now - KEEP_DRAINED,))
         n = c.rowcount
         c.execute(f"delete from {S}.ingest_deliveries where received_at < %s", (now - KEEP_DELIVERIES,))

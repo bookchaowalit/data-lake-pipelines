@@ -126,6 +126,18 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(len(_re.findall(r"<b>", p)), len(_re.findall(r"</b>", p)))
             self.assertIsNone(_re.search(r"&[a-z]*$", p))  # no entity cut in half
 
+    def test_review3_line_breaks_inside_fields_never_split_a_tag(self):
+        import re as _re
+        answer = {"headline_th": "a\nb", "summary_th": ["s\r\nt"], "watch": [],
+                  "alerts": [{"title": "x\n" * 300, "why": "y\n" * 200, "link": "https://x.com/a/status/1"}] * 8,
+                  "opportunities": []}
+        f = self._facts()
+        parts = digest.split_message(digest.render(f, answer))
+        self.assertGreater(len(parts), 1)
+        for p in parts:
+            for tag in ("a", "b"):
+                self.assertEqual(len(_re.findall(rf"<{tag}[ >]", p)), len(_re.findall(rf"</{tag}>", p)), p[:200])
+
     def test_d4_denylist_is_required_and_matches_robustly(self):
         with self.assertRaises(digest.DigestError):
             digest.load_denylist(Config(env={}))
@@ -147,6 +159,8 @@ class FakeServices:
             part = len(self.messages) + 1
             self.attempts += 1
             if part in self.telegram_fail:
+                if getattr(self, "timeout", False):
+                    raise httpx.ReadTimeout("timed out", request=request)
                 return httpx.Response(429, json={"ok": False})
             self.messages.append(json.loads(request.content)["text"])
             return httpx.Response(200, json={"ok": True, "result": {"message_id": len(self.messages)}})
@@ -275,6 +289,21 @@ class DigestPostgresTests(unittest.TestCase):
         [again] = self.run_digest(svc)
         self.assertEqual(again["status"], "already_sent_or_sending")
         self.assertEqual(len(svc.messages), 1)
+
+    def test_review3_a_telegram_timeout_is_recorded_not_raised(self):
+        long_answer = {"headline_th": "h", "summary_th": ["ก" * 480] * 5, "watch": ["ข" * 290] * 5,
+                       "alerts": [{"title": "t" * 190, "why": "w" * 290, "link": "https://x.com/a/status/1"}] * 5,
+                       "opportunities": [{"title": "t" * 190, "why": "w" * 290,
+                                          "link": "https://x.com/a/status/2"}] * 5}
+        svc = FakeServices(long_answer, telegram_fail={2})
+        svc.timeout = True
+        [rep] = self.run_digest(svc)
+        self.assertEqual((rep["status"], rep["messages"]), ("partial", 1))
+        self.assertIn("ReadTimeout", rep["error"])
+        with self.conn.cursor() as c:
+            c.execute("select status, sent_messages from x_intel.digest_log")
+            self.assertEqual(c.fetchall(), [("partial", 1)])
+        self.conn.commit()
 
     def test_review2_nothing_delivered_is_retried_next_run(self):
         svc = FakeServices({"headline_th": "h", "summary_th": ["a"]}, telegram_fail={1})
