@@ -94,6 +94,38 @@ class RenderTests(unittest.TestCase):
         fine = ok | {"summary_th": ["โพสต์บน x.com เพิ่มขึ้น 1.5 เท่า", "Python 3.12 ออกแล้ว"]}
         self.assertEqual(digest.validate_answer(fine, f, ["zzz"])["summary_th"][0], "โพสต์บน x.com เพิ่มขึ้น 1.5 เท่า")
 
+    def test_review_malformed_answer_fields_raise_digest_error(self):
+        f = self._facts()
+        base = {"headline_th": "h", "summary_th": ["a"]}
+        for bad in (base | {"watch": 2}, base | {"opportunities": 2}, base | {"alerts": [{"link": 5}]},
+                    base | {"summary_th": [3]}, base | {"headline_th": None}, ["not", "an", "object"]):
+            with self.assertRaises(digest.DigestError, msg=str(bad)):
+                digest.validate_answer(bad, f, ["zzz"])
+
+    def test_review_hosts_are_checked_after_normalising_and_with_their_path(self):
+        f = self._facts()
+        ok = {"headline_th": "h", "summary_th": ["a"]}
+        for poisoned in ("ดู evil\uff0eexample", "x.com/evil", "ไป 10.0.0.1 ด่วน", "ดู ตัวอย่าง.ไทย", "เว็บ(evil.example)"):
+            with self.assertRaises(digest.DigestError, msg=poisoned):
+                digest.validate_answer(ok | {"summary_th": [poisoned]}, f, ["zzz"])
+        self.assertTrue(digest.validate_answer(ok | {"summary_th": ["x.com/a/status/1 ok"]}, f, ["zzz"]))
+
+    def test_review_free_text_cannot_become_a_link(self):
+        text = digest.render(self._facts(top=[{"domain": "D5", "text": "visit evil.example now",
+                                                  "link": "https://x.com/a/status/1", "alert": "none"}]), None)
+        self.assertNotIn("evil.example", text)
+        self.assertIn("evil.\u2060example", text)
+        self.assertIn('href="https://x.com/a/status/1"', text)  # real links stay intact
+
+    def test_review_overlong_lines_split_into_valid_html(self):
+        import re as _re
+        line = "<b>" + "&amp;" * 3000 + "</b>"
+        parts = digest.split_message("head\n" + line + "\ntail")
+        self.assertTrue(all(len(p) <= digest.MAX_MESSAGE for p in parts))
+        for p in parts:
+            self.assertEqual(len(_re.findall(r"<b>", p)), len(_re.findall(r"</b>", p)))
+            self.assertIsNone(_re.search(r"&[a-z]*$", p))  # no entity cut in half
+
     def test_d4_denylist_is_required_and_matches_robustly(self):
         with self.assertRaises(digest.DigestError):
             digest.load_denylist(Config(env={}))
@@ -172,6 +204,45 @@ class DigestPostgresTests(unittest.TestCase):
         self.assertEqual(order[:2], ["1", "2"])  # urgent first, then the digest alert
         self.assertEqual(totals, (5, 2, 1))
 
+    def test_review_urgent_always_outranks_a_strong_digest_row(self):
+        from x_lakehouse.marts import ensure_marts
+        ensure_marts(self.conn)
+        with self.conn.cursor() as c:
+            c.execute("delete from x_intel.x_signals")
+            c.execute("insert into x_intel.x_signals (post_id, collected_at, alert_tier, opportunity_score, cred_tier, "
+                      "signal_type) values ('u', now(), 'urgent_candidate', 1, 'T4', 'News'), "
+                      "('d', now(), 'digest', 5, 'T1', 'Opportunity')")
+            c.execute("select post_id from x_intel.mart_x_signal_priority order by priority desc")
+            self.assertEqual([r[0] for r in c.fetchall()], ["u", "d"])
+        self.conn.commit()
+
+    def test_review_every_outgoing_field_is_screened(self):
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.x_signals set suggested_action = 'Contact ACME Corp' where post_id = '2'")
+        self.conn.commit()
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        [rep] = self.run_digest(svc)
+        self.assertEqual(rep["withheld"], 2)
+        self.assertNotIn("acme", svc.prompts[0].lower())
+
+    def test_review_a_digest_id_is_reserved_before_sending(self):
+        w = digest.windows(self.NOW)[0]
+        from x_lakehouse.marts import ensure_marts
+        ensure_marts(self.conn)
+        other = cur.connect(DB)
+        try:
+            self.assertTrue(digest._reserve(other, w))  # another process is sending it
+        finally:
+            other.close()
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        [rep] = self.run_digest(svc)
+        self.assertEqual(rep["status"], "already_sent_or_sending")
+        self.assertEqual(svc.messages, [])
+        with self.conn.cursor() as c:  # a claim older than 15 minutes counts as a crashed run
+            c.execute("update x_intel.digest_log set updated_at = now() - interval '20 minutes'")
+        self.conn.commit()
+        self.assertEqual(self.run_digest(svc)[0]["status"], "sent")
+
     def test_d4_matching_rows_never_reach_the_gateway_and_d3_no_double_send(self):
         answer = {"headline_th": "สรุป", "summary_th": ["ข้อ 1"],
                   "alerts": [{"title": "outage", "why": "ด่วน", "link": "https://x.com/a/status/1"}],
@@ -183,7 +254,7 @@ class DigestPostgresTests(unittest.TestCase):
         self.assertNotIn("before the window", svc.prompts[0])
         self.assertIn("ซ่อน 1 รายการ", svc.messages[0])
         [again] = self.run_digest(svc)
-        self.assertEqual(again["status"], "already_sent")
+        self.assertEqual(again["status"], "already_sent_or_sending")
         self.assertEqual(len(svc.messages), 1)
         with self.conn.cursor() as c:
             c.execute("select status, signals, sent_messages, tokens_in from x_intel.digest_log")

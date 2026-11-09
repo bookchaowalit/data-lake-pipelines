@@ -46,8 +46,12 @@ GATEWAY_URL = "https://api.bookchaowalit.com"
 PROMPT_VERSION = "x-digest-v1"
 MAX_MESSAGE = 4000  # Telegram's limit is 4,096 characters
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
-# Bare host-like text ("evil.example/x"): Telegram turns it into a link even without a scheme.
-HOST_RE = re.compile(r"(?<![\w@.-])((?:[a-z0-9-]+\.)+[a-z][a-z0-9-]{1,62})(?:/[^\s\"'<>]*)?", re.IGNORECASE)
+# Host-like text in model prose, scanned after NFKC (full-width dots become "."): labels may be
+# non-ASCII (IDN), and bare IPv4 addresses count too. Telegram turns such text into links by itself.
+HOST_RE = re.compile(r"((?:[\w-]+\.)+[^\W\d_][\w-]{1,62})((?:/[^\s\"'<>]*)?)")
+IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+WORD_JOINER = "\u2060"
+MAX_FIELD = {"headline_th": 300, "summary": 500, "title": 200, "why": 300, "watch": 300}
 KIND_TITLE = {"morning": "ช่วงกลางคืน–เช้า", "midday": "ระหว่างวัน", "daily": "สรุปทั้งวัน", "weekly": "สรุปรายสัปดาห์"}
 SYSTEM = (
     "คุณสรุปข้อมูล X intelligence ให้เจ้าของธุรกิจคนไทยอ่านใน Telegram ใช้ภาษาไทยกระชับ ตรงประเด็น "
@@ -184,7 +188,8 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
     conn.commit()
     clean = []
     for r in ranked:
-        if contains_term(" ".join(str(r.get(k) or "") for k in ("post_text", "author_handle", "post_url")), denylist):
+        # Every field that can leave the host (the whole _post projection), not just the text.
+        if contains_term(json.dumps(_post(r), ensure_ascii=False, default=str), denylist):
             f.withheld += 1
             continue
         clean.append(r)
@@ -194,7 +199,7 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
     f.opportunities = [_post(r) for r in clean if r["signal_type"] == "Opportunity"
                        or (r["opportunity_score"] or 0) >= 3][:8]
     for cid, text, status, state, nxt, link in claims:
-        if contains_term(f"{text} {link}", denylist):
+        if contains_term(" ".join(str(v or "") for v in (cid, text, status, state, link)), denylist):
             f.withheld += 1
             continue
         f.claims.append({"id": cid, "claim": (text or "")[:200], "status": status, "state": state,
@@ -234,37 +239,55 @@ def ask_gateway(http: httpx.Client, token: str, route: str, facts: Facts) -> tup
     return answer, usage
 
 
+def _text(v: Any, cap: int, what: str) -> str:
+    if not isinstance(v, str):
+        raise DigestError(f"answer shape: {what} must be text")
+    return v.strip()[:cap]
+
+
 def validate_answer(answer: Any, facts: Facts, denylist: Sequence[str]) -> dict[str, Any]:
-    if not isinstance(answer, dict) or not isinstance(answer.get("headline_th"), str):
-        raise DigestError("answer shape: headline_th missing")
-    summary = answer.get("summary_th")
-    if not isinstance(summary, list) or not all(isinstance(s, str) for s in summary):
-        raise DigestError("answer shape: summary_th must be a list of text")
-    out = {"headline_th": answer["headline_th"], "summary_th": summary[:5], "alerts": [], "opportunities": [],
-           "watch": [w for w in (answer.get("watch") or []) if isinstance(w, str)][:5]}
+    """Shape, lengths, links, client terms. Anything off raises DigestError (facts-only fallback)."""
+    if not isinstance(answer, dict):
+        raise DigestError("answer shape: not an object")
+    summary, watch = answer.get("summary_th"), answer.get("watch") or []
+    if not isinstance(summary, list) or not isinstance(watch, list):
+        raise DigestError("answer shape: summary_th / watch must be lists")
+    out: dict[str, Any] = {"headline_th": _text(answer.get("headline_th"), MAX_FIELD["headline_th"], "headline_th"),
+                           "summary_th": [_text(x, MAX_FIELD["summary"], "summary_th") for x in summary[:5]],
+                           "watch": [_text(x, MAX_FIELD["watch"], "watch") for x in watch[:5]],
+                           "alerts": [], "opportunities": []}
     allowed = facts.links
     for part in ("alerts", "opportunities"):
-        for item in (answer.get(part) or [])[:5]:
+        items = answer.get(part) or []
+        if not isinstance(items, list):
+            raise DigestError(f"answer shape: {part} must be a list")
+        for item in items[:5]:
             if not isinstance(item, dict):
                 raise DigestError(f"answer shape: {part} item")
             link = item.get("link") or ""
-            if link and link not in allowed:
+            if not isinstance(link, str) or (link and link not in allowed):
                 raise DigestError("answer has a link that is not in the facts")
-            out[part].append({"title": str(item.get("title") or ""), "why": str(item.get("why") or ""), "link": link})
-    text = json.dumps(out, ensure_ascii=False)
-    if contains_term(text, denylist):
+            out[part].append({"title": _text(item.get("title") or "", MAX_FIELD["title"], "title"),
+                              "why": _text(item.get("why") or "", MAX_FIELD["why"], "why"), "link": link})
+    if contains_term(json.dumps(out, ensure_ascii=False), denylist):
         raise DigestError("answer contains a client term")
-    # Every string the model wrote (not the validated link fields) may name only links and hosts that
-    # are in the facts: X text can carry instructions, and Telegram links bare host names by itself.
+    # Model prose may name only facts links, or a facts host on its own (e.g. "x.com"); a bare host
+    # with a path must be exactly a facts link without its scheme. No IP addresses.
     prose = [out["headline_th"], *out["summary_th"], *out["watch"]]
     prose += [v for part in ("alerts", "opportunities") for i in out[part] for v in (i["title"], i["why"])]
-    hosts = {urlsplit(u).hostname or "" for u in allowed}
+    hosts = {(urlsplit(u).hostname or "").lower() for u in allowed}
+    bare = {u.split("://", 1)[-1].rstrip("/").lower() for u in allowed}
     for chunk in prose:
-        for url in URL_RE.findall(chunk):
+        norm = unicodedata.normalize("NFKC", chunk)
+        for url in URL_RE.findall(norm):
             if url not in allowed:
                 raise DigestError("answer has a link that is not in the facts")
-        for host in HOST_RE.findall(URL_RE.sub(" ", chunk)):
-            if host.lower() not in hosts:
+        rest = URL_RE.sub(" ", norm)
+        if IPV4_RE.search(rest):
+            raise DigestError("answer names an IP address")
+        for host, path in HOST_RE.findall(rest):
+            h = host.lower()
+            if h not in hosts or (path.strip("/") and f"{h}{path}".rstrip("/").lower() not in bare):
                 raise DigestError("answer names a host that is not in the facts")
     return out
 
@@ -272,11 +295,14 @@ def validate_answer(answer: Any, facts: Facts, denylist: Sequence[str]) -> dict[
 # ---------------------------------------------------------------------------------------- message
 
 def _e(v: Any) -> str:
-    return html.escape(str(v), quote=True)
+    """Escaped free text that Telegram cannot turn into a link: a word joiner after every dot breaks
+    host detection (defence in depth behind validate_answer; links come only from <a href>)."""
+    text = unicodedata.normalize("NFKC", str(v)).replace(".", "." + WORD_JOINER)
+    return html.escape(text, quote=True)
 
 
 def _a(title: str, link: str) -> str:
-    return f'<a href="{_e(link)}">{_e(title)}</a>' if link else _e(title)
+    return f'<a href="{html.escape(link, quote=True)}">{_e(title)}</a>' if link else _e(title)
 
 
 def render(facts: Facts, answer: dict[str, Any] | None) -> str:
@@ -313,16 +339,21 @@ def render(facts: Facts, answer: dict[str, Any] | None) -> str:
 
 
 def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:
-    """Split on line breaks; a single over-long line is cut (its tags were closed on that line)."""
+    """Split at line breaks only, so every message keeps its tags balanced (render closes each tag on
+    its own line and caps every field). A line still over the limit loses its markup and is cut as
+    plain text at a character that is not inside an entity."""
     parts, cur = [], ""
     for line in text.split("\n"):
-        while len(line) > limit:
-            parts.append(line[:limit])
-            line = line[limit:]
-        if len(cur) + len(line) + 1 > limit and cur:
-            parts.append(cur)
-            cur = ""
-        cur = f"{cur}\n{line}" if cur else line
+        pieces = [line]
+        if len(line) > limit:
+            plain = html.unescape(re.sub(r"<[^>]+>", "", line))
+            step = limit // 6  # an escaped character is at most 6 characters ("&quot;")
+            pieces = [html.escape(plain[i:i + step], quote=True) for i in range(0, len(plain), step)]
+        for piece in pieces:
+            if cur and len(cur) + len(piece) + 1 > limit:
+                parts.append(cur)
+                cur = ""
+            cur = f"{cur}\n{piece}" if cur else piece
     if cur:
         parts.append(cur)
     return parts
@@ -337,12 +368,19 @@ def send_telegram(http: httpx.Client, token: str, chat_id: str, text: str) -> No
 
 # -------------------------------------------------------------------------------------------- run
 
-def _already_sent(conn: Any, digest_id: str) -> bool:
+def _reserve(conn: Any, w: Window) -> bool:
+    """Atomically claim a digest id for sending. False when it is sent, or another process is sending
+    it (a claim older than 15 minutes is treated as a crashed run and taken over)."""
     with conn.cursor() as c:
-        c.execute(f"select 1 from {S}.digest_log where digest_id = %s and status = 'sent'", (digest_id,))
-        hit = c.fetchone() is not None
+        c.execute(f"insert into {S}.digest_log (digest_id, kind, window_start, window_end, status) "
+                  f"values (%s, %s, %s, %s, 'sending') on conflict (digest_id) do update "
+                  f"set status = 'sending', window_end = excluded.window_end, updated_at = now() "
+                  f"where {S}.digest_log.status not in ('sent', 'sending') "
+                  f"or ({S}.digest_log.status = 'sending' and {S}.digest_log.updated_at < now() - interval '15 minutes') "
+                  f"returning digest_id", (w.digest_id, w.kind, w.start, w.end))
+        ok = c.fetchone() is not None
     conn.commit()
-    return hit
+    return ok
 
 
 def _log_row(conn: Any, w: Window, status: str, **kw: Any) -> None:
@@ -376,8 +414,8 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
     try:
         for w in windows(now, kind):
             rep: dict[str, Any] = {"digest_id": w.digest_id, "kind": w.kind}
-            if mode == "send" and _already_sent(conn, w.digest_id):
-                reports.append(rep | {"status": "already_sent"})
+            if mode == "send" and not _reserve(conn, w):
+                reports.append(rep | {"status": "already_sent_or_sending"})
                 continue
             facts = build_facts(conn, w, denylist)
             rep |= {"signals": facts.totals["signals"], "alerts": facts.totals["alerts"],
@@ -386,7 +424,10 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 reports.append(rep | {"status": "dry"})
                 continue
             answer, usage, error = None, {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}, None
-            if facts.totals["signals"]:
+            if facts.totals["signals"] and contains_term(json.dumps(facts.as_prompt(), ensure_ascii=False,
+                                                                   default=str), denylist):
+                error = "client term in the facts; gateway not called"  # never send it out
+            elif facts.totals["signals"]:
                 try:
                     raw, usage = ask_gateway(client, cfg.require("AI_GATEWAY_TOKEN"),
                                              cfg.get("X_DIGEST_ROUTE", "sheet-summaries"), facts)

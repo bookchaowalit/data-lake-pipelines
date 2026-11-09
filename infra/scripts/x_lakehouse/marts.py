@@ -15,9 +15,11 @@ TZ = SHEET_TZ
 
 # Higher = more important. Urgent alerts first, then digest alerts, then opportunity score, source
 # tier and engagement. Kept in SQL so the digest and any BI tool rank the same way.
+# The tier weight (1000s) is larger than the most the secondary terms can add (100 + 15 + 10 + 10 =
+# 135), so an urgent candidate always ranks above any digest alert, and a digest alert above the rest.
 PRIORITY = """
-      case alert_tier when 'urgent_candidate' then 300 when 'digest' then 200 else 0 end
-    + coalesce(opportunity_score, 0) * 20
+      case alert_tier when 'urgent_candidate' then 2000 when 'digest' then 1000 else 0 end
+    + least(5, greatest(0, coalesce(opportunity_score, 0))) * 20
     + case when cred_tier in ('T1', 'T2') then 15 when cred_tier in ('T3', 'T3b') then 5 else 0 end
     + case when signal_type in ('Opportunity', 'Warning', 'Launch') then 10 else 0 end
     + least(10, ln(1 + coalesce(likes, 0) + coalesce(reposts, 0) * 2) * 1.5)
