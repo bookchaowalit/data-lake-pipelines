@@ -484,6 +484,18 @@ class InboxPostgresTests(unittest.TestCase):
         self.assertEqual(self.ingest("x_signals", [signal_row("5", category="news")])["skipped"], 1)  # retry
         self.assertEqual(self.q("select category from x_intel.x_signals"), [("news",)])
 
+    def test_review4_the_same_number_written_differently_is_a_retry_after_prune(self):
+        row = signal_row("6", category="news")  # opportunity_score 3
+        self.ingest("x_signals", [row])
+        self.assertEqual(self.ingest("x_signals", [row | {"opportunity_score": 3.0}])["skipped"], 1)  # jsonb: 3 == 3.0
+        inbox.drain(self.conn, store=self.store, prefix="", now=NOW)
+        self.q("update x_intel.ingest_inbox set drained_at = %s returning id", NOW - timedelta(days=4))
+        inbox.prune(self.conn, NOW)
+        after = self.ingest("x_signals", [row | {"opportunity_score": 3.0}])
+        self.assertEqual((after["errors"], after["skipped"]), ([], 1))
+        self.assertEqual(self.ingest("x_signals", [row | {"opportunity_score": 4}])["errors"][0]["error"],
+                         "key already stored with different values; send a new version")
+
     def test_inbox_validate_fails_when_a_drained_row_is_missing_from_raw(self):
         self.ingest("x_feed", [feed_row("1")])
         inbox.drain(self.conn, store=self.store, prefix="", now=NOW)

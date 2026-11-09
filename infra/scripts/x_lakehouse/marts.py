@@ -32,7 +32,7 @@ create or replace view {S}.mart_x_signal_priority as
 select post_id, collected_at, (collected_at at time zone '{TZ}') as collected_ict,
        domain, topic, category, signal_type, alert_tier, route, cred_tier, content_label,
        opportunity_score, verification_status, suggested_action, author_handle, post_url,
-       left(post_text, 400) as post_text, likes, reposts, views,
+       post_text, likes, reposts, views,  -- full text: the digest screens it before any cut
        round(({PRIORITY})::numeric, 2) as priority
 from {S}.x_signals;
 
@@ -49,7 +49,7 @@ from {S}.x_signals
 group by 1, 2;
 
 create or replace view {S}.mart_claims_queue as
-select claim_id, left(claim, 300) as claim, verification_status, queue_state, priority, next_check,
+select claim_id, claim, verification_status, queue_state, priority, next_check,
        last_checked, first_seen_link, checked_by
 from {S}.claims
 where coalesce(lower(queue_state), '') not in ('closed', 'done', 'resolved', 'archived', 'dismissed')

@@ -169,6 +169,8 @@ class FakeServices:
         if self.raw_body is not None:
             return httpx.Response(200, content=self.raw_body)
         if self.gateway_status != 200:
+            if getattr(self, "error_body", None) is not None:
+                return httpx.Response(self.gateway_status, content=self.error_body)
             return httpx.Response(self.gateway_status, json={"code": "monthly_budget_exceeded"})
         return httpx.Response(200, json={"content": json.dumps(self.answer, ensure_ascii=False),
                                          "usage": {"input_tokens": 900, "output_tokens": 300},
@@ -304,6 +306,35 @@ class DigestPostgresTests(unittest.TestCase):
             c.execute("select status, sent_messages from x_intel.digest_log")
             self.assertEqual(c.fetchall(), [("partial", 1)])
         self.conn.commit()
+
+    def test_review4_a_client_term_past_the_text_cut_still_withholds_the_row(self):
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.x_signals set post_text = %s where post_id = '3'", ("x " * 300 + "acme corp",))
+            c.execute("insert into x_intel.claims (claim_id, claim, queue_state) values ('CL-9', %s, 'open')",
+                      ("y " * 200 + "acme corp",))
+        self.conn.commit()
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        [rep] = self.run_digest(svc)
+        self.assertEqual(rep["withheld"], 3)  # post 4, post 3 (term past 280/400 chars), claim CL-9
+        self.assertNotIn("status/3", svc.prompts[0])
+        self.assertNotIn("CL-9", svc.prompts[0])
+
+    def test_review4_a_client_domain_label_never_reaches_telegram(self):
+        self.cfg = Config(env=dict(self.cfg.env) | {"CLIENT_DENYLIST": "acme corp\nAT&T"})
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.x_signals set domain = 'AT&T Watch' where post_id = '3'")
+        self.conn.commit()
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        [rep] = self.run_digest(svc)
+        self.assertIn(rep["status"], ("sent", "blocked"))
+        self.assertTrue(all("at&amp;t" not in m.lower() and "at&t" not in m.lower() for m in svc.messages))
+        self.assertTrue(all("at&t" not in p.lower() for p in svc.prompts))
+
+    def test_review4_a_non_object_gateway_error_body_falls_back(self):
+        svc = FakeServices(gateway_status=503)
+        svc.error_body = b"[\"unavailable\"]"
+        [rep] = self.run_digest(svc)
+        self.assertEqual((rep["status"], rep["ai"]), ("sent", False))
 
     def test_review2_nothing_delivered_is_retried_next_run(self):
         svc = FakeServices({"headline_th": "h", "summary_th": ["a"]}, telegram_fail={1})

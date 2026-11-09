@@ -190,7 +190,8 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
         c.execute(f"select coalesce(domain,'(none)'), count(*), count(*) filter (where alert_tier <> 'none') "
                   f"from {S}.mart_x_signal_priority where collected_at >= %s and collected_at < %s "
                   f"group by 1 order by 2 desc limit 8", (w.start, w.end))
-        f.domains = [{"domain": d, "signals": int(k), "alerts": int(a)} for d, k, a in c.fetchall()]
+        f.domains = [{"domain": d, "signals": int(k), "alerts": int(a)} for d, k, a in c.fetchall()
+                     if not contains_term(d, denylist)]  # a domain label can name a client too
         cols = ("post_id", "domain", "signal_type", "cred_tier", "verification_status", "suggested_action",
                 "author_handle", "post_text", "post_url", "opportunity_score", "alert_tier", "priority")
         c.execute(f"select {', '.join(cols)} from {S}.mart_x_signal_priority "
@@ -203,8 +204,8 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
     conn.commit()
     clean = []
     for r in ranked:
-        # Every field that can leave the host (the whole _post projection), not just the text.
-        if any_term(_post(r), denylist):
+        # Every field of the full row, before _post cuts the text (a term past the cut still counts).
+        if any_term(r, denylist):
             f.withheld += 1
             continue
         clean.append(r)
@@ -239,7 +240,8 @@ def ask_gateway(http: httpx.Client, token: str, route: str, facts: Facts) -> tup
     if r.status_code != 200:
         code = ""
         try:
-            code = str(r.json().get("code") or "")[:64]
+            err = r.json()
+            code = str(err.get("code") or "")[:64] if isinstance(err, dict) else ""
         except ValueError:
             pass
         raise DigestError(f"gateway http {r.status_code} {code}".strip())
@@ -460,7 +462,9 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 except DigestError as exc:
                     error = str(exc)  # facts-only fallback below
             text = render(facts, answer)
-            if contains_term(text, denylist):
+            # What Telegram shows: tags dropped, entities decoded, word joiners removed.
+            shown = html.unescape(re.sub(r"<[^>]+>", " ", text)).replace(WORD_JOINER, "")
+            if contains_term(text, denylist) or contains_term(shown, denylist):
                 _log_row(conn, w, "blocked", signals=facts.totals["signals"], error="client term in message", **usage)
                 reports.append(rep | {"status": "blocked"})
                 continue

@@ -80,6 +80,15 @@ def _helpers() -> str:
     """Pure SQL helpers mirroring coerce.py. ``_raw_text`` must match ``coerce.raw_text`` byte for byte
     (row keys); the typed casts may be slightly looser because the drain re-applies the Python rules."""
     return f"""
+-- Payload hash for ingest_seen, equal exactly when jsonb equality holds (the in-inbox check uses
+-- "is distinct from", where 3 = 3.0 = 3.00): numbers are hashed as their trimmed numeric value.
+create or replace function {S}.payload_md5(r jsonb) returns text language sql immutable parallel safe
+set search_path = pg_catalog as $f$
+  select md5(coalesce(jsonb_object_agg(k, case when jsonb_typeof(v) = 'number'
+                                               then to_jsonb(trim_scale((v #>> '{{}}')::numeric)) else v end),
+                      '{{}}'::jsonb)::text)
+  from jsonb_each(r) e(k, v)
+$f$;
 create or replace function {S}._strip(t text) returns text language sql immutable parallel safe
 set search_path = pg_catalog as $f$
   select regexp_replace(t, '^[{_WS}]+|[{_WS}]+$', '', 'g')
@@ -360,7 +369,7 @@ begin
     else
       select s.payload_md5 into seen from ingest_seen s where s.dataset = p_dataset and s.row_key = rk;
       if seen is not null then  -- drained and pruned earlier: same rules as a key still in the inbox
-        if seen <> md5(r::text) then
+        if seen <> payload_md5(r) then
           errors := errors || jsonb_build_object('row', i, 'error',
             'key already stored with different values; send a new version');
         else
@@ -580,7 +589,7 @@ def prune(conn: Any, now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     with conn.cursor() as c:
         c.execute(f"insert into {S}.ingest_seen (dataset, row_key, payload_md5) "
-                  f"select dataset, row_key, md5(row::text) from {INBOX} "
+                  f"select dataset, row_key, {S}.payload_md5(row) from {INBOX} "
                   f"where drained_at < %s and dataset = any(%s) on conflict do nothing",
                   (now - KEEP_DRAINED, list(SEEN_GUARDED)))
         c.execute(f"delete from {INBOX} where drained_at < %s", (now - KEEP_DRAINED,))
