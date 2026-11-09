@@ -137,16 +137,23 @@ class RenderTests(unittest.TestCase):
 class FakeServices:
     """Gateway + Telegram behind one MockTransport; records what was sent."""
 
-    def __init__(self, answer=None, gateway_status=200):
-        self.answer, self.gateway_status = answer, gateway_status
-        self.prompts, self.messages = [], []
+    def __init__(self, answer=None, gateway_status=200, raw_body=None, telegram_fail=()):
+        self.answer, self.gateway_status, self.raw_body = answer, gateway_status, raw_body
+        self.telegram_fail = set(telegram_fail)  # 1-based part numbers Telegram always rejects
+        self.prompts, self.messages, self.attempts = [], [], 0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.host == "api.telegram.org":
+            part = len(self.messages) + 1
+            self.attempts += 1
+            if part in self.telegram_fail:
+                return httpx.Response(429, json={"ok": False})
             self.messages.append(json.loads(request.content)["text"])
             return httpx.Response(200, json={"ok": True, "result": {"message_id": len(self.messages)}})
         body = json.loads(request.content)
         self.prompts.append(body["messages"][1]["content"])
+        if self.raw_body is not None:
+            return httpx.Response(200, content=self.raw_body)
         if self.gateway_status != 200:
             return httpx.Response(self.gateway_status, json={"code": "monthly_budget_exceeded"})
         return httpx.Response(200, json={"content": json.dumps(self.answer, ensure_ascii=False),
@@ -242,6 +249,47 @@ class DigestPostgresTests(unittest.TestCase):
             c.execute("update x_intel.digest_log set updated_at = now() - interval '20 minutes'")
         self.conn.commit()
         self.assertEqual(self.run_digest(svc)[0]["status"], "sent")
+
+    def test_review2_malformed_gateway_envelopes_fall_back(self):
+        from x_lakehouse.marts import ensure_marts
+        ensure_marts(self.conn)
+        for body in (b"<html>oops</html>", b"[1, 2]", b'{"content": 5}', b'{"content": "not json"}'):
+            with self.conn.cursor() as c:
+                c.execute("delete from x_intel.digest_log")
+            self.conn.commit()
+            svc = FakeServices(raw_body=body)
+            [rep] = self.run_digest(svc)
+            self.assertEqual((rep["status"], rep["ai"]), ("sent", False), body)
+            self.assertIn("ข้อมูลดิบ", svc.messages[0])
+
+    def test_review2_partial_delivery_is_never_resent(self):
+        long_answer = {"headline_th": "h", "summary_th": ["ก" * 480] * 5, "watch": ["ข" * 290] * 5,
+                       "alerts": [{"title": "t" * 190, "why": "w" * 290, "link": "https://x.com/a/status/1"}] * 5,
+                       "opportunities": [{"title": "t" * 190, "why": "w" * 290,
+                                          "link": "https://x.com/a/status/2"}] * 5}
+        svc = FakeServices(long_answer, telegram_fail={2})
+        [rep] = self.run_digest(svc)
+        self.assertEqual((rep["status"], rep["messages"]), ("partial", 1))
+        self.assertGreaterEqual(rep["of"], 2)
+        self.assertEqual(svc.attempts, 3)  # part 1 once, part 2 twice (one retry)
+        [again] = self.run_digest(svc)
+        self.assertEqual(again["status"], "already_sent_or_sending")
+        self.assertEqual(len(svc.messages), 1)
+
+    def test_review2_nothing_delivered_is_retried_next_run(self):
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]}, telegram_fail={1})
+        self.assertEqual(self.run_digest(svc)[0]["status"], "error")
+        svc.telegram_fail.clear()
+        self.assertEqual(self.run_digest(svc)[0]["status"], "sent")
+
+    def test_review2_client_name_split_by_a_line_break_is_still_screened(self):
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.x_signals set suggested_action = 'call Acme\nCorp' where post_id = '3'")
+        self.conn.commit()
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        [rep] = self.run_digest(svc)
+        self.assertEqual(rep["withheld"], 2)
+        self.assertNotIn("acme", svc.prompts[0].lower())
 
     def test_d4_matching_rows_never_reach_the_gateway_and_d3_no_double_send(self):
         answer = {"headline_th": "สรุป", "summary_th": ["ข้อ 1"],

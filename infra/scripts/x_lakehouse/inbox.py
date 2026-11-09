@@ -608,7 +608,9 @@ def compare(conn: Any, sheet_typed: dict[str, list[Any]], window_start: datetime
         all_inbox = {rk for rk, _, _ in mine}
         recent = [(rk, row) for rk, row, ra in mine if window_start <= ra <= upper_received]
         c = CURATED.get(n)
-        if c is not None and c.version:
+        # Only Claims are rewritten in place in the Sheet (one row per claim); every other dataset,
+        # x_signals included, keeps each version as its own Sheet row, so it is compared by row key.
+        if c is not None and n == "claims":
             from .coerce import type_row
 
             sheet_pks = {tuple(r.values.get(k) for k in c.pk) for r in rows}

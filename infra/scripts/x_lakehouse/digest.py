@@ -126,6 +126,20 @@ def contains_term(text: str, denylist: Sequence[str]) -> bool:
     return any(t in plain or (skeleton(t) and skeleton(t) in bare) for t in denylist)
 
 
+def _strings(obj: Any) -> list[str]:
+    """Every scalar inside a nested structure, as text (screened raw, not via a JSON encoding that
+    would turn a line break inside a client name into the letters ``\\n``)."""
+    if isinstance(obj, dict):
+        return [x for v in obj.values() for x in _strings(v)]
+    if isinstance(obj, (list, tuple, set)):
+        return [x for v in obj for x in _strings(v)]
+    return [] if obj is None else [str(obj)]
+
+
+def any_term(obj: Any, denylist: Sequence[str]) -> bool:
+    return any(contains_term(v, denylist) for v in _strings(obj))
+
+
 # ------------------------------------------------------------------------------------------ facts
 
 @dataclass
@@ -189,7 +203,7 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
     clean = []
     for r in ranked:
         # Every field that can leave the host (the whole _post projection), not just the text.
-        if contains_term(json.dumps(_post(r), ensure_ascii=False, default=str), denylist):
+        if any_term(_post(r), denylist):
             f.withheld += 1
             continue
         clean.append(r)
@@ -199,7 +213,7 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
     f.opportunities = [_post(r) for r in clean if r["signal_type"] == "Opportunity"
                        or (r["opportunity_score"] or 0) >= 3][:8]
     for cid, text, status, state, nxt, link in claims:
-        if contains_term(" ".join(str(v or "") for v in (cid, text, status, state, link)), denylist):
+        if any_term([cid, text, status, state, link], denylist):
             f.withheld += 1
             continue
         f.claims.append({"id": cid, "claim": (text or "")[:200], "status": status, "state": state,
@@ -228,14 +242,16 @@ def ask_gateway(http: httpx.Client, token: str, route: str, facts: Facts) -> tup
         except ValueError:
             pass
         raise DigestError(f"gateway http {r.status_code} {code}".strip())
-    data = r.json()
     try:
-        answer = json.loads(data.get("content") or "")
-    except ValueError:
-        raise DigestError("gateway answer is not JSON") from None
-    usage = {"tokens_in": int((data.get("usage") or {}).get("input_tokens") or 0),
-             "tokens_out": int((data.get("usage") or {}).get("output_tokens") or 0),
-             "cost_usd": float(data.get("estimated_cost_usd") or 0)}
+        data = r.json()
+        if not isinstance(data, dict) or not isinstance(data.get("content"), str):
+            raise DigestError("gateway envelope: content missing")
+        answer = json.loads(data["content"])
+        u = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        usage = {"tokens_in": int(u.get("input_tokens") or 0), "tokens_out": int(u.get("output_tokens") or 0),
+                 "cost_usd": float(data.get("estimated_cost_usd") or 0)}
+    except (ValueError, TypeError, AttributeError):
+        raise DigestError("gateway answer is not valid JSON") from None
     return answer, usage
 
 
@@ -269,7 +285,7 @@ def validate_answer(answer: Any, facts: Facts, denylist: Sequence[str]) -> dict[
                 raise DigestError("answer has a link that is not in the facts")
             out[part].append({"title": _text(item.get("title") or "", MAX_FIELD["title"], "title"),
                               "why": _text(item.get("why") or "", MAX_FIELD["why"], "why"), "link": link})
-    if contains_term(json.dumps(out, ensure_ascii=False), denylist):
+    if any_term(out, denylist):
         raise DigestError("answer contains a client term")
     # Model prose may name only facts links, or a facts host on its own (e.g. "x.com"); a bare host
     # with a path must be exactly a facts link without its scheme. No IP addresses.
@@ -375,7 +391,7 @@ def _reserve(conn: Any, w: Window) -> bool:
         c.execute(f"insert into {S}.digest_log (digest_id, kind, window_start, window_end, status) "
                   f"values (%s, %s, %s, %s, 'sending') on conflict (digest_id) do update "
                   f"set status = 'sending', window_end = excluded.window_end, updated_at = now() "
-                  f"where {S}.digest_log.status not in ('sent', 'sending') "
+                  f"where {S}.digest_log.status not in ('sent', 'sending', 'partial') "
                   f"or ({S}.digest_log.status = 'sending' and {S}.digest_log.updated_at < now() - interval '15 minutes') "
                   f"returning digest_id", (w.digest_id, w.kind, w.start, w.end))
         ok = c.fetchone() is not None
@@ -390,7 +406,7 @@ def _log_row(conn: Any, w: Window, status: str, **kw: Any) -> None:
                   f"on conflict (digest_id) do update set window_end = excluded.window_end, status = excluded.status, "
                   f"signals = excluded.signals, sent_messages = excluded.sent_messages, tokens_in = excluded.tokens_in, "
                   f"tokens_out = excluded.tokens_out, cost_usd = excluded.cost_usd, error = excluded.error, "
-                  f"updated_at = now() where {S}.digest_log.status <> 'sent'",
+                  f"updated_at = now() where {S}.digest_log.status not in ('sent', 'partial')",
                   (w.digest_id, w.kind, w.start, w.end, status, kw.get("signals"), kw.get("sent"),
                    kw.get("tokens_in"), kw.get("tokens_out"), kw.get("cost_usd"), kw.get("error")))
     conn.commit()
@@ -424,8 +440,7 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 reports.append(rep | {"status": "dry"})
                 continue
             answer, usage, error = None, {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}, None
-            if facts.totals["signals"] and contains_term(json.dumps(facts.as_prompt(), ensure_ascii=False,
-                                                                   default=str), denylist):
+            if facts.totals["signals"] and any_term(facts.as_prompt(), denylist):
                 error = "client term in the facts; gateway not called"  # never send it out
             elif facts.totals["signals"]:
                 try:
@@ -440,12 +455,25 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 reports.append(rep | {"status": "blocked"})
                 continue
             parts = split_message(text)
-            try:
-                for p in parts:
-                    send_telegram(client, cfg.require("TELEGRAM_NOTI_BOT_TOKEN"), cfg.require("TELEGRAM_NOTI_CHAT_ID"), p)
-            except DigestError as exc:
-                _log_row(conn, w, "error", signals=facts.totals["signals"], error=str(exc), **usage)
-                reports.append(rep | {"status": "error", "error": str(exc)})
+            delivered, failure = 0, None
+            for p in parts:
+                for attempt in (1, 2):  # one retry per part
+                    try:
+                        send_telegram(client, cfg.require("TELEGRAM_NOTI_BOT_TOKEN"),
+                                      cfg.require("TELEGRAM_NOTI_CHAT_ID"), p)
+                        delivered += 1
+                        failure = None
+                        break
+                    except DigestError as exc:
+                        failure = str(exc)
+                if failure:
+                    break
+            if failure:
+                # Nothing delivered: retryable ('error'). Some parts delivered: terminal ('partial'), so a
+                # later run never resends the parts the owner already has.
+                status = "partial" if delivered else "error"
+                _log_row(conn, w, status, signals=facts.totals["signals"], sent=delivered, error=failure, **usage)
+                reports.append(rep | {"status": status, "messages": delivered, "of": len(parts), "error": failure})
                 continue
             _log_row(conn, w, "sent", signals=facts.totals["signals"], sent=len(parts), error=error, **usage)
             reports.append(rep | {"status": "sent", "ai": answer is not None, "fallback_reason": error,

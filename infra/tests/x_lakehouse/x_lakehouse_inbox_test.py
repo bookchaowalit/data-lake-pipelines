@@ -28,7 +28,7 @@ from x_lakehouse import curated as cur  # noqa: E402
 from x_lakehouse.coerce import row_key, type_row  # noqa: E402
 from x_lakehouse.config import Config  # noqa: E402
 from x_lakehouse.lake import LocalStore, read_dataset  # noqa: E402
-from x_lakehouse.schemas import DATASETS, SERVE_TABS, X_FEED  # noqa: E402
+from x_lakehouse.schemas import DATASETS, SERVE_TABS, X_FEED, X_SIGNALS  # noqa: E402
 from x_lakehouse.sheet import SheetError, assert_writable  # noqa: E402
 
 DB = os.environ.get("X_LAKE_TEST_DB_URL", "")
@@ -501,6 +501,14 @@ class InboxPostgresTests(unittest.TestCase):
         self.assertEqual(inbox.compare(self.conn, sheet, window, NOW)["x_feed"]["missing_in_inbox"], 0)
         self.ingest("x_feed", [feed_row("9")])  # in the inbox, never in the Sheet
         self.assertEqual(inbox.compare(self.conn, sheet, window, NOW)["x_feed"]["missing_in_sheet"], 1)
+
+    def test_compare_flags_a_newer_signal_version_missing_from_the_sheet(self):
+        old, new = signal_row("8", "2026-11-13 08:00"), signal_row("8", "2026-11-13 09:00")
+        self.ingest("x_signals", [old, new])
+        sheet = {"x_signals": [type_row(X_SIGNALS, old)]}
+        window = datetime.now(timezone.utc) - timedelta(days=1)
+        rep = inbox.compare(self.conn, sheet, window, NOW)["x_signals"]
+        self.assertEqual(rep["missing_in_sheet"], 1)
 
     def test_t5_both_mode_run_fails_on_a_mismatch_and_passes_on_a_match(self):
         rows = [feed_row("1", "2026-11-13 08:00"), feed_row("2", "2026-11-13 08:05")]
