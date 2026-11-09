@@ -82,9 +82,22 @@ def _copy_inputs(store: ObjectStore, scratch: Path) -> str:
         for key, body in store.get_prefix(STREAM_MANIFEST_PREFIX).items()
         if key.endswith(".json") and _is_commerce_manifest(body)
     }
-    objects.update(
-        (key, body) for key, body in store.get_prefix(BRONZE_PREFIX).items() if key.endswith(".parquet")
-    )
+    parts = {key: body for key, body in store.get_prefix(BRONZE_PREFIX).items() if key.endswith(".parquet")}
+    objects.update(parts)
+    # Batch writers commit through control/manifests/source=<src>/batch_id=*.json, which the
+    # staging model accepts too; copy those of every source that has commerce parts.
+    sources = {
+        segment.split("=", 1)[1]
+        for key in parts
+        for segment in key.split("/")
+        if segment.startswith("source=")
+    }
+    for source in sorted(sources):
+        objects.update(
+            (key, body)
+            for key, body in store.get_prefix(f"control/manifests/source={source}/").items()
+            if "/batch_id=" in key and key.endswith(".json") and _is_commerce_manifest(body)
+        )
     digest = hashlib.sha256()
     for key in sorted(objects):
         target = scratch / key

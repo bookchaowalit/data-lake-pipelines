@@ -33,7 +33,13 @@ SITE_NAME = "Revenue"
 NAV = [("/", "Overview"), ("/sales/", "Recent sales")]
 WINDOW_DAYS = 30
 RECENT = 20
-ZERO_DECIMAL = {"JPY"}
+# ISO 4217 minor-unit exponents that are not 2; any other code uses the ISO default of 2.
+CURRENCY_EXPONENT = {
+    **dict.fromkeys(("BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX", "UYI",
+                     "VND", "VUV", "XAF", "XOF", "XPF"), 0),
+    **dict.fromkeys(("BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"), 3),
+    "CLF": 4,
+}
 SKIP_ASSETS = shutil.ignore_patterns("filter.js")
 
 
@@ -84,11 +90,12 @@ def load_snapshot(database: Path) -> Snapshot:
 
 def _money(minor: Any, currency: str) -> str:
     value = int(minor or 0)
-    if currency.upper() in ZERO_DECIMAL:
-        return f"{value:,} {escape(currency.upper())}"
+    code = currency.upper()
+    exponent = CURRENCY_EXPONENT.get(code, 2)
     sign = "-" if value < 0 else ""
-    major, cents = divmod(abs(value), 100)
-    return f"{sign}{major:,}.{cents:02d} {escape(currency.upper())}"
+    major, fraction = divmod(abs(value), 10**exponent)
+    tail = f".{fraction:0{exponent}d}" if exponent else ""
+    return f"{sign}{major:,}{tail} {escape(code)}"
 
 
 def _short(value: Any) -> str:

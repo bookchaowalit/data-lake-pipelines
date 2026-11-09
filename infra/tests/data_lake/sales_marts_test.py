@@ -138,5 +138,18 @@ class SalesMartsTests(unittest.TestCase):
             self.assertNotIn("ws-secret-1", text)
 
 
+    def test_batch_committed_commerce_events_are_included(self):
+        from data_lake.ingest import ingest_payload
+
+        with tempfile.TemporaryDirectory() as lake:
+            # A batch writer (not the stream sink): its parts are committed by
+            # control/manifests/source=<src>/batch_id=*.json, which the model also accepts.
+            envelope = _pay("batch-1", 700, "2026-11-09T05:00:00Z")
+            ingest_payload(json.dumps([envelope]).encode(), [{**envelope, "received_at": "2026-11-09T06:00:00Z"}],
+                           source="backfill", domain="commerce", dataset="events", data_lake_uri=lake,
+                           input_format="text", event_time_field="occurred_at", privacy_class="internal")
+            result = self._run(lake)
+            self.assertEqual(result["marts"]["fact_sales"]["rows"], 1)
+
 if __name__ == "__main__":
     unittest.main()

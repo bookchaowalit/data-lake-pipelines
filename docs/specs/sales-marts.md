@@ -98,8 +98,9 @@ Trigger met: platform-payment is ready in Stripe test mode and the hosted `payme
 (2026-11-09) sends `payment.intent.succeeded` to Kafka every hour at :50.
 
 9. **Runner** `infra/scripts/data_lake/sales_marts.py`: copies Bronze
-   `domain=commerce/dataset=events/` and the stream conversion manifests
-   (`control/manifests/stream-parquet/`) from the lake into a scratch directory (one recursive
+   `domain=commerce/dataset=events/`, the commerce stream conversion manifests
+   (`control/manifests/stream-parquet/`) and the commerce batch manifests of every source that has
+   commerce parts (`control/manifests/source=<src>/batch_id=*.json`) from the lake into a scratch directory (one recursive
    copy per prefix), runs `dbt build --select +path:models/marts/sales` against it, and publishes
    `fact_sales`, `dim_customer`, `sales_daily_revenue` and `sales_rejected_events` as write-once
    Gold parts `gold/domain=sales/dataset=<mart>/schema_version=1/part-<gold_run_id>.parquet`, a
@@ -117,7 +118,8 @@ Trigger met: platform-payment is ready in Stripe test mode and the hosted `payme
    refunds booked, net (last 30 business days and all time), VIP customers; a daily revenue table
    for the last 30 business days; the newest 20 sales (date, amount, tier, provider; customer and
    intent ids shortened to 8 characters). Amounts are shown in major units with the currency code;
-   currencies are never added together. Deployed only when `<gold_run_id>@<commit>` is not live.
+   currencies are never added together. Major units follow the ISO 4217 exponent (0 for KRW, JPY …,
+   3 for KWD, BHD …, otherwise 2). Deployed only when `<gold_run_id>@<commit>` is not live.
 
 ## Not in scope (named triggers)
 

@@ -97,5 +97,16 @@ class RevenuePageTests(unittest.TestCase):
                                   data_lake_uri=lake)
 
 
+
+class MoneyFormatTests(unittest.TestCase):
+    def test_minor_units_follow_the_iso_4217_exponent(self):
+        from data_lake.sales_bi_site import _money
+
+        self.assertEqual(_money(2000, "thb"), "20.00 THB")
+        self.assertEqual(_money(500, "KRW"), "500 KRW")
+        self.assertEqual(_money(1234, "kwd"), "1.234 KWD")
+        self.assertEqual(_money(-1234, "BHD"), "-1.234 BHD")
+        self.assertEqual(_money(5, "XYZ"), "0.05 XYZ")  # unknown code: the ISO default of 2
+
 if __name__ == "__main__":
     unittest.main()
