@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: news_articles_daily
+    description: Articles per Bangkok publish date, publisher and section (docs/specs/news-marts.md).
+    tests:
+      - unique_combination_of_columns:
+          arguments:
+            columns: [published_date, publisher, section]
+    columns:
+      - name: published_date
+        tests: [not_null]
+      - name: publisher
+        tests: [not_null]
+      - name: articles
+        tests: [not_null]
+
+  - name: news_feed_health
+    description: One row per publisher with totals, 7-day count, newest publish and capture.
+    columns:
+      - name: publisher
+        tests: [not_null, unique]
+      - name: last_seen_at
+        tests: [not_null]
+
+  - name: news_latest_articles
+    description: Newest 30 articles per publisher; headline and link only.
+    tests:
+      - unique_combination_of_columns:
+          arguments:
+            columns: [publisher, rank]
+    columns:
+      - name: headline
+        tests: [not_null]
+      - name: canonical_url
+        tests: [not_null]

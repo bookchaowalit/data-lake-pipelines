@@ -97,7 +97,14 @@ def _writer_versions() -> dict[str, str]:
     return {"duckdb": duckdb.__version__, "pyarrow": pa.__version__}
 
 
-def _run_dbt(silver_part: Path, workdir: Path) -> dict[str, Any]:
+def _run_dbt(
+    silver_part: Path,
+    workdir: Path,
+    *,
+    selector: str = DBT_SELECTOR,
+    silver_var: str = "jobs_silver_part",
+) -> dict[str, Any]:
+    """Build `selector` against exactly one Silver part (shared with news_marts.py)."""
     dbt = resolve_dbt_bin()
     if dbt is None:
         raise JobsMartsError("dbt not found (install the data-lake extras: uv sync --all-extras)")
@@ -109,7 +116,7 @@ def _run_dbt(silver_part: Path, workdir: Path) -> dict[str, Any]:
             str(dbt),
             "build",
             "--select",
-            DBT_SELECTOR,
+            selector,
             "--profiles-dir",
             str(DBT_PROJECT_DIR),
             "--project-dir",
@@ -119,7 +126,7 @@ def _run_dbt(silver_part: Path, workdir: Path) -> dict[str, Any]:
             "--log-path",
             str(workdir / "logs"),
             "--vars",
-            json.dumps({"jobs_silver_part": str(silver_part)}),
+            json.dumps({silver_var: str(silver_part)}),
         ],
         cwd=str(DBT_PROJECT_DIR),
         env=env,

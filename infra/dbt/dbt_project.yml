@@ -16,6 +16,9 @@ vars:
   # Exactly one jobs Silver part; required for the jobs models (see
   # stg_job_postings). The jobs_marts runner sets it.
   jobs_silver_part: ""
+  # Exactly one news Silver part (stg_news_articles); news_marts.py sets it.
+  news_silver_part: ""
+  news_timezone: "Asia/Bangkok"
   # Sales marts (docs/specs/sales-marts.md).
   sales_timezone: "Asia/Bangkok"
   sales_late_after_hours: 24

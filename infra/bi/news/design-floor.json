@@ -1,0 +1,23 @@
+{
+  "floor": "1.0.0",
+  "public": false,
+  "target": {
+    "static": "build"
+  },
+  "routes": [
+    "/",
+    "/latest/",
+    {
+      "path": "/no-such-page/",
+      "status": 404
+    }
+  ],
+  "widths": [
+    320,
+    375,
+    390,
+    768,
+    1440
+  ],
+  "waivers": []
+}

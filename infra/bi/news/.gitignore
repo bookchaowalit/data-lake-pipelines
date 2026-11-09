@@ -1,0 +1,4 @@
+# Build outputs (news_bi_site.py, news_bi_snapshot.py); never committed.
+build/
+news.duckdb
+deploy/node_modules/

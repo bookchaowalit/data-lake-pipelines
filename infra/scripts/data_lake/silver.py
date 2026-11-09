@@ -19,6 +19,7 @@ import re
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -133,6 +134,17 @@ CRYPTO_FUNDING_SILVER_COLUMNS = COMMON_SILVER_COLUMNS + (
     "funding_time_ms",
     "funding_rate",
     "mark_price",
+)
+NEWS_SILVER_COLUMNS = COMMON_SILVER_COLUMNS + (
+    "publisher",
+    "article_id",
+    "headline",
+    "canonical_url",
+    "published_at",
+    "section",
+    "author",
+    "feed_url",
+    "image_url",
 )
 SILVER_COLUMNS = JOB_SILVER_COLUMNS
 
@@ -541,8 +553,57 @@ def normalize_jobs_envelope_row(
     return output, errors
 
 
+def normalize_news_row(
+    row: dict[str, Any],
+    *,
+    silver_run_id: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Map one news Bronze envelope into the news Silver schema (docs/specs/news-marts.md)."""
+    payload = parse_payload_json(row)
+    fields = _common_silver_fields(row, silver_run_id=silver_run_id, payload=payload)
+    headline = _first_text(payload, "headline", "title")
+    url = _canonical_url(_first_text(payload, "canonical_url", "url", "link"))
+    published_at = _first_text(payload, "published_at", "published")
+    errors = []
+    if not fields["source_record_id"]:
+        errors.append("missing source_record_id")
+    if not headline:
+        errors.append("missing headline")
+    if not url:
+        errors.append("missing canonical_url")
+    if not published_at:
+        errors.append("missing published_at")
+    else:
+        try:
+            parsed = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+        except ValueError:
+            errors.append("unparseable published_at")
+        else:
+            # fromisoformat takes forms DuckDB cannot cast (basic format, comma
+            # fractions), so Silver stores one canonical UTC form; no offset = UTC.
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            published_at = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    output = {
+        **fields,
+        "publisher": _first_text(payload, "source", "publisher"),
+        "article_id": _text(payload.get("article_id")),
+        "headline": headline,
+        "canonical_url": url,
+        "published_at": published_at,
+        "section": _text(payload.get("section")),
+        "author": _text(payload.get("author")),
+        "feed_url": _first_text(payload, "source_feed_url", "source_url"),
+        "image_url": _text(payload.get("image_url")),
+        "quality_status": "invalid" if errors else "valid",
+        "quality_errors": _canonical_json(errors),
+    }
+    return output, errors
+
+
 NORMALIZERS = {
     "jobs_envelope": (normalize_jobs_envelope_row, COMMON_SILVER_COLUMNS),
+    "news_articles": (normalize_news_row, NEWS_SILVER_COLUMNS),
     "crypto_ohlcv": (normalize_crypto_ohlcv_row, CRYPTO_OHLCV_SILVER_COLUMNS),
     "crypto_funding": (normalize_crypto_funding_row, CRYPTO_FUNDING_SILVER_COLUMNS),
 }

@@ -267,6 +267,38 @@ def build_jobs_silver_fixture(lake_root: Path) -> Path:
     return lake_root / result["silver_key"]
 
 
+def build_news_silver_fixture(lake_root: Path) -> Path:
+    """One small news Silver part, built by the real Bronze → Silver code (docs/specs/news-marts.md)."""
+    from data_lake.ingest import ingest_payload
+    from data_lake.news_marts import news_silver_contract
+    from data_lake.silver import transform_bronze_to_silver
+
+    ingest_payload(
+        b"dbt-news-fixture",
+        [
+            {
+                "id": f"Fixture News|{i}",
+                "source": "Fixture News",
+                "article_id": str(i),
+                "headline": f"Fixture headline {i}",
+                "canonical_url": f"https://example.invalid/news/{i}",
+                "published_at": "2026-09-30T03:00:00Z",
+                "captured_at": "2026-09-30T04:00:00Z",
+            }
+            for i in range(3)
+        ],
+        source="book-news-scraping",
+        domain="news",
+        dataset="articles",
+        data_lake_uri=str(lake_root),
+        input_format="text",
+        event_time_field="captured_at",
+        privacy_class="public",
+    )
+    result = transform_bronze_to_silver(news_silver_contract(), data_lake_uri=str(lake_root))
+    return lake_root / result["silver_key"]
+
+
 def build_synthetic_x_feed(lake_root: Path) -> None:
     """Twenty fake X sightings through the real lake writer, plus a re-export with one changed row."""
     sys.path.insert(0, str(ROOT / "infra" / "scripts" / "utils"))
@@ -514,6 +546,7 @@ def run() -> bool:
         build_synthetic_bronze(bronze_root)
         export_registry_fixture(Path(tmp))
         jobs_silver_part = build_jobs_silver_fixture(Path(tmp))
+        news_silver_part = build_news_silver_fixture(Path(tmp))
         build_synthetic_x_feed(Path(tmp))
         build_synthetic_commerce_events(Path(tmp))
         target_dir = Path(tmp) / "target"
@@ -539,6 +572,7 @@ def run() -> bool:
                             Path(tmp) / "control" / "manifests"
                         ),
                         "jobs_silver_part": str(jobs_silver_part),
+                        "news_silver_part": str(news_silver_part),
                     }
                 ),
             ],
@@ -575,6 +609,7 @@ def run() -> bool:
                             Path(tmp) / "control" / "manifests"
                         ),
                         "jobs_silver_part": str(jobs_silver_part),
+                        "news_silver_part": str(news_silver_part),
                     }
                 ),
             ],
@@ -612,6 +647,7 @@ def run() -> bool:
                         "bronze_root": str(bronze_root),
                         "bronze_manifest_root": str(Path(tmp) / "control" / "manifests"),
                         "jobs_silver_part": str(jobs_silver_part),
+                        "news_silver_part": str(news_silver_part),
                         "sales_vip_threshold_minor": {},
                     }
                 ),
