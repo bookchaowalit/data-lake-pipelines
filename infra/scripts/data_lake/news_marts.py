@@ -195,13 +195,22 @@ def run_news_marts(
         "silver_key": silver["silver_key"],
         "silver_record_count": silver["record_count"],
     }
-    body = (_canonical_json(pointer) + "\n").encode("utf-8")
-    pointer_put = store.put_bytes(
-        f"{GOLD_POINTER_PREFIX}published_at={now.strftime('%Y%m%dT%H%M%SZ')}-{gold_run_id}-"
-        f"{hashlib.sha256(body).hexdigest()[:12]}.json",
-        body,
-        content_type="application/json",
-    )
+    # A replay of unchanged inputs writes nothing: when the newest pointer
+    # already names this Gold run, it is reused (spec item 5). Only a new Gold
+    # run publishes a new pointer.
+    existing = store.list_keys(GOLD_POINTER_PREFIX)
+    newest = max(existing) if existing else ""
+    if newest and f"-{gold_run_id}-" in newest.rsplit("/", 1)[-1]:
+        pointer_key, pointer_existed = newest, True
+    else:
+        body = (_canonical_json(pointer) + "\n").encode("utf-8")
+        pointer_put = store.put_bytes(
+            f"{GOLD_POINTER_PREFIX}published_at={now.strftime('%Y%m%dT%H%M%SZ')}-{gold_run_id}-"
+            f"{hashlib.sha256(body).hexdigest()[:12]}.json",
+            body,
+            content_type="application/json",
+        )
+        pointer_key, pointer_existed = pointer_put.key, pointer_put.existed
     quality = silver["quality"]
     return {
         "status": "stale" if freshness["stale"] else "success",
@@ -220,8 +229,8 @@ def run_news_marts(
         "marts": marts,
         "manifest_key": manifest_put.key,
         "manifest_existed": manifest_put.existed,
-        "pointer_key": pointer_put.key,
-        "pointer_existed": pointer_put.existed,
+        "pointer_key": pointer_key,
+        "pointer_existed": pointer_existed,
         "dbt": manifest["dbt"],
         "freshness": freshness,
     }

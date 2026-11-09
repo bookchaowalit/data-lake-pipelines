@@ -58,7 +58,9 @@ Day-0 profile (2026-11-09): 17,669 Bronze rows, 3,482 articles, 0 missing headli
    parts at `gold/domain=news/dataset=<mart>/schema_version=1/part-<gold_run_id>.parquet`, manifest
    at `control/manifests/gold/source=book-news-scraping/domain=news/gold_run_id=<id>.json`, and a
    publish pointer at `control/pointers/gold/source=book-news-scraping/domain=news/published_at=<ts>-<id>-<sha12>.json`.
-   A rerun over unchanged Bronze writes nothing new (every put reports `existed`).
+   A rerun over unchanged Bronze writes nothing new (every put reports `existed`); unlike jobs, the
+   pointer is reused when the newest one already names this Gold run, since no news reader uses
+   pointer age as a freshness signal (the `news-marts` heartbeat covers liveness).
 6. **Freshness.** The run is `stale` (exit 3, still published) when any of the four expected
    publishers is missing from `news_feed_health` or its `last_seen_at` is older than
    `--stale-hours` (default 6: three missed captures). The result lists the stale publishers.

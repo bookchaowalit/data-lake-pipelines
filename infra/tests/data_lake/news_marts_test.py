@@ -216,6 +216,22 @@ class NewsMartsTests(unittest.TestCase):
             self.assertEqual(pointer["manifest_key"], first["manifest_key"])
             self.assertEqual(pointer["domain"], "news")
 
+    def test_rerun_with_a_later_clock_reuses_the_pointer_until_gold_changes(self):
+        prefix = "control/pointers/gold/source=book-news-scraping/domain=news/"
+        with tempfile.TemporaryDirectory() as root:
+            _ingest(root, _fixture())
+            first = self._run(root)
+            later = self._run(root, now=datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc))
+            self.assertEqual(later["pointer_key"], first["pointer_key"])
+            self.assertTrue(later["pointer_existed"])
+            self.assertEqual(len(ObjectStore(root).list_keys(prefix)), 1)
+            # New Bronze → new Gold run → a new, greater pointer.
+            _ingest(root, [_article("Matichon", 50, captured_at="2026-11-09T11:15:00Z")], raw=b"batch-2")
+            newer = self._run(root, now=datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc))
+            self.assertNotEqual(newer["gold_run_id"], first["gold_run_id"])
+            self.assertFalse(newer["pointer_existed"])
+            self.assertEqual(max(ObjectStore(root).list_keys(prefix)), newer["pointer_key"])
+
     def test_quality_gate_failure_writes_no_gold(self):
         from data_lake.silver import SilverQualityError
 
