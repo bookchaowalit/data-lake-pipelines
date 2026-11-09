@@ -36,7 +36,7 @@ GOLD_SOURCE = "book-news-scraping"
 GOLD_DOMAIN = "news"
 GOLD_MANIFEST_PREFIX = f"control/manifests/gold/source={GOLD_SOURCE}/domain={GOLD_DOMAIN}/"
 GOLD_POINTER_PREFIX = f"control/pointers/gold/source={GOLD_SOURCE}/domain={GOLD_DOMAIN}/"
-TRANSFORM_VERSION = "news-articles-silver.v1"
+TRANSFORM_VERSION = "news-articles-silver.v2"  # v2: article URLs keep their query
 # The four approved feeds (run_news_capture.NEWS_FEEDS); a missing one is stale.
 EXPECTED_PUBLISHERS = ("Bangkok Post Business", "Blognone", "Matichon", "Notebookspec")
 # Mart name → columns that order its rows, so exported bytes are stable.

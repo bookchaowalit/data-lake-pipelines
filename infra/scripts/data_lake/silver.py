@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = ROOT / "infra" / "scripts"
@@ -244,6 +244,27 @@ def _canonical_url(value: str) -> str:
     host = parsed.netloc.lower()
     path = parsed.path.rstrip("/") or "/"
     return urlunsplit((parsed.scheme.lower(), host, path, "", ""))
+
+
+TRACKING_PARAMS = ("fbclid", "gclid", "dclid", "msclkid", "mc_cid", "mc_eid", "igshid")
+
+
+def _article_url(value: str) -> str:
+    """Normalize a news article URL: keep the query (it can identify the article, e.g. ?p=123),
+    drop only tracking parameters and the fragment."""
+    value = value.strip()
+    if not value:
+        return ""
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value.rstrip("/")
+    query = [
+        (key, val)
+        for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and key.lower() not in TRACKING_PARAMS
+    ]
+    path = parsed.path if parsed.path == "/" else parsed.path.rstrip("/") or "/"
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, urlencode(query), ""))
 
 
 def _safe_component(value: str) -> str:
@@ -562,7 +583,7 @@ def normalize_news_row(
     payload = parse_payload_json(row)
     fields = _common_silver_fields(row, silver_run_id=silver_run_id, payload=payload)
     headline = _first_text(payload, "headline", "title")
-    url = _canonical_url(_first_text(payload, "canonical_url", "url", "link"))
+    url = _article_url(_first_text(payload, "canonical_url", "url", "link"))
     published_at = _first_text(payload, "published_at", "published")
     errors = []
     if not fields["source_record_id"]:

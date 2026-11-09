@@ -36,6 +36,8 @@ Day-0 profile (2026-11-09): 17,669 Bronze rows, 3,482 articles, 0 missing headli
    author, feed_url, image_url`. A row is invalid when `source_record_id`, `headline`,
    `canonical_url` or a parseable `published_at` is missing; invalid rows go to `articles_rejects`
    under the runner's `--max-invalid-ratio` (default 0.02), otherwise the run fails and writes no Gold.
+   `canonical_url` keeps its query (it can identify the article, e.g. `?p=123`); only `utm_*`, click-id
+   parameters and the fragment are dropped (transform `news-articles-silver.v2`).
    A valid `published_at` is stored as canonical UTC ISO 8601 (`...Z`; no offset = UTC), because
    `fromisoformat` accepts forms DuckDB cannot cast.
 2. **Staging.** `stg_news_articles` reads exactly one Silver part (`news_silver_part` var, set by

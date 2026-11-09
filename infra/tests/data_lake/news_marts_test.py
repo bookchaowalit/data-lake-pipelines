@@ -281,5 +281,19 @@ class NewsMartsTests(unittest.TestCase):
         with mock.patch.object(Path, "read_bytes", patched):
             self.assertNotEqual(news_marts._model_fingerprint(), before)
 
+    def test_article_urls_keep_their_query_but_drop_tracking(self):
+        from data_lake.silver import normalize_news_row
+
+        for raw, expected in (
+            ("https://www.matichon.co.th/?p=123", "https://www.matichon.co.th/?p=123"),
+            ("https://WWW.Example.com/a/1?id=9&utm_source=rss&utm_medium=x&fbclid=abc#top",
+             "https://www.example.com/a/1?id=9"),
+            ("https://example.com/news/1/", "https://example.com/news/1"),
+        ):
+            row = {"source_record_id": "Matichon|1",
+                   "payload_json": json.dumps(_article("Matichon", 1, canonical_url=raw))}
+            item, errors = normalize_news_row(row, silver_run_id="silver-x")
+            self.assertEqual((errors, item["canonical_url"]), ([], expected), raw)
+
 if __name__ == "__main__":
     unittest.main()
