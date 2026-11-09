@@ -20,6 +20,7 @@ Source (``X_LAKE_SOURCE``, default ``sheet``; see inbox.py for the bot side):
             after an ok run delete inbox rows drained more than 3 days ago.
 inbox/both take a Postgres advisory lock: a second drainer exits 0 without writing.
 ``X_LAKE_SERVE=execute`` refreshes the serving tabs after an ok run (default: dry run, counts only).
+``X_LAKE_DIGEST=dry|send`` builds (and sends) the Telegram digest at the end of every run (digest.py).
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ if __package__ in (None, ""):
 
 import httpx  # noqa: E402
 
-from . import backfill, inbox, serve_sheet  # noqa: E402
+from . import backfill, digest, inbox, serve_sheet  # noqa: E402
 from . import curated as cur  # noqa: E402
 from .lake import open_store  # noqa: E402
 from .coerce import TZ  # noqa: E402
@@ -83,6 +84,22 @@ def _serve_execute() -> int:
     return code
 
 
+def _digest(cfg: Config) -> None:
+    """X_LAKE_DIGEST=dry|send: the Telegram digest (digest.py). A failure is logged, never fatal to the
+    lake run; the reports hold counts and ids only."""
+    mode = cfg.get("X_LAKE_DIGEST", "off").lower() or "off"
+    if mode == "off":
+        return
+    try:
+        conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
+        try:
+            _log(event="digest", mode=mode, reports=digest.run(conn, cfg, mode=mode))
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - reported, the lake run's result stands
+        _log(event="digest", mode=mode, status="error", error=f"{type(exc).__name__}: {str(exc)[:200]}")
+
+
 def _source(cfg: Config) -> str:
     src = cfg.get("X_LAKE_SOURCE", "sheet").lower()
     if src not in ("sheet", "both", "inbox"):
@@ -121,6 +138,7 @@ def _finish(ok: bool, started: datetime, cfg: Config) -> int:
         ok = _serve_execute() == 0
     else:
         _log(event="serve_dry_run", rows=_serve_counts(cfg))
+    _digest(cfg)
     _log(event="done", ok=ok, seconds=round((datetime.now(timezone.utc) - started).total_seconds()))
     _heartbeat(ok)
     return 0 if ok else 1
