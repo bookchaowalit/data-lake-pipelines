@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -45,6 +46,8 @@ GATEWAY_URL = "https://api.bookchaowalit.com"
 PROMPT_VERSION = "x-digest-v1"
 MAX_MESSAGE = 4000  # Telegram's limit is 4,096 characters
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+# Bare host-like text ("evil.example/x"): Telegram turns it into a link even without a scheme.
+HOST_RE = re.compile(r"(?<![\w@.-])((?:[a-z0-9-]+\.)+[a-z][a-z0-9-]{1,62})(?:/[^\s\"'<>]*)?", re.IGNORECASE)
 KIND_TITLE = {"morning": "ช่วงกลางคืน–เช้า", "midday": "ระหว่างวัน", "daily": "สรุปทั้งวัน", "weekly": "สรุปรายสัปดาห์"}
 SYSTEM = (
     "คุณสรุปข้อมูล X intelligence ให้เจ้าของธุรกิจคนไทยอ่านใน Telegram ใช้ภาษาไทยกระชับ ตรงประเด็น "
@@ -251,9 +254,18 @@ def validate_answer(answer: Any, facts: Facts, denylist: Sequence[str]) -> dict[
     text = json.dumps(out, ensure_ascii=False)
     if contains_term(text, denylist):
         raise DigestError("answer contains a client term")
-    for url in URL_RE.findall(" ".join([out["headline_th"], *out["summary_th"], *out["watch"]])):
-        if url not in allowed:
-            raise DigestError("answer has a link that is not in the facts")
+    # Every string the model wrote (not the validated link fields) may name only links and hosts that
+    # are in the facts: X text can carry instructions, and Telegram links bare host names by itself.
+    prose = [out["headline_th"], *out["summary_th"], *out["watch"]]
+    prose += [v for part in ("alerts", "opportunities") for i in out[part] for v in (i["title"], i["why"])]
+    hosts = {urlsplit(u).hostname or "" for u in allowed}
+    for chunk in prose:
+        for url in URL_RE.findall(chunk):
+            if url not in allowed:
+                raise DigestError("answer has a link that is not in the facts")
+        for host in HOST_RE.findall(URL_RE.sub(" ", chunk)):
+            if host.lower() not in hosts:
+                raise DigestError("answer names a host that is not in the facts")
     return out
 
 

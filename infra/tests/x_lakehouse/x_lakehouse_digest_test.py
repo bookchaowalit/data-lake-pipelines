@@ -83,6 +83,16 @@ class RenderTests(unittest.TestCase):
             digest.validate_answer(ok | {"summary_th": ["ดู https://evil.example/y"]}, f, ["zzz"])
         with self.assertRaises(digest.DigestError):
             digest.validate_answer({"summary_th": []}, f, ["zzz"])
+        # Links or bare hosts hidden in any model-written field are refused (Telegram links bare hosts).
+        for poisoned in (ok | {"alerts": [{"title": "ดู evil.example/login", "why": "w", "link": ""}]},
+                         ok | {"opportunities": [{"title": "t", "why": "ไปที่ https://evil.example", "link": ""}]},
+                         ok | {"watch": ["phish.example.co"]},
+                         ok | {"headline_th": "สรุป bit.ly/abc"}):
+            with self.assertRaises(digest.DigestError, msg=str(poisoned)):
+                digest.validate_answer(poisoned, f, ["zzz"])
+        # Hosts of the facts' own links, version numbers and Thai text stay allowed.
+        fine = ok | {"summary_th": ["โพสต์บน x.com เพิ่มขึ้น 1.5 เท่า", "Python 3.12 ออกแล้ว"]}
+        self.assertEqual(digest.validate_answer(fine, f, ["zzz"])["summary_th"][0], "โพสต์บน x.com เพิ่มขึ้น 1.5 เท่า")
 
     def test_d4_denylist_is_required_and_matches_robustly(self):
         with self.assertRaises(digest.DigestError):
