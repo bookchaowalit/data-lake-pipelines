@@ -107,7 +107,8 @@ def normalize_text(text: str) -> str:
 
 
 def skeleton(text: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFKD", text.casefold()) if c.isalnum())
+    folded = unicodedata.normalize("NFKC", text).casefold()  # fold compatibility forms (e.g. math bold) first
+    return "".join(c for c in unicodedata.normalize("NFKD", folded) if c.isalnum())
 
 
 def load_denylist(cfg: Config) -> tuple[str, ...]:

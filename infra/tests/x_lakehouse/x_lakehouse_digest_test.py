@@ -144,6 +144,8 @@ class RenderTests(unittest.TestCase):
         terms = digest.load_denylist(Config(env={"CLIENT_DENYLIST": "# comment\nAcme Corp\n"}))
         self.assertTrue(digest.contains_term("news about ACME​corp today", terms))
         self.assertFalse(digest.contains_term("nothing here", terms))
+        bold = "\U0001d400\U0001d41c\U0001d426\U0001d41e-Corp"  # mathematical bold "Acme"
+        self.assertTrue(digest.contains_term(bold, terms))
 
 
 class FakeServices:

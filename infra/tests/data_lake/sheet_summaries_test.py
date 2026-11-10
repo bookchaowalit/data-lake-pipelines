@@ -325,6 +325,12 @@ class DenylistTests(unittest.TestCase):
         career = [r for r in output_rows(sheets) if r["tab"] == "Chief Career"][0]
         self.assertEqual(career["status"], "no_change")
 
+    def test_denylist_folds_compatibility_letters_before_case(self) -> None:
+        from sync.sheet_summaries import _contains_term
+
+        bold = "\U0001d400\U0001d41c\U0001d426\U0001d41e-Corp"  # mathematical bold "Acme" + "-Corp"
+        self.assertTrue(_contains_term(bold, ("acme corp",)))
+
     def test_missing_or_empty_denylist_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             empty = Path(tmp) / "denylist.txt"

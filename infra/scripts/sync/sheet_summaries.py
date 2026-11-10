@@ -403,9 +403,12 @@ def skeleton(text: str) -> str:
     Drops every format, combining, invisible, space and punctuation character on both sides, so
     zero-width joiners, variation selectors, combining marks or NFKC composition cannot split or
     merge a client term. It is stricter (more rows match), never looser, than the plain form.
+    Compatibility forms are folded (NFKC) before case folding: casefold leaves mathematical-bold letters
+    as they are, and NFKD after it would turn them into upper-case letters that never match.
     """
 
-    return "".join(c for c in unicodedata.normalize("NFKD", text.casefold()) if c.isalnum())
+    folded = unicodedata.normalize("NFKC", text).casefold()  # fold compatibility forms (e.g. math bold) first
+    return "".join(c for c in unicodedata.normalize("NFKD", folded) if c.isalnum())
 
 
 def _contains_term(text: str, denylist: Sequence[str]) -> bool:
