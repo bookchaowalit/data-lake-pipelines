@@ -9,12 +9,14 @@ ENV UV_LINK_MODE=copy PYTHONUNBUFFERED=1 PYTHONUTF8=1
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project --extra sheets --extra sentry
-COPY infra/scripts/data_lake/__init__.py infra/scripts/data_lake/observability.py infra/scripts/data_lake/
+COPY infra/scripts/data_lake/__init__.py infra/scripts/data_lake/observability.py infra/scripts/data_lake/jobs_bi_site.py infra/scripts/data_lake/
 COPY infra/scripts/x_lakehouse infra/scripts/x_lakehouse
+# The x-insights site (X_LAKE_BI) reuses the jobs site's CSS and design-floor tokens.
+COPY infra/bi/jobs/assets infra/bi/jobs/assets
 
 # Build-time smoke test: the package imports and the contract builds its Arrow schemas (no network).
 WORKDIR /app/infra/scripts
-RUN /app/.venv/bin/python -c "import x_lakehouse.scheduled; from x_lakehouse.schemas import DATASETS; [d.arrow_schema() for d in DATASETS.values()]"
+RUN /app/.venv/bin/python -c "import x_lakehouse.scheduled, x_lakehouse.bi_site, x_lakehouse.pages_deploy; from x_lakehouse.schemas import DATASETS; [d.arrow_schema() for d in DATASETS.values()]; from data_lake.jobs_bi_site import ASSETS; assert (ASSETS / 'site.css').is_file()"
 
 RUN useradd --create-home --uid 10001 lakehouse
 USER lakehouse

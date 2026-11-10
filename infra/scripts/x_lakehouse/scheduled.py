@@ -21,6 +21,8 @@ Source (``X_LAKE_SOURCE``, default ``sheet``; see inbox.py for the bot side):
 inbox/both take a Postgres advisory lock: a second drainer exits 0 without writing.
 ``X_LAKE_SERVE=execute`` refreshes the serving tabs after an ok run (default: dry run, counts only).
 ``X_LAKE_DIGEST=dry|send`` builds (and sends) the Telegram digest at the end of every run (digest.py).
+``X_LAKE_BI=build|deploy`` then renders the x-insights site (bi_site.py) and, with ``deploy``, uploads it to
+Cloudflare Pages (pages_deploy.py; spec docs/specs/x-insights.md).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -100,6 +103,37 @@ def _digest(cfg: Config) -> None:
         _log(event="digest", mode=mode, status="error", error=f"{type(exc).__name__}: {str(exc)[:200]}")
 
 
+def _bi(cfg: Config) -> None:
+    """X_LAKE_BI=build|deploy: the x-insights site. Like the digest, a failure is logged (exception type
+    only) and never changes the lake run's result."""
+    mode = cfg.get("X_LAKE_BI", "off").lower() or "off"
+    if mode == "off":
+        return
+    try:
+        if mode not in ("build", "deploy"):
+            raise ValueError("X_LAKE_BI must be off, build or deploy")
+        from . import bi_site, pages_deploy
+
+        denylist = digest.load_denylist(cfg)
+        conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
+        try:
+            snap = bi_site.load_snapshot(conn, denylist)
+        finally:
+            conn.close()
+        with tempfile.TemporaryDirectory(prefix="x-insights-") as tmp:
+            built = bi_site.build_site(snap, Path(tmp) / "site")
+            result: dict[str, object] = {"status": "built"}
+            if mode == "deploy":
+                result = pages_deploy.deploy(Path(tmp) / "site", account=cfg.require("CLOUDFLARE_ACCOUNT_ID"),
+                                             project=cfg.get("X_LAKE_BI_PROJECT", "x-insights"),
+                                             token=cfg.require("CLOUDFLARE_PAGES_TOKEN"), mark=str(built["mark"]))
+        _log(event="bi", mode=mode, **built, **result)
+    except Exception as exc:  # noqa: BLE001 - reported, the lake run's result stands
+        # PagesError text is the API step, HTTP status and error codes only; other errors log their type.
+        detail = str(exc)[:200] if type(exc).__name__ == "PagesError" else None
+        _log(event="bi", mode=mode, status="error", error=type(exc).__name__, detail=detail)
+
+
 def _source(cfg: Config) -> str:
     src = cfg.get("X_LAKE_SOURCE", "sheet").lower()
     if src not in ("sheet", "both", "inbox"):
@@ -139,6 +173,7 @@ def _finish(ok: bool, started: datetime, cfg: Config) -> int:
     else:
         _log(event="serve_dry_run", rows=_serve_counts(cfg))
     _digest(cfg)
+    _bi(cfg)
     _log(event="done", ok=ok, seconds=round((datetime.now(timezone.utc) - started).total_seconds()))
     _heartbeat(ok)
     return 0 if ok else 1
