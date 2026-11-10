@@ -51,10 +51,12 @@ create table if not exists {MAP} (
 
 create or replace function {S}.assign_watchlist_row() returns trigger language plpgsql as $fn$
 begin
+    -- Lock first: a seed holds the same lock, so an insert during the seed waits for it and then numbers the row,
+    -- instead of seeing the still-uncommitted map as empty and leaving the entry unnumbered for good.
+    perform pg_advisory_xact_lock(hashtext('{MAP}'));
     if not exists (select 1 from {MAP}) then
         return null;  -- not seeded yet: numbering starts from the tab, never from here
     end if;
-    perform pg_advisory_xact_lock(hashtext('{MAP}'));
     insert into {MAP} (row_no, requesting_chief, type, value)
     select coalesce(max(row_no), {FIRST_DATA_ROW - 1}) + 1, new.requesting_chief, new.type, new.value from {MAP}
     on conflict (requesting_chief, type, value) do nothing;
@@ -94,6 +96,17 @@ def _key(values: dict[str, Any]) -> tuple[str, str, str] | None:
     return None if any(v in (None, "") for v in k) else tuple(str(v) for v in k)  # type: ignore[return-value]
 
 
+def header_problems(check: Any) -> dict[str, Any]:
+    """Missing columns or rows without a key make the tab's numbering untrustworthy (keys are read by name, so
+    column order alone does not)."""
+    out: dict[str, Any] = {}
+    if check.missing_columns:
+        out["missing_columns"] = list(check.missing_columns)
+    if check.blank_key_rows:
+        out["blank_key_rows"] = check.blank_key_rows
+    return out
+
+
 def sheet_keys(typed_rows: list[Any]) -> list[tuple[int, tuple[str, str, str]]]:
     out = []
     for r in typed_rows:
@@ -111,26 +124,43 @@ def read_map(conn: Any) -> dict[tuple[str, str, str], int]:
     return rows
 
 
+def _report(plan: dict[str, Any]) -> dict[str, Any]:
+    report = {k: (len(v) if isinstance(v, list) else v) for k, v in plan.items()}
+    report["blocked"] = bool(plan["moved"] or plan["number_conflicts"] or plan["duplicate_keys_in_sheet"])
+    return report
+
+
+def _unmapped(c: Any) -> int:
+    c.execute(f"select count(*) from {S}.x_watchlist w where not exists (select 1 from {MAP} m "
+              "where m.requesting_chief = w.requesting_chief and m.type = w.type and m.value = w.value)")
+    return int(c.fetchone()[0])
+
+
 def seed(conn: Any, sheet: list[tuple[int, tuple[str, str, str]]], *, execute: bool) -> dict[str, Any]:
     """Dry run unless ``execute``. Inserts the tab's numbers, then numbers any curated entry the tab lacks after the
-    highest one (in key order), all in one transaction. Refuses (nothing written) on any moved or conflicting row."""
-    plan = plan_seed(sheet, read_map(conn))
-    report = {k: (len(v) if isinstance(v, list) else v) for k, v in plan.items()}
-    blocked = bool(plan["moved"] or plan["number_conflicts"] or plan["duplicate_keys_in_sheet"])
-    report["blocked"] = blocked
-    with conn.cursor() as c:
-        c.execute(f"select count(*) from {S}.x_watchlist w where not exists (select 1 from {MAP} m "
-                  "where m.requesting_chief = w.requesting_chief and m.type = w.type and m.value = w.value)")
-        report["curated_unmapped_before"] = int(c.fetchone()[0])
-    conn.commit()
-    if not execute or blocked:
+    highest one (in key order). With ``execute`` the map is read, planned and written in ONE transaction under the
+    allocation lock the trigger also takes, so no concurrent insert can take a planned number in between; any moved,
+    conflicting or duplicate row aborts the whole seed (nothing written)."""
+    if not execute:
+        report = _report(plan_seed(sheet, read_map(conn)))
+        with conn.cursor() as c:
+            report["curated_unmapped_before"] = _unmapped(c)
+        conn.commit()
         report["written"] = 0
         return report
     with conn.cursor() as c:
         c.execute("select pg_advisory_xact_lock(hashtext(%s))", (MAP,))
-        for row_no, (chief, typ, value) in plan["to_insert"]:
-            c.execute(f"insert into {MAP} (row_no, requesting_chief, type, value, origin) values (%s, %s, %s, %s, 'sheet')"
-                      " on conflict do nothing", (row_no, chief, typ, value))
+        c.execute(f"select requesting_chief, type, value, row_no from {MAP}")
+        plan = plan_seed(sheet, {(a, b, v): n for a, b, v, n in c.fetchall()})
+        report = _report(plan)
+        report["curated_unmapped_before"] = _unmapped(c)
+        if report["blocked"]:
+            conn.rollback()
+            report["written"] = 0
+            return report
+        for row_no, (chief, typ, value) in plan["to_insert"]:  # no ON CONFLICT: a clash aborts the transaction
+            c.execute(f"insert into {MAP} (row_no, requesting_chief, type, value, origin) values (%s, %s, %s, %s, 'sheet')",
+                      (row_no, chief, typ, value))
         c.execute(f"""insert into {MAP} (row_no, requesting_chief, type, value, origin)
             select (select coalesce(max(row_no), {FIRST_DATA_ROW - 1}) from {MAP})
                    + row_number() over (order by w.requesting_chief, w.type, w.value), w.requesting_chief, w.type, w.value,
@@ -157,6 +187,10 @@ def main(argv: list[str] | None = None) -> int:
     typed, checks, missing = backfill.load(cfg, ["x_watchlist"])
     if missing or "x_watchlist" not in typed:
         print(json.dumps({"status": "failed", "error": "X Watchlist tab missing"}))
+        return 2
+    bad = header_problems(checks["x_watchlist"])
+    if bad:  # a renamed key column would drop rows and renumber their entries by key: refuse
+        print(json.dumps({"status": "failed", "error": "X Watchlist header", **bad}))
         return 2
     conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
     try:
