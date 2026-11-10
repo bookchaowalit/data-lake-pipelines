@@ -459,6 +459,17 @@ class InboxPostgresTests(unittest.TestCase):
         self.assertEqual((retry["inserted"], retry["skipped"]), (0, 1))
         self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("200",)])
 
+    def test_a_retry_still_matches_a_delivery_recorded_with_the_legacy_hash(self):
+        qp = {"query_id": "Q1", "query": "duckdb", "priority": 1.0, "last_since_id": "100"}
+        self.ingest("x_query_plan", [qp], run_id="runA")
+        # Before payload_md5 the delivery hash was md5(row::text): rewrite runA's row that way.
+        self.q("update x_intel.ingest_deliveries set payload_md5 = md5(%s::jsonb::text) where run_id = 'runA' "
+               "returning run_id", json.dumps(qp))
+        self.ingest("x_query_plan", [qp | {"last_since_id": "200"}], run_id="runB")
+        retry = self.ingest("x_query_plan", [qp], run_id="runA")
+        self.assertEqual((retry["inserted"], retry["skipped"]), (0, 1))
+        self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("200",)])
+
     def test_a_raw_key_resent_with_other_values_is_refused_not_half_applied(self):
         self.ingest("x_signals", [signal_row("5", category="news")])
         out = self.ingest("x_signals", [signal_row("5", category="opinion")])

@@ -379,6 +379,11 @@ begin
     rk := row_key(p_dataset, keys, r);
     if p_dataset = any({_arr(REPLACEABLE)}) then
       -- The same delivery again (a retried file): skip it, even if a later run changed the row since.
+      -- Deliveries recorded before payload_md5 hold md5(row::text); a retry must still match them.
+      if exists (select 1 from ingest_deliveries d where d.dataset = p_dataset and d.row_key = rk
+                 and d.run_id = p_run_id and d.payload_md5 = md5(r::text)) then
+        skipped := skipped + 1; continue;
+      end if;
       insert into ingest_deliveries (dataset, row_key, run_id, payload_md5)
       values (p_dataset, rk, p_run_id, payload_md5(r)) on conflict do nothing;
       get diagnostics n = row_count;
