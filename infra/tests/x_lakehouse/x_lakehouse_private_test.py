@@ -682,6 +682,21 @@ class PrivatePostgresTests(unittest.TestCase):
             private.ensure_private(self.conn)
         self.assertEqual(self.ingest("x_bookmarks", [row("x_bookmarks", 2)])["inserted"], 1)
 
+    def test_standalone_validate_reports_private_tables_as_not_provisioned(self):
+        from x_lakehouse import validate
+        with self.conn.cursor() as c:
+            c.execute("drop schema x_intel_private cascade")
+        self.conn.commit()
+        out = io.StringIO()
+        env = {"X_LAKE_DB_URL": DB, "X_LAKE_URI": f"file://{self.tmp.name}"}
+        with patch.dict(os.environ, env), patch.object(validate, "load", return_value=({}, {
+                n: validate.DatasetCheck(n, d.tab) for n, d in DATASETS.items()}, [])), patch("sys.stdout", out):
+            code = validate.main([])
+        self.assertEqual(code, 0, out.getvalue())
+        rep = validate.reconcile(Config(env=env), list(PRIVATE_NAMES), None, None, sheet=False)
+        self.assertTrue(rep["ok"])
+        self.assertEqual({r["postgres_skipped"] for r in rep["datasets"].values()}, {"schema x_intel_private not created yet"})
+
     # -- schema missing ----------------------------------------------------------------------------
     def test_private_steps_are_skipped_while_the_owner_has_not_created_the_schema(self):
         with self.conn.cursor() as c:

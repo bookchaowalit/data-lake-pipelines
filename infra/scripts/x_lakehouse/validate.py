@@ -54,6 +54,14 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
     conn = cur.connect(cfg.db_url) if cfg.db_url else None
     feed_ts = {k: v.get("collected_at") for k, v in feed_index(typed.get(X_FEED.name, [])).items()}
     out: dict[str, Any] = {"missing_tabs": missing_tabs, "datasets": {}}
+    private_ready = True
+    if conn is not None and any(DATASETS[n].private for n in names):
+        # Before the owner creates schema x_intel_private (spec step 1) the private tables do not exist:
+        # their raw is still checked, Postgres is reported as not provisioned instead of crashing.
+        with conn.cursor() as q:
+            q.execute("select exists (select 1 from pg_namespace where nspname = 'x_intel_private')")
+            private_ready = bool(q.fetchone()[0])
+        conn.commit()
     try:
         for n in names:
             ds = DATASETS[n]
@@ -90,7 +98,9 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 if tbl is not None:
                     rep["raw_rows_with_coerce_errors"] = tbl.num_rows - tbl.column("_coerce_errors").null_count
             c = curated_for(n)
-            if conn is not None and c is not None:
+            if conn is not None and c is not None and ds.private and not private_ready:
+                rep["postgres_skipped"] = "schema x_intel_private not created yet"
+            elif conn is not None and c is not None:
                 # Expected keys: the scoped Sheet rows plus, for raw-backed tables, the scoped raw rows
                 # (after cutover the lake is the only writer, so raw is what Postgres must match).
                 cut = cur.retention_cut(c, now)
