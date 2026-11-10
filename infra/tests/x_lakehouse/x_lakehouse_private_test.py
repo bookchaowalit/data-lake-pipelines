@@ -697,6 +697,33 @@ class PrivatePostgresTests(unittest.TestCase):
         self.assertTrue(rep["ok"])
         self.assertEqual({r["postgres_skipped"] for r in rep["datasets"].values()}, {"schema x_intel_private not created yet"})
 
+    def test_small_tables_are_seeded_from_raw_history_they_never_saw(self):
+        self.ingest("x_trends_th", [row("x_trends_th", i) for i in range(3)])
+        self.ingest("x_trends_th", [row("x_trends_th", 7, snapshot_at=ago(days=100))])  # raw only: past 90 days
+        self.assertEqual(self.run_scheduled()[0], 0)
+        with self.conn.cursor() as c:  # as if the table was created (or switched on) after this history landed
+            c.execute("delete from x_intel.x_trends_th")
+        self.conn.commit()
+        code, _, ev, _ = self.run_scheduled()
+        self.assertEqual(code, 0, ev.get("validate"))
+        self.assertEqual(ev["seed_small_curated"]["inserted"]["x_trends_th"], 3)
+        self.assertEqual(self.n("x_intel.x_trends_th"), 3)
+        self.assertEqual(self.run_scheduled()[2]["seed_small_curated"]["inserted"]["x_trends_th"], 0)  # idempotent
+
+    def test_scoped_validate_sees_a_removal_outside_the_window(self):
+        from x_lakehouse import validate
+        now = datetime.now(timezone.utc)
+        removal = row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=220)),
+                      removed_at=ict(now - timedelta(days=200)))
+        active = row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=210)))
+        self.ingest("x_bookmarks", [removal, active])
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 0)
+        cfg = Config(env={"X_LAKE_DB_URL": DB, "X_LAKE_URI": f"file://{self.tmp.name}"})
+        since = (now - timedelta(days=215)).astimezone(TZ).date()
+        rep = validate.reconcile(cfg, ["x_bookmarks"], since, None, sheet=False)["datasets"]["x_bookmarks"]
+        self.assertEqual((rep["postgres_missing_keys"], rep["ok"]), (0, True), rep)
+
     # -- schema missing ----------------------------------------------------------------------------
     def test_private_steps_are_skipped_while_the_owner_has_not_created_the_schema(self):
         with self.conn.cursor() as c:

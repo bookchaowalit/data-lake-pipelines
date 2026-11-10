@@ -49,7 +49,8 @@ from . import curated as cur  # noqa: E402
 from .lake import open_store  # noqa: E402
 from .coerce import TZ  # noqa: E402
 from .config import Config  # noqa: E402
-from .schemas import CURATED, DATASETS  # noqa: E402
+from .pipeline import seed_from_raw  # noqa: E402
+from .schemas import CURATED, DATASETS, SMALL_CURATED  # noqa: E402
 from .validate import reconcile  # noqa: E402
 
 HEARTBEAT_URL = "https://monitor.bookchaowalit.com/heartbeat/x-lakehouse"
@@ -246,6 +247,10 @@ def _run_inbox(cfg: Config) -> int:
             ok = ok and pdrained.get("unmarked", 0) == 0
         else:
             _log(event="drain_private", status="schema_missing", note="x_intel_private not created yet; skipped")
+        # Section-8 tables: raw already held their history before they existed (or while switched off).
+        small = [c for n, c in SMALL_CURATED.items() if n in CURATED]
+        if small:
+            _log(event="seed_small_curated", inserted=seed_from_raw(lock, store, prefix, small, started))
         since = (started.astimezone(TZ) - timedelta(days=1)).date()
         if source == "both":
             catchup_at = datetime.now(timezone.utc) - timedelta(minutes=1)  # before the Sheet read

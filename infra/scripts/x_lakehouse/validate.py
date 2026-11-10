@@ -111,6 +111,16 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                     cand += [(pk, {x: cols[x][i] for x in vcols})
                              for i, pk in enumerate(zip(*(tbl.column(k).to_pylist() for k in c.pk)))]
                 cand = [(pk, v) for pk, v in cand if all(x is not None for x in pk)]
+                if since and cur.watermarked(c) and ds.raw:
+                    # Raw partitions are dated by last_seen_at, not removed_at: a removal of a scoped key can
+                    # sit outside the window. Judge the scoped keys on their whole raw history.
+                    scoped = {pk for pk, _ in cand}
+                    full = read_dataset(store, prefix, ds)
+                    if full is not None:
+                        fcols = {x: full.column(x).to_pylist() for x in vcols}
+                        cand = [(pk, {x: fcols[x][i] for x in vcols})
+                                for i, pk in enumerate(zip(*(full.column(k).to_pylist() for k in c.pk)))
+                                if pk in scoped]
                 if c.version:
                     # Retention is judged on each key's newest version: a bookmark pruned 180 days after its
                     # removal still has older active versions in raw, and those must not be expected.

@@ -132,6 +132,10 @@ Columns are the datasets' columns in `schemas.py` (same kinds) plus `created_at`
 upserts them at once (it already accepted these names), and the Sheet catch-up (sheet/both mode)
 fills them from the Sheet history on its first run. Rows already past 90 days are not upserted, so a
 catch-up or a replay cannot bring back what the prune removed. `validate` does not expect them.
+In inbox/both mode each run also seeds them from raw (`pipeline.seed_from_raw`): raw rows still inside
+the 90 days whose key Postgres lacks are upserted. That covers history drained before the tables
+existed and any gap while `X_LAKE_SMALL_CURATED` was off; it is idempotent (0 rows once caught up) and
+reads at most 90 days of these five small raw datasets per run.
 
 `x_feed` (~1,500–2,000 rows/day) and `x_post_context` (~1,000 rows/day) stay **R2-only**: a curated
 copy would eat the Supabase free tier's 500 MB within months, and the post facts the bots need are
@@ -200,7 +204,8 @@ To read old sent rows the new way:
   ranked by `(greatest(last_seen_at, removed_at), removed_at is not null)`, so a removal outranks a
   late active row with the same or an earlier `last_seen_at`, and only a later re-bookmark undoes it.
   `validate` judges retention on each key's newest version (a pruned bookmark's older active versions
-  in raw are not expected in Postgres). Bookmark versions are never filtered by age before the upsert
+  in raw are not expected in Postgres; with `--since`, the scoped keys are judged on their whole raw
+  history, since a removal can sit in an older partition). Bookmark versions are never filtered by age before the upsert
   (an expired removal still ends a stored active bookmark, and the prune then deletes it); when the
   prune deletes a bookmark it records the key's last version in `x_intel_private.retention_watermark`
   (key + version only, no content), so a late, older observation cannot bring it back.
