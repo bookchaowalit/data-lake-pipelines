@@ -42,29 +42,29 @@ def run(cfg: Config, *, write: bool, now: datetime | None = None, store: Store |
         store, prefix = open_store(cfg)
     con, root = connect(cfg, lake or cfg.require("X_LAKE_URI"))
     results: dict[str, Any] = {}
-    manifest: list[dict[str, Any]] = []
+    tables: dict[str, Any] = {}
     try:
         for f in sorted(QUERIES.glob("*.sql")):
             try:
-                table = con.sql(render(f.read_text(), root, now)).to_arrow_table()
+                tables[f.stem] = con.sql(render(f.read_text(), root, now)).to_arrow_table()
             except Exception as exc:  # noqa: BLE001 - one bad query must not stop the others
                 results[f.stem] = {"status": "error", "error": type(exc).__name__}
                 continue
-            entry: dict[str, Any] = {"status": "ok", "rows": table.num_rows}
-            if write:
-                assert store is not None
-                key = _join(prefix or "", "gold", f.stem, f"as_of={as_of}", f"run={stamp}.parquet")
-                store.put_new(key, parquet_bytes(table))
-                entry["key"] = key
-                manifest.append({"query": f.stem, "key": key, "rows": table.num_rows})
-            results[f.stem] = entry
+            results[f.stem] = {"status": "ok", "rows": tables[f.stem].num_rows}
     finally:
         con.close()
-    if write and manifest:
+    if write and tables:
         assert store is not None
-        body = {"run_id": run_id, "as_of": as_of, "written_at": now.isoformat(), "parts": manifest}
+        parts = [{"query": q, "key": _join(prefix or "", "gold", q, f"as_of={as_of}", f"run={stamp}.parquet"),
+                  "rows": t.num_rows} for q, t in tables.items()]
+        # Write-ahead, like raw: the manifest names every part before any is published, so a crash part-way
+        # leaves a manifest whose missing keys show the run did not finish, never an unlisted part.
+        body = {"run_id": run_id, "as_of": as_of, "written_at": now.isoformat(), "parts": parts}
         store.put_new(_join(prefix or "", "_manifests", "gold", f"{run_id}.json"),
                       json.dumps(body, sort_keys=True).encode())
+        for part in parts:
+            store.put_new(part["key"], parquet_bytes(tables[part["query"]]))
+            results[part["query"]]["key"] = part["key"]
     ok = all(r["status"] == "ok" for r in results.values())
     return {"run_id": run_id, "as_of": as_of, "write": write, "ok": ok, "queries": results}
 

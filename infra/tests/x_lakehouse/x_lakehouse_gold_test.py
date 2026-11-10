@@ -100,6 +100,39 @@ class GoldTests(unittest.TestCase):
         self.assertTrue(later["ok"])
         self.assertTrue((self.root / "gold" / "01_daily_volume_per_domain" / "as_of=2026-11-11").exists())
 
+    def test_manifest_is_written_before_any_part(self):
+        order = []
+        store = LocalStore(self.root)
+        real = store.put_new
+
+        def put(key, data):
+            order.append("manifest" if key.startswith("_manifests/") else "part")
+            real(key, data)
+
+        store.put_new = put  # type: ignore[method-assign]
+        gold.run(self.cfg, write=True, now=NOW, store=store, prefix="")
+        self.assertEqual(order[0], "manifest")
+        self.assertEqual(order.count("part"), 5)
+
+    def test_a_crash_mid_write_leaves_only_listed_parts(self):
+        store = LocalStore(self.root)
+        real, calls = store.put_new, []
+
+        def put(key, data):
+            calls.append(key)
+            if len(calls) == 3:  # manifest + 1 part landed, then the process dies
+                raise OSError("simulated crash")
+            real(key, data)
+
+        store.put_new = put  # type: ignore[method-assign]
+        with self.assertRaises(OSError):
+            gold.run(self.cfg, write=True, now=NOW, store=store, prefix="")
+        [manifest] = (self.root / "_manifests" / "gold").glob("*.json")
+        listed = {p["key"] for p in json.loads(manifest.read_text())["parts"]}
+        landed = {str(p.relative_to(self.root)) for p in (self.root / "gold").rglob("*.parquet")}
+        self.assertEqual(len(landed), 1)
+        self.assertTrue(landed <= listed)
+
     def test_one_bad_query_does_not_stop_the_others(self):
         bad = gold.QUERIES / "99_broken_test_only.sql"
         bad.write_text("select * from read_parquet('{lake}/raw/nope/*.parquet')")
