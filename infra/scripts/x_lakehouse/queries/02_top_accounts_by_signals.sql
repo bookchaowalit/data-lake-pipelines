@@ -18,7 +18,7 @@ select
     sum(f.views)                                     as total_views
 from s
 join f using (post_id)
-where s.collected_at >= now() - interval 30 day
+where s.collected_at >= {now} - interval 30 day
 group by f.author_handle
 order by signals desc, total_views desc
 limit 25;

@@ -30,7 +30,7 @@ if __package__ in (None, ""):
 from .coerce import TZ  # noqa: E402
 from .config import Config  # noqa: E402
 from .lake import Store, _join, open_store, parquet_bytes  # noqa: E402
-from .run_queries import QUERIES, connect  # noqa: E402
+from .run_queries import QUERIES, connect, render  # noqa: E402
 
 
 def run(cfg: Config, *, write: bool, now: datetime | None = None, store: Store | None = None,
@@ -46,7 +46,7 @@ def run(cfg: Config, *, write: bool, now: datetime | None = None, store: Store |
     try:
         for f in sorted(QUERIES.glob("*.sql")):
             try:
-                table = con.sql(f.read_text().replace("{lake}", root)).to_arrow_table()
+                table = con.sql(render(f.read_text(), root, now)).to_arrow_table()
             except Exception as exc:  # noqa: BLE001 - one bad query must not stop the others
                 results[f.stem] = {"status": "error", "error": type(exc).__name__}
                 continue

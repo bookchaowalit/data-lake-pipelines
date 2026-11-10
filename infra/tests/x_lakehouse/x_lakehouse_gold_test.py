@@ -78,6 +78,20 @@ class GoldTests(unittest.TestCase):
         self.assertEqual(len(body["parts"]), 5)
         self.assertEqual(body["as_of"], "2026-11-10")
 
+    def test_windows_end_at_the_run_clock_not_the_wall_clock(self):
+        """Queries take {now} from the run: fixtures dated NOW stay inside the windows whatever today is, and a run
+        60 days later sees them aged out."""
+        at_run = self.run_gold(write=False)["queries"]
+        self.assertEqual(at_run["05_account_follower_growth"]["rows"], 1)
+        self.assertEqual(at_run["02_top_accounts_by_signals"]["rows"], 2)
+        later = self.run_gold(write=False, now=NOW + timedelta(days=60))["queries"]
+        self.assertEqual(later["05_account_follower_growth"]["rows"], 0)
+        self.assertEqual(later["02_top_accounts_by_signals"]["rows"], 0)
+
+    def test_no_query_reads_duckdb_now(self):
+        for f in gold.QUERIES.glob("*.sql"):
+            self.assertNotIn("now()", f.read_text().lower(), f.name)
+
     def test_parts_are_write_once(self):
         self.run_gold(write=True)
         with self.assertRaises(LakeError):

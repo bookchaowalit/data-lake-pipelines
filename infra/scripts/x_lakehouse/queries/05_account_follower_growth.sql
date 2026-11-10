@@ -2,7 +2,7 @@
 with a as (
     select handle, user_id, snapshot_at, followers_count
     from read_parquet('{lake}/raw/x_account_snapshots/date=*/*.parquet', hive_partitioning = true)
-    where snapshot_at >= now() - interval 14 day and account_status = 'ok'
+    where snapshot_at >= {now} - interval 14 day and account_status = 'ok'
 )
 select handle, user_id,
        arg_min(followers_count, snapshot_at) as followers_first,

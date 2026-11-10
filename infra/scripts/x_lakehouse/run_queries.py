@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,6 +25,13 @@ import duckdb  # noqa: E402
 from .config import Config  # noqa: E402
 
 QUERIES = Path(__file__).resolve().parent / "queries"
+
+
+def render(sql: str, root: str, now: datetime | None = None) -> str:
+    """Fill ``{lake}`` and ``{now}``. Queries use ``{now}``, never DuckDB's now(), so a run (and a test) decides the
+    clock its windows end at."""
+    at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    return sql.replace("{lake}", root).replace("{now}", f"TIMESTAMPTZ '{at}'")
 
 
 def connect(cfg: Config, lake: str) -> tuple[duckdb.DuckDBPyConnection, str]:
@@ -54,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.names:
         files = [f for f in files if f.stem in args.names]
     for f in files:
-        sql = f.read_text().replace("{lake}", root)
+        sql = render(f.read_text(), root)
         rel = con.sql(sql)
         print(f"\n== {f.stem}")
         print(rel.limit(args.limit))

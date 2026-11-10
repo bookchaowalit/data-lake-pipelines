@@ -10,6 +10,6 @@ select
     count(*)                                                as signals,
     count(*) filter (where alert_tier <> 'none')            as alerts
 from s
-where collected_at >= now() - interval 30 day
+where collected_at >= {now} - interval 30 day
 group by all
 order by day_ict desc, signals desc;
