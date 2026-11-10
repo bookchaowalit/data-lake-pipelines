@@ -30,13 +30,18 @@ from .backfill import load  # noqa: E402
 from .config import Config  # noqa: E402
 from .lake import ingest_date, open_store, read_dataset  # noqa: E402
 from .pipeline import DatasetCheck, feed_index, partition_values, validate_rows  # noqa: E402
-from .schemas import CURATED, DATASETS, PG_SCHEMA, X_FEED  # noqa: E402
+from .schemas import DATASETS, X_FEED, curated_for  # noqa: E402
 
 
 def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str | None, *,
               sheet: bool = True, preloaded: tuple[Any, Any, list[str]] | None = None) -> dict[str, Any]:
     """``sheet=False``: raw vs Postgres only (after cutover the Sheet no longer grows).
-    ``preloaded``: the ``backfill.load`` result, to reuse one Sheet read."""
+    ``preloaded``: the ``backfill.load`` result, to reuse one Sheet read.
+    Datasets without a Sheet tab are always checked raw vs Postgres only. Postgres rows past a table's
+    retention are not expected (curated.prune_retention deleted them; raw keeps them)."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
     if not sheet:
         typed, checks, missing_tabs = {}, {n: DatasetCheck(n, DATASETS[n].tab) for n in names}, []
     elif preloaded is not None:
@@ -84,16 +89,21 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                     rep["raw_duplicate_post_ids"] = len(ids) - ids.null_count - len(pc.unique(ids.drop_null()))
                 if tbl is not None:
                     rep["raw_rows_with_coerce_errors"] = tbl.num_rows - tbl.column("_coerce_errors").null_count
-            if conn is not None and n in CURATED:
-                c = CURATED[n]
+            c = curated_for(n)
+            if conn is not None and c is not None:
                 # Expected keys: the scoped Sheet rows plus, for raw-backed tables, the scoped raw rows
                 # (after cutover the lake is the only writer, so raw is what Postgres must match).
-                expected = {tuple(r.values.get(k) for k in c.pk) for r in rows}
+                cut = cur.retention_cut(c, now)
+                kept = (lambda v: v is None or v >= cut) if cut is not None else (lambda v: True)
+                expected = {tuple(r.values.get(k) for k in c.pk) for r in rows if kept(r.values.get(c.retain_col))}
                 if ds.raw and tbl is not None:
-                    expected |= set(zip(*(tbl.column(k).to_pylist() for k in c.pk)))
+                    keys = zip(*(tbl.column(k).to_pylist() for k in c.pk))
+                    if cut is not None:
+                        keys = (k for k, v in zip(keys, tbl.column(c.retain_col).to_pylist()) if kept(v))
+                    expected |= set(keys)
                 expected = {k for k in expected if all(v is not None for v in k)}
                 with conn.cursor() as q:
-                    q.execute(f"select {', '.join(c.pk)} from {PG_SCHEMA}.{n}")
+                    q.execute(f"select {', '.join(c.pk)} from {c.qualified}")
                     stored = {tuple(row) for row in q.fetchall()}
                 pg_missing = sorted(expected - stored)
                 rep["postgres_rows"] = len(stored)
@@ -109,7 +119,7 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                                           tbl.column(c.version).to_pylist(), tbl.column(gcol).to_pylist()))
                     pairs = [(pk, v, g) for pk, v, g in pairs if v is not None and all(x is not None for x in pk)]
                     with conn.cursor() as q:
-                        q.execute(f"select {', '.join(c.pk)}, {gcol}, {c.version} from {PG_SCHEMA}.{n}")
+                        q.execute(f"select {', '.join(c.pk)}, {gcol}, {c.version} from {c.qualified}")
                         stored_rows = [(tuple(row[:-2]), row[-2], row[-1]) for row in q.fetchall()]
                     stored_v = {pk: v for pk, _, v in stored_rows}
                     # Protected claims: once Book checked a claim (stored or any version), only Book's
@@ -128,9 +138,9 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                     rep["postgres_protected_held"] = len(held)
                     rep["postgres_stale_versions"] = len(stale)
                     rep["postgres_stale_sample"] = [list(k) for k in stale[:5]]
-                if "post_id" in c.pk:
+                if c.pk == ("post_id",):
                     with conn.cursor() as q:
-                        q.execute(f"select count(*) - count(distinct post_id) from {PG_SCHEMA}.{n}")
+                        q.execute(f"select count(*) - count(distinct post_id) from {c.qualified}")
                         rep["postgres_duplicate_post_ids"] = int(q.fetchone()[0])
             chk = checks[n]
             reasons = []
@@ -156,7 +166,7 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 reasons.append(f"{rep['postgres_missing_keys']} keys missing from Postgres")
             if rep.get("postgres_stale_versions"):
                 reasons.append(f"{rep['postgres_stale_versions']} Postgres rows older than raw/Sheet "
-                               f"({CURATED[n].version})")
+                               f"({c.version})")
             if rep.get("postgres_duplicate_post_ids"):
                 reasons.append(f"{rep['postgres_duplicate_post_ids']} duplicate post_id in Postgres")
             rep["reasons"] = reasons
@@ -179,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     cfg = Config()
     names = [n for n in args.datasets.split(",") if n]
-    if not args.raw_only and not cfg.db_url and any(n in CURATED for n in names):
+    if not args.raw_only and not cfg.db_url and any(curated_for(n) for n in names):
         p.error("set X_LAKE_DB_URL to check the curated layer, or pass --raw-only")
     if args.raw_only:
         cfg.env = {k: v for k, v in cfg.env.items() if k != "X_LAKE_DB_URL"}

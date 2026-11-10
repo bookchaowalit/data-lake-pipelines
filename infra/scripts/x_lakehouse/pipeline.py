@@ -10,7 +10,7 @@ from typing import Any
 from . import curated as cur
 from .coerce import TypedRow, type_row
 from .lake import Store, WriteReport, write_raw
-from .schemas import CURATED, DATASETS, X_FEED, X_POST_CONTEXT, Dataset
+from .schemas import DATASETS, X_FEED, X_POST_CONTEXT, Dataset, curated_for
 
 
 @dataclass
@@ -67,7 +67,8 @@ def validate_rows(ds: Dataset, rows: list[TypedRow], chk: DatasetCheck, sample: 
     keys = Counter(r.row_key for r in rows)
     chk.duplicate_keys = sum(n - 1 for n in keys.values() if n > 1)
     # Context rows and the weekly analyses legitimately repeat a post_id; feed and signals must not.
-    if "post_id" in ds.kinds and ds.name not in (X_POST_CONTEXT.name, "x_analyses"):
+    # The bot-only datasets key a post with another column (handle, folder, collection time).
+    if "post_id" in ds.kinds and ds.sheet and ds.name not in (X_POST_CONTEXT.name, "x_analyses"):
         ids = Counter(r.values.get("post_id") for r in rows if r.values.get("post_id"))
         chk.duplicate_post_ids = sum(n - 1 for n in ids.values() if n > 1)
     if rows:
@@ -126,12 +127,13 @@ def run(typed: dict[str, list[TypedRow]], *, store: Store | None, prefix: str, c
                                          prefix=prefix, source=source, execute=execute, run_date=run_date,
                                          batch_id=batch_id, now=now)
     for name, rows in typed.items():
-        if name not in CURATED:
+        c = curated_for(name)
+        if c is None:
             continue
-        c = CURATED[name]
         stored = cur.stored_protected(conn, c) if execute and conn is not None else set()
         latest = cur.dedupe_latest(c, cur.eligible(c, rows, stored))
         records = cur.join_feed(latest, feed, c) if c.joined else [dict(r.values) for r in latest]
+        records = cur.within_retention(c, records, now)
         if execute and conn is not None:
             result.curated[name] = cur.upsert(conn, c, records, batch_id)
         else:

@@ -11,9 +11,10 @@ row Book checked unless the incoming row is Book's too. Joined columns use
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from .coerce import TypedRow
+from .coerce import TZ, TypedRow
 from .schemas import PG_SCHEMA, POSTGRES, CURATED, Curated, postgres_ddl
 
 
@@ -44,7 +45,7 @@ def stored_protected(conn: Any, curated: Curated) -> set[tuple[Any, ...]]:
         return set()
     col, val = curated.protect
     with conn.cursor() as c:
-        c.execute(f"select {', '.join(curated.pk)} from {PG_SCHEMA}.{curated.table} "
+        c.execute(f"select {', '.join(curated.pk)} from {curated.qualified} "
                   f"where lower(coalesce({col}, '')) = %s", (val,))
         return {tuple(r) for r in c.fetchall()}
 
@@ -92,7 +93,7 @@ def upsert(conn: Any, curated: Curated, records: list[dict[str, Any]], batch_id:
         return {"rows": 0, "inserted": 0, "updated": 0}
     cols = [c for c, _ in curated.data_columns]
     joined = {c for c, _, _ in curated.joined}
-    table = f"{PG_SCHEMA}.{curated.table}"
+    table = curated.qualified
     tmp = f"_stage_{curated.table}"
     col_list = ", ".join(cols)
     sets = [f"{c} = coalesce(excluded.{c}, t.{c})" if c in joined else f"{c} = excluded.{c}"
@@ -128,6 +129,41 @@ def upsert(conn: Any, curated: Curated, records: list[dict[str, Any]], batch_id:
     return {"rows": len(records), "inserted": sum(flags), "updated": len(flags) - sum(flags)}
 
 
+def retention_cut(curated: Curated, now: datetime) -> datetime | date | None:
+    """Oldest ``retain_col`` value still kept: an instant for timestamps, an ICT date for dates."""
+    if not curated.retain_col or not curated.retain_days:
+        return None
+    kinds = dict(curated.data_columns)
+    if kinds[curated.retain_col] == "date":
+        return now.astimezone(TZ).date() - timedelta(days=curated.retain_days)
+    return now.astimezone(timezone.utc) - timedelta(days=curated.retain_days)
+
+
+def within_retention(curated: Curated, records: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    """Drop records the retention prune would delete, so a replay or a Sheet catch-up cannot bring
+    them back. A null ``retain_col`` is always kept (e.g. a bookmark that is still bookmarked)."""
+    cut = retention_cut(curated, now)
+    if cut is None:
+        return records
+    col = curated.retain_col
+    return [r for r in records if r.get(col) is None or r[col] >= cut]
+
+
+def prune_retention(conn: Any, tables: list[Curated], now: datetime | None = None) -> dict[str, int]:
+    """Delete curated rows past each table's retention. Idempotent; raw files are never touched."""
+    now = now or datetime.now(timezone.utc)
+    out: dict[str, int] = {}
+    with conn.cursor() as c:
+        for t in tables:
+            cut = retention_cut(t, now)
+            if cut is None:
+                continue
+            c.execute(f"delete from {t.qualified} where {t.retain_col} is not null and {t.retain_col} < %s", (cut,))
+            out[t.table] = c.rowcount
+    conn.commit()
+    return out
+
+
 def count(conn: Any, table: str) -> int:
     with conn.cursor() as cur:
         cur.execute(f"select count(*) from {PG_SCHEMA}.{table}")
@@ -135,4 +171,5 @@ def count(conn: Any, table: str) -> int:
 
 
 __all__ = ["CURATED", "connect", "count", "dedupe_latest", "eligible", "ensure_schema", "is_protected_value",
-           "join_feed", "protected_pks", "stored_protected", "upsert"]
+           "join_feed", "protected_pks", "prune_retention", "retention_cut", "stored_protected", "upsert",
+           "within_retention"]

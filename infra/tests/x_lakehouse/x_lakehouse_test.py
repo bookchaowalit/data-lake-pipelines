@@ -56,7 +56,8 @@ def feed_row(post_id: str, collected: str = "2026-11-05 08:16", **kw: object) ->
 class ContractTests(unittest.TestCase):
     def test_contract_matches_the_sheet_headers_read_2026_11_05(self):
         for ds in DATASETS.values():
-            self.assertEqual(HEADERS[ds.tab], ds.names, ds.tab)
+            if ds.sheet:  # the bot-only datasets (2026-11-10) have no Sheet tab
+                self.assertEqual(HEADERS[ds.tab], ds.names, ds.tab)
 
     def test_ids_are_strings_in_every_schema(self):
         for ds in DATASETS.values():

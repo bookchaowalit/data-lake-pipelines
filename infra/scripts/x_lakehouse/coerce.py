@@ -17,6 +17,19 @@ TZ = ZoneInfo(SHEET_TZ)
 _TS = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$")
 _INT = re.compile(r"^[+-]?\d+$")
 _SAFE_INT = 2**53
+# Phone numbers in free text become "[phone]" (Dataset.mask_phone). One pattern, valid both as a Python
+# ``re`` and a PostgreSQL ARE, so ingest() (SQL) masks exactly what type_row (Python) masks: Thai
+# mobiles (0[689]x-xxx-xxxx), Thai landlines (0[2-7]-xxx-xxxx) and "+<country> ..." numbers. ASCII
+# digits only, and never inside a longer number (X ids, counts and dates are not touched).
+PHONE_PATTERN = (r"(?<![0-9A-Za-z+])\+[0-9]{1,3}(?:[ .-]?[0-9]{2,4}){2,4}(?![0-9])"
+                 r"|(?<![0-9])0[689][0-9][ .-]?[0-9]{3}[ .-]?[0-9]{4}(?![0-9])"
+                 r"|(?<![0-9])0[2-7][ .-]?[0-9]{3}[ .-]?[0-9]{4}(?![0-9])")
+PHONE_MASK = "[phone]"
+_PHONE = re.compile(PHONE_PATTERN)
+
+
+def mask_phones(text: str) -> str:
+    return _PHONE.sub(PHONE_MASK, text)
 
 
 class CoerceError(ValueError):
@@ -126,11 +139,21 @@ def type_row(dataset: Dataset, cells: dict[str, Any], sheet_row: int | None = No
             values[name] = coerce(cells.get(name), kind)
         except CoerceError as exc:
             values[name] = None
-            errors[name] = {"raw": raw_text(cells.get(name)), "reason": str(exc)}  # full value: the only copy
+            raw = raw_text(cells.get(name))
+            errors[name] = {"raw": mask_phones(raw) if name in dataset.mask_phone else raw,
+                            "reason": str(exc)}  # full value: the only copy
+    for name in dataset.mask_phone:
+        if isinstance(values.get(name), str):
+            values[name] = mask_phones(values[name])
+    for name in dataset.empty_ok:
+        if values.get(name) is None and name not in errors:
+            values[name] = ""  # a key part whose blank is a real value (x_bookmarks.folder_id)
     for name in dataset.required_columns:
         if values.get(name) is None and name not in errors:
             errors[name] = {"raw": "", "reason": "key column is blank"}
-    extra = {k: raw_text(v) for k, v in cells.items() if k and k not in dataset.kinds and raw_text(v)}
+    # Unknown columns of a private dataset are counted, never kept: their text could be anything.
+    extra = {k: ("[dropped]" if dataset.private else raw_text(v))
+             for k, v in cells.items() if k and k not in dataset.kinds and raw_text(v)}
     return TypedRow(values, row_key(dataset, cells), sheet_row, errors, extra)
 
 

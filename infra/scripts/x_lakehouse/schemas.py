@@ -18,12 +18,14 @@ them as text.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
 import pyarrow as pa
 
 Kind = Literal["str", "int", "float", "bool", "ts", "date"]
+Privacy = Literal["public", "private"]
 
 SHEET_TZ = "Asia/Bangkok"  # the bots write ICT wall time with no offset (columns say *_ict)
 
@@ -67,6 +69,16 @@ class Dataset:
     raw: bool = True
     required: tuple[str, ...] | None = None  # key columns that must not be blank (default: all)
     notes: str = ""
+    # "private": the owner's own X account data. Raw under <prefix>/private/, curated in schema
+    # x_intel_private, bot door x_intel_private.ingest(); never served to the Sheet (private.py).
+    privacy: Privacy = "public"
+    # False: the dataset has no Sheet tab (bots write it through ingest() only). The Sheet catch-up,
+    # the Sheet validation and the inbox-vs-Sheet compare skip it.
+    sheet: bool = True
+    # Text columns whose phone numbers become "[phone]" at ingest (SQL) and when typed (Python).
+    mask_phone: tuple[str, ...] = ()
+    # Key columns where a blank cell is the value "" (never NULL): x_bookmarks.folder_id.
+    empty_ok: tuple[str, ...] = ()
     kinds: dict[str, Kind] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -77,6 +89,10 @@ class Dataset:
         return self.key if self.required is None else self.required
 
     @property
+    def private(self) -> bool:
+        return self.privacy == "private"
+
+    @property
     def names(self) -> list[str]:
         return [c for c, _ in self.columns]
 
@@ -84,7 +100,8 @@ class Dataset:
         data = [pa.field(c, ARROW[k], nullable=True) for c, k in self.columns]
         return pa.schema(
             data + META_FIELDS,
-            metadata={"dataset": self.name, "contract": f"{self.name}.v1", "sheet_tab": self.tab},
+            metadata={"dataset": self.name, "contract": f"{self.name}.v1", "sheet_tab": self.tab,
+                      "privacy": self.privacy},
         )
 
 
@@ -214,19 +231,127 @@ TAXONOMY_MAP = Dataset(
     ingest_ts=None, raw=False,
 )
 
-DATASETS: dict[str, Dataset] = {
+# ---------------------------------------------------------------- bot-only datasets (2026-11-10)
+# Spec: docs/specs/x-lake-private-datasets.md (Chief Data schema_spec m1110-src). No Sheet tab: the bots
+# send them through ingest() only. "numeric" in the spec maps to float (double precision) and "int" to
+# int (bigint), the kinds this package already uses. Derived values (deltas, velocity, eng_rate, rank)
+# are the writer's; the lake stores what it is sent.
+
+# Private: the owner's own X account data (schema x_intel_private, raw under private/).
+X_OWN_ACCOUNT_DAILY = Dataset(
+    "x_own_account_daily", "",
+    _cols("snapshot_date:date snapshot_at:ts handle:str user_id:str followers:int following:int posts:int "
+          "listed:int followers_delta:int posts_24h:int views_24h:int likes_24h:int replies_24h:int "
+          "reposts_24h:int mentions_24h:int source:str"),
+    key=("snapshot_date", "handle"),
+    required=("snapshot_date", "handle", "user_id"),
+    ingest_ts="snapshot_at",  # blank for the CSV backfill: those rows are dated by the run, checked everywhere
+    privacy="private", sheet=False,
+    notes="posts = tweet_count; source is backfill_csv or run",
+)
+X_OWN_MENTIONS = Dataset(
+    "x_own_mentions", "",
+    _cols("post_id:str own_handle:str kind:str collected_at:ts posted_at:ts author_handle:str author_id:str "
+          "text:str in_reply_to_post_id:str conversation_id:str likes:int reposts:int replies:int quotes:int "
+          "views:int url:str filter_flags:str"),
+    key=("post_id", "own_handle"),
+    ingest_ts="collected_at",
+    privacy="private", sheet=False, mask_phone=("text",),
+    notes="kind: mention / reply / quote; flagged rows are kept with their filter_flags",
+)
+# A bookmark is observed again on every pull: the raw key carries last_seen_at and removed_at, so each
+# new observation (seen again, or removed) is a new raw version, and the curated row per
+# (post_id, folder_id) takes the newest last_seen_at (the claims / x_signals pattern).
+X_BOOKMARKS = Dataset(
+    "x_bookmarks", "",
+    _cols("post_id:str folder_id:str folder_name:str first_seen_at:ts last_seen_at:ts removed_at:ts "
+          "author_handle:str author_id:str posted_at:ts text:str lang:str domain:str topic:str tags:str "
+          "time_bound_date:date calendar_candidate:bool likes:int reposts:int replies:int views:int url:str "
+          "filter_flags:str"),
+    key=("post_id", "folder_id", "last_seen_at", "removed_at"),
+    required=("post_id", "last_seen_at"),
+    ingest_ts="last_seen_at",
+    privacy="private", sheet=False, mask_phone=("text",), empty_ok=("folder_id",),
+    notes="folder_id is '' outside a folder (never NULL); removed_at stays null until the bookmark is gone",
+)
+X_HOME_TIMELINE = Dataset(
+    "x_home_timeline", "",
+    _cols("post_id:str collected_at:ts posted_at:ts author_handle:str author_id:str author_followers:int "
+          "text:str lang:str likes:int reposts:int replies:int quotes:int views:int age_min:float "
+          "velocity:float eng_rate:float rank:int domain:str topic:str filter_flags:str url:str"),
+    key=("post_id", "collected_at"),
+    ingest_ts="collected_at",
+    privacy="private", sheet=False, mask_phone=("text",),
+    notes="fetched posts and their ranking only: no reply text is stored",
+)
+# Public (not account data): schema x_intel and the normal raw path, never served to the Sheet here.
+X_SPACES = Dataset(
+    "x_spaces", "",
+    _cols("space_id:str collected_at:ts state:str title:str scheduled_start:ts started_at:ts lang:str "
+          "creator_handle:str creator_id:str participant_count:int query:str domain:str topic:str "
+          "calendar_candidate:bool filter_flags:str url:str"),
+    key=("space_id", "collected_at"),
+    ingest_ts="collected_at",
+    sheet=False, mask_phone=("title",),
+)
+X_COMMUNITIES = Dataset(
+    "x_communities", "",
+    _cols("community_id:str snapshot_date:date name:str description:str member_count:int created_at:ts "
+          "access:str query:str domain:str topic:str member_delta:int filter_flags:str url:str"),
+    key=("community_id", "snapshot_date"),
+    ingest_ts=None,  # created_at is the community's own creation time: dated by the run, checked everywhere
+    sheet=False, mask_phone=("name", "description"),
+    notes="rows flagged adult / spam / gambling are stored with their flags; filtering is the writer's",
+)
+# Kinds proposed from the spec's one-line column list (no closer model in the repo). The raw key carries
+# verified_at, so each verification is a raw version and the curated row per list_id is the newest.
+X_LIST_SOURCES = Dataset(
+    "x_list_sources", "",
+    _cols("list_id:str name:str owner_handle:str member_count:int follower_count:int mapped_qid:str "
+          "members_hash:str verified_at:ts status:str"),
+    key=("list_id", "verified_at"),
+    required=("list_id",),
+    ingest_ts="verified_at",
+    sheet=False,
+    notes="ready before X Lists are live: no writer yet",
+)
+PRIVATE_NAMES = ("x_own_account_daily", "x_own_mentions", "x_bookmarks", "x_home_timeline")
+NEW_PUBLIC_NAMES = ("x_spaces", "x_communities", "x_list_sources")
+NEW_NAMES = PRIVATE_NAMES + NEW_PUBLIC_NAMES
+
+# Rollback switch (name only; the owner sets it): X_LAKE_NEW_DATASETS=off drops the seven datasets
+# from every allowlist, so ingest() refuses them as unknown again. Stored rows and files stay.
+NEW_DATASETS_ON = os.environ.get("X_LAKE_NEW_DATASETS", "on").strip().lower() != "off"
+# Rollback switch for section 8: X_LAKE_SMALL_CURATED=off stops the upserts into the five small
+# curated tables (raw is still written; the tables and their rows stay).
+SMALL_CURATED_ON = os.environ.get("X_LAKE_SMALL_CURATED", "on").strip().lower() != "off"
+
+
+SHEET_DATASETS: dict[str, Dataset] = {
     d.name: d
     for d in (X_FEED, X_POST_CONTEXT, X_TRENDS_TH, X_TRENDS_INTL, X_TOPIC_COUNTS, X_ACCOUNT_SNAPSHOTS,
               ALPHA_FEED, X_SIGNALS, CLAIMS, X_WATCHLIST, X_QUERY_PLAN, TAXONOMY_MAP, X_ANALYSES,
               X_TRIAGE_AUDIT)
 }
+NEW_DATASETS: dict[str, Dataset] = {
+    d.name: d for d in (X_OWN_ACCOUNT_DAILY, X_OWN_MENTIONS, X_BOOKMARKS, X_HOME_TIMELINE, X_SPACES,
+                        X_COMMUNITIES, X_LIST_SOURCES)
+}
+# Every dataset the drain / append accept (the allowlist; there is no separate ALLOWED list).
+DATASETS: dict[str, Dataset] = {**SHEET_DATASETS, **(NEW_DATASETS if NEW_DATASETS_ON else {})}
 RAW_DATASETS = [d for d in DATASETS.values() if d.raw]
+PUBLIC_DATASETS = {n: d for n, d in DATASETS.items() if not d.private}
+PRIVATE_DATASETS = {n: d for n, d in DATASETS.items() if d.private}
 
 # Tabs this package must never write. serve_sheet.py writes only to SERVE_TABS.
 PROTECTED_TABS = frozenset({"AI Summaries", "AI Summaries Latest"})
 PROTECTED_PREFIX = "Chief "
 SERVE_TABS = {"x_signals": "Serve · X Signals 7d", "claims": "Serve · Open Claims",
               "x_query_plan": "Serve · X Query Plan"}
+# Optional new tabs over the section-8 tables. Off unless X_LAKE_SERVE_SMALL_TABS=on (serve_sheet.py).
+OPTIONAL_SERVE_TABS = {"alpha_feed": "Serve · Alpha Feed 7d", "x_trends_th": "Serve · X Trends TH 3d"}
+# Never served, whatever a tab list says: the four private datasets and the three new public ones.
+SERVE_DENY = frozenset(NEW_NAMES)
 
 
 def is_protected(tab: str) -> bool:
@@ -236,6 +361,7 @@ def is_protected(tab: str) -> bool:
 # ---------------------------------------------------------------------------- curated (Postgres)
 
 PG_SCHEMA = "x_intel"
+PRIVATE_SCHEMA = "x_intel_private"
 
 
 @dataclass(frozen=True)
@@ -251,10 +377,22 @@ class Curated:
     # (column, value): a stored row whose column equals value (case-insensitive) is only replaced by a
     # row carrying the same value. Claims: a claim Book checked is never overwritten by a bot.
     protect: tuple[str, str] | None = None
+    # (columns, where): partial indexes, e.g. x_topic_counts (spike) where spike.
+    partial_indexes: tuple[tuple[tuple[str, ...], str], ...] = ()
+    # Retention in the existing cron (curated.prune_retention): rows whose ``retain_col`` is older than
+    # ``retain_days`` (ICT days for a date column) are deleted; a null ``retain_col`` is never deleted.
+    # Upserts skip rows already past the cut, so a Sheet catch-up cannot re-insert what prune removed.
+    retain_col: str | None = None
+    retain_days: int | None = None
+    schema: str = PG_SCHEMA
 
     @property
     def data_columns(self) -> list[tuple[str, Kind]]:
         return list(self.source.columns) + [(c, k) for c, k, _ in self.joined]
+
+    @property
+    def qualified(self) -> str:
+        return f"{self.schema}.{self.table}"
 
 
 CURATED: dict[str, Curated] = {
@@ -284,26 +422,110 @@ CURATED: dict[str, Curated] = {
         Curated("x_triage_audit", X_TRIAGE_AUDIT, pk=("audit_week", "logged_at")),
     )
 }
+# Section 8 (2026-11-10): small curated copies of low-volume raw datasets (< ~100 rows/day each), so
+# trends, topic counts, account snapshots and Alpha Feed stay queryable in Postgres after the Sheet
+# stops growing. x_feed / x_post_context stay R2-only (1,000-2,000 rows/day would outgrow 500 MB).
+SMALL_CURATED: dict[str, Curated] = {
+    c.table: c
+    for c in (
+        Curated("x_trends_th", X_TRENDS_TH, pk=("snapshot_at", "rank", "trend_name"),
+                indexes=(("snapshot_date",),), retain_col="snapshot_at", retain_days=90),
+        Curated("x_trends_intl", X_TRENDS_INTL, pk=("snapshot_at", "woeid", "rank", "trend_name"),
+                indexes=(("snapshot_date", "woeid"),), retain_col="snapshot_at", retain_days=90),
+        Curated("x_topic_counts", X_TOPIC_COUNTS, pk=("snapshot_at", "query_id"),
+                indexes=(("snapshot_date",),), partial_indexes=((("spike",), "spike"),),
+                retain_col="snapshot_at", retain_days=90),
+        Curated("x_account_snapshots", X_ACCOUNT_SNAPSHOTS, pk=("snapshot_at", "list", "handle"),
+                indexes=(("handle", "snapshot_at"),), retain_col="snapshot_at", retain_days=90),
+        Curated("alpha_feed", ALPHA_FEED, pk=("pulled_at_ict", "source", "sub_source", "url", "title"),
+                indexes=(("time_bound_date",), ("pulled_at_ict",)), retain_col="pulled_at_ict", retain_days=90),
+    )
+}
+NEW_PUBLIC_CURATED: dict[str, Curated] = {
+    c.table: c
+    for c in (
+        Curated("x_spaces", X_SPACES, pk=("space_id", "collected_at"),
+                indexes=(("collected_at",), ("scheduled_start",)), retain_col="collected_at", retain_days=180),
+        Curated("x_communities", X_COMMUNITIES, pk=("community_id", "snapshot_date"),
+                indexes=(("snapshot_date",),), retain_col="snapshot_date", retain_days=365),
+        Curated("x_list_sources", X_LIST_SOURCES, pk=("list_id",), indexes=(("mapped_qid",),),
+                version="verified_at"),
+    )
+}
+# Schema x_intel_private (private.py owns its DDL, grants and drain).
+PRIVATE_CURATED: dict[str, Curated] = {
+    c.table: c
+    for c in (
+        Curated("x_own_account_daily", X_OWN_ACCOUNT_DAILY, pk=("snapshot_date", "handle"),
+                indexes=(("handle", "snapshot_date"),), schema=PRIVATE_SCHEMA),
+        Curated("x_own_mentions", X_OWN_MENTIONS, pk=("post_id", "own_handle"),
+                indexes=(("own_handle", "collected_at"),), retain_col="collected_at", retain_days=365,
+                schema=PRIVATE_SCHEMA),
+        Curated("x_bookmarks", X_BOOKMARKS, pk=("post_id", "folder_id"),
+                indexes=(("last_seen_at",), ("time_bound_date",)), partial_indexes=((("removed_at",), "removed_at is not null"),),
+                version="last_seen_at", retain_col="removed_at", retain_days=180, schema=PRIVATE_SCHEMA),
+        Curated("x_home_timeline", X_HOME_TIMELINE, pk=("post_id", "collected_at"),
+                indexes=(("collected_at",),), retain_col="collected_at", retain_days=30, schema=PRIVATE_SCHEMA),
+    )
+}
+CURATED.update({**(SMALL_CURATED if SMALL_CURATED_ON else {}),
+                **(NEW_PUBLIC_CURATED if NEW_DATASETS_ON else {})})
+if not NEW_DATASETS_ON:
+    PRIVATE_CURATED = {}
+
+
+def curated_for(name: str) -> Curated | None:
+    """The curated table of a dataset, public (x_intel) or private (x_intel_private)."""
+    return CURATED.get(name) or PRIVATE_CURATED.get(name)
+
+
+def table_ddl(c: Curated) -> list[str]:
+    cols = [f"    {name} {POSTGRES[kind]}{' not null' if name in c.pk else ''}"
+            for name, kind in c.data_columns]
+    data = {n for n, _ in c.data_columns}
+    # Lineage columns the data does not already use (x_communities.created_at is the community's
+    # creation time, so that table has updated_at and _batch_id only).
+    cols += [f"    {line}" for name, line in (("created_at", "created_at timestamptz not null default now()"),
+                                               ("updated_at", "updated_at timestamptz not null default now()"),
+                                               ("_batch_id", "_batch_id text")) if name not in data]
+    out = [f"create table if not exists {c.qualified} (\n"
+           + ",\n".join(cols)
+           + f",\n    primary key ({', '.join(c.pk)})\n);"]
+    for idx in c.indexes:
+        name = f"{c.table}_{'_'.join(idx)}_idx"
+        out.append(f"create index if not exists {name} on {c.qualified} ({', '.join(idx)});")
+    for idx, where in c.partial_indexes:
+        name = f"{c.table}_{'_'.join(idx)}_part_idx"
+        out.append(f"create index if not exists {name} on {c.qualified} ({', '.join(idx)}) where {where};")
+    return out
+
+
+# One row per drain run (inbox / both), written by scheduled.py at the end of the run: dataset names
+# and counts only. Not a dataset: ingest() refuses the name like any unknown dataset.
+DRAIN_LOG_DDL = f"""create table if not exists {PG_SCHEMA}.drain_log (
+    batch_id text primary key,
+    started_at timestamptz not null,
+    source text not null,
+    rows_by_dataset jsonb not null default '{{}}'::jsonb,
+    raw_written jsonb not null default '{{}}'::jsonb,
+    curated jsonb not null default '{{}}'::jsonb,
+    coerce_errors jsonb not null default '{{}}'::jsonb,
+    missing_from_raw jsonb not null default '{{}}'::jsonb,
+    ok bool not null
+);
+create index if not exists drain_log_started_at_idx on {PG_SCHEMA}.drain_log (started_at);"""
 
 
 def postgres_ddl() -> str:
-    """Idempotent DDL for the curated layer (safe to run on every deploy)."""
+    """Idempotent DDL for the curated layer (safe to run on every deploy). Schema x_intel only; the
+    private schema has its own DDL (private.private_ddl)."""
     # Check first: "create schema if not exists" still needs CREATE on the database, which the
     # least-privilege role that owns only this schema does not have.
     out = [f"do $$ begin if not exists (select 1 from pg_namespace where nspname = '{PG_SCHEMA}') "
            f"then create schema {PG_SCHEMA}; end if; end $$;"]
     for c in CURATED.values():
-        cols = [f"    {name} {POSTGRES[kind]}{' not null' if name in c.pk else ''}"
-                for name, kind in c.data_columns]
-        cols += ["    created_at timestamptz not null default now()",
-                 "    updated_at timestamptz not null default now()",
-                 "    _batch_id text"]
-        out.append(f"create table if not exists {PG_SCHEMA}.{c.table} (\n"
-                   + ",\n".join(cols)
-                   + f",\n    primary key ({', '.join(c.pk)})\n);")
-        for idx in c.indexes:
-            name = f"{c.table}_{'_'.join(idx)}_idx"
-            out.append(f"create index if not exists {name} on {PG_SCHEMA}.{c.table} ({', '.join(idx)});")
+        out += table_ddl(c)
+    out.append(DRAIN_LOG_DDL)
     return "\n".join(out) + "\n"
 
 
