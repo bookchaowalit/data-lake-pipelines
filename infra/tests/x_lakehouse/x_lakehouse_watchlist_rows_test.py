@@ -38,6 +38,14 @@ class PlanTests(unittest.TestCase):
         plan = wr.plan_seed([(2, C)], {A: 2})
         self.assertEqual(plan["number_conflicts"], [2])
 
+    def test_header_problems_block_the_seed(self):
+        from types import SimpleNamespace as NS
+
+        self.assertEqual(wr.header_problems(NS(missing_columns=["value"], blank_key_rows=0)),
+                         {"missing_columns": ["value"]})
+        self.assertEqual(wr.header_problems(NS(missing_columns=[], blank_key_rows=3)), {"blank_key_rows": 3})
+        self.assertEqual(wr.header_problems(NS(missing_columns=[], blank_key_rows=0, order_differs=True)), {})
+
     def test_duplicate_keys_in_the_tab_are_reported(self):
         self.assertEqual(wr.plan_seed([(2, A), (5, A)], {})["duplicate_keys_in_sheet"], [5])
 
@@ -104,6 +112,46 @@ class MapPostgresTests(unittest.TestCase):
                       " on conflict (requesting_chief, type, value) do update set purpose = excluded.purpose", A)
         self.conn.commit()
         self.assertEqual(wr.read_map(self.conn), {A: 5})
+
+    def test_an_insert_during_the_seed_waits_and_is_numbered(self):
+        """The trigger takes the allocation lock before it checks for an empty map (Codex: lock before checking)."""
+        import threading
+
+        self.add(A)
+        seeder = cur.connect(DB)
+        with seeder.cursor() as c:  # the seed's transaction, holding the lock, map still uncommitted
+            c.execute("select pg_advisory_xact_lock(hashtext('x_intel.watchlist_row_map'))")
+            c.execute("insert into x_intel.watchlist_row_map (row_no, requesting_chief, type, value, origin) "
+                      "values (2, %s, %s, %s, 'sheet')", A)
+        done = threading.Event()
+
+        def bot_insert():
+            bot = cur.connect(DB)
+            with bot.cursor() as c:
+                c.execute("insert into x_intel.x_watchlist (requesting_chief, type, value) values (%s, %s, %s)", B)
+            bot.commit()
+            bot.close()
+            done.set()
+
+        worker = threading.Thread(target=bot_insert)
+        worker.start()
+        self.assertFalse(done.wait(1.0))  # blocked on the lock, not racing past an "empty" map
+        seeder.commit()
+        seeder.close()
+        worker.join(10)
+        self.assertTrue(done.is_set())
+        self.assertEqual(wr.read_map(self.conn), {A: 2, B: 3})
+
+    def test_execute_aborts_when_a_planned_number_was_taken(self):
+        self.add(A, B)
+        with self.conn.cursor() as c:  # another writer took row 3 for B after a dry run planned it for... A at 3
+            c.execute("insert into x_intel.watchlist_row_map (row_no, requesting_chief, type, value) "
+                      "values (3, %s, %s, %s)", B)
+        self.conn.commit()
+        res = wr.seed(self.conn, [(3, A)], execute=True)
+        self.assertTrue(res["blocked"])
+        self.assertEqual(res["written"], 0)
+        self.assertEqual(wr.read_map(self.conn), {B: 3})
 
     def test_replaces_the_old_view_in_place(self):
         """Production has the 7-column view ordered by key; the new one only adds sheet_row at the end."""
