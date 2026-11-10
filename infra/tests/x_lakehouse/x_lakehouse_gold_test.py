@@ -70,7 +70,7 @@ class GoldTests(unittest.TestCase):
     def test_write_lands_one_part_per_query_and_a_manifest(self):
         report = self.run_gold(write=True)
         self.assertTrue(report["ok"], report)
-        part = self.root / "gold" / "05_account_follower_growth" / "as_of=2026-11-10" / "run=2220.parquet"
+        part = self.root / "gold" / "05_account_follower_growth" / "as_of=2026-11-10" / "run=222000.parquet"
         rows = duckdb.connect().execute(f"select handle, gained from read_parquet('{part}')").fetchall()
         self.assertEqual(rows, [("test_a", 30)])
         [manifest] = (self.root / "_manifests" / "gold").glob("*.json")
@@ -95,7 +95,15 @@ class GoldTests(unittest.TestCase):
     def test_parts_are_write_once(self):
         self.run_gold(write=True)
         with self.assertRaises(LakeError):
-            self.run_gold(write=True)  # same as_of and run=HHMM: refuses to overwrite
+            self.run_gold(write=True)  # same stamp: the manifest is refused first
+        self.assertEqual(len(list((self.root / "_manifests" / "gold").glob("*.json"))), 1)
+        # Same minute, other second: its own names, so it lands beside the first run instead of failing
+        second = self.run_gold(write=True, now=NOW + timedelta(seconds=30))
+        self.assertTrue(second["ok"])
+        manifests = sorted((self.root / "_manifests" / "gold").glob("*.json"))
+        self.assertEqual(len(manifests), 2)
+        keys = [{p["key"] for p in json.loads(m.read_text())["parts"]} for m in manifests]
+        self.assertFalse(keys[0] & keys[1])  # no manifest claims another run's part
         later = self.run_gold(write=True, now=NOW + timedelta(hours=8))
         self.assertTrue(later["ok"])
         self.assertTrue((self.root / "gold" / "01_daily_volume_per_domain" / "as_of=2026-11-11").exists())

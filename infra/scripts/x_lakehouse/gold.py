@@ -3,7 +3,7 @@ gap 8: "R2 queries only by hand").
 
 Each cron run with ``X_LAKE_GOLD=write`` writes, per query, one immutable part
 
-    gold/<query>/as_of=<ICT date>/run=<HHMM>.parquet
+    gold/<query>/as_of=<ICT date>/run=<HHMMSS>.parquet
 
 and one manifest ``_manifests/gold/<run id>.json`` (keys and row counts), through the same write-once store as
 raw (never overwrites). Readers take the newest ``run=`` of the newest ``as_of=``. ``04_rows_per_partition`` is
@@ -36,8 +36,10 @@ from .run_queries import QUERIES, connect, render  # noqa: E402
 def run(cfg: Config, *, write: bool, now: datetime | None = None, store: Store | None = None,
         prefix: str | None = None, lake: str | None = None) -> dict[str, Any]:
     now = (now or datetime.now(timezone.utc)).astimezone(TZ)
-    as_of, stamp = now.date().isoformat(), now.strftime("%H%M")
-    run_id = f"gold-{now:%Y%m%dT%H%M%S}"
+    # Parts and manifest share ONE stamp: a second run that would reuse a part name also reuses the manifest name,
+    # and the write-once store refuses that manifest before any part, so a manifest never claims another run's parts.
+    as_of, stamp = now.date().isoformat(), now.strftime("%H%M%S")
+    run_id = f"gold-{now:%Y%m%dT}{stamp}"
     if write and store is None:
         store, prefix = open_store(cfg)
     con, root = connect(cfg, lake or cfg.require("X_LAKE_URI"))
