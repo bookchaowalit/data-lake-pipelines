@@ -20,9 +20,10 @@ _SAFE_INT = 2**53
 # Phone numbers in free text become "[phone]" (Dataset.mask_phone). One pattern, valid both as a Python
 # ``re`` and a PostgreSQL ARE, so ingest() (SQL) masks exactly what type_row (Python) masks: Thai
 # mobiles (0[689]x-xxx-xxxx), Bangkok (02-xxx-xxxx) and provincial (0xx-xxx-xxx) landlines, area codes in
-# parentheses, and "+<country> ..." numbers (groups may be in parentheses, e.g. +1 (555) 123-4567). ASCII
+# parentheses, and "+<country> ..." numbers of 8+ digits (groups may be in parentheses, e.g.
+# +1 (555) 123-4567; "+1 2 3" or "+500 likes" are not phones). ASCII
 # digits only, and never inside a longer number (X ids, counts and dates are not touched).
-PHONE_PATTERN = (r"(?<![0-9A-Za-z+])\+[0-9]{1,3}(?:[ .-]?\(?[0-9]{1,4}\)?){2,4}(?![0-9])"
+PHONE_PATTERN = (r"(?<![0-9A-Za-z+])\+(?=(?:[ ().-]{0,2}[0-9]){8})[0-9]{1,3}(?:[ .-]?\(?[0-9]{1,4}\)?){2,4}(?![0-9])"
                  r"|(?<![0-9])\(?0[689][0-9]\)?[ .-]?[0-9]{3}[ .-]?[0-9]{4}(?![0-9])"
                  r"|(?<![0-9])\(?0[2-7]\)?[ .-]?[0-9]{3}[ .-]?[0-9]{4}(?![0-9])"
                  r"|(?<![0-9])\(?0[3-7][0-9]\)?[ .-]?[0-9]{3}[ .-]?[0-9]{3}(?![0-9])")

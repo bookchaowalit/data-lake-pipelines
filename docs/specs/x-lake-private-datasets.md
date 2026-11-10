@@ -36,7 +36,7 @@ different values it is refused ("send a new version"); unknown columns reject th
 row) and are reported by name. Phone numbers in free text become `[phone]` in `ingest()` itself and
 again when the drain types the row (`coerce.PHONE_PATTERN`, one pattern used by Python and SQL):
 Thai mobiles, Bangkok and provincial landlines (`053-123-456`), area codes in parentheses and
-`+<country>` numbers (`+1 (555) 123-4567`) in `text` of the three private post datasets, `x_spaces.title`, `x_communities.name` / `description`.
+`+<country>` numbers of 8+ digits (`+1 (555) 123-4567`; `+1 2 3` is not a phone) in `text` of the three private post datasets, `x_spaces.title`, `x_communities.name` / `description`.
 The row is never dropped for a phone number.
 
 Writer responsibilities (the lake stores what it is sent, it does not compute): `followers_delta`,

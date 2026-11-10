@@ -173,7 +173,7 @@ class OfflineTests(unittest.TestCase):
                       "+66 (2) 123 4567", "+44 20 7946 0958"):
             self.assertEqual(mask_phones(f"call {phone} now"), "call [phone] now", phone)
         for keep in ("2114407239578710300", "2026-11-10 08:00", "1,234", "0812345678901", "+5 likes",
-                     "0531234567", "๐๘๑๒๓๔๕๖๗๘"):
+                     "0531234567", "๐๘๑๒๓๔๕๖๗๘", "+1 2 3", "+12 34 56", "score +10 20 30", "+500 likes 1,234"):
             self.assertEqual(mask_phones(keep), keep)
         typed = type_row(DATASETS["x_bookmarks"], row("x_bookmarks", text=PHONE_TEXT))
         self.assertNotIn("081-234-5678", typed.values["text"])
@@ -391,7 +391,7 @@ class PrivatePostgresTests(unittest.TestCase):
         samples = [PHONE_TEXT, "081 234 5678", "0812345678", "02-123-4567", "+66812345678", "+1 (555) 123 4567",
                    "x0812345678", "08123456789", "tel:+44 20 7946 0958", "๐๘๑๒๓๔๕๖๗๘", "2026-11-10T08:00:00+07:00",
                    "1900000000000000001", "", "no digits", "053-123-456", "(02) 123 4567", "+1 (555) 123-4567",
-                   "0531234567"]
+                   "0531234567", "+1 2 3", "+12 34 56", "score +10 20 30"]
         for t in samples:
             [(sql,)] = self.q("select x_intel._mask_phones(%s)", t)
             self.assertEqual(sql, mask_phones(t), t)
