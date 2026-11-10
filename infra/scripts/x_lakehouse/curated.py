@@ -61,6 +61,25 @@ def eligible(curated: Curated, rows: list[TypedRow], stored: set[tuple[Any, ...]
     return [r for pk, r in zip(pk_of, rows) if pk not in prot or is_protected_value(curated, r.values.get(col))]
 
 
+def version_key(curated: Curated, values: dict[str, Any]) -> tuple[Any, bool] | None:
+    """Rank of one version of a key (None: unversioned or no version value). See Curated.version_also."""
+    if not curated.version:
+        return None
+    v = values.get(curated.version)
+    also = values.get(curated.version_also) if curated.version_also else None
+    top = max((x for x in (v, also) if x is not None), default=None)
+    return None if top is None else (top, also is not None)
+
+
+def version_sql(curated: Curated, alias: str) -> str:
+    """SQL twin of version_key as a row value, for ``excluded`` / ``t`` comparisons."""
+    v = f"{alias}.{curated.version}"
+    if not curated.version_also:
+        return v
+    a = f"{alias}.{curated.version_also}"
+    return f"row(greatest({v}, {a}), {a} is not null)"
+
+
 def dedupe_latest(curated: Curated, rows: list[TypedRow]) -> list[TypedRow]:
     """One row per primary key: the highest ``version`` wins, then the later Sheet row / list position."""
     out: dict[tuple[Any, ...], TypedRow] = {}
@@ -70,7 +89,7 @@ def dedupe_latest(curated: Curated, rows: list[TypedRow]) -> list[TypedRow]:
             continue  # reported by validation as a blank key
         prev = out.get(pk)
         if prev is not None and curated.version:
-            new_v, old_v = r.values.get(curated.version), prev.values.get(curated.version)
+            new_v, old_v = version_key(curated, r.values), version_key(curated, prev.values)
             if old_v is not None and (new_v is None or new_v < old_v):
                 continue
         out[pk] = r
@@ -116,7 +135,7 @@ def upsert(conn: Any, curated: Curated, records: list[dict[str, Any]], batch_id:
             f"on conflict ({', '.join(curated.pk)}) do update set "
             + ", ".join(sets + ["_batch_id = excluded._batch_id", "updated_at = now()"])
             + (f" where ({changed})" if changed else " where true")
-            + (f" and (t.{curated.version} is null or excluded.{curated.version} >= t.{curated.version})"
+            + (f" and (t.{curated.version} is null or {version_sql(curated, 'excluded')} >= {version_sql(curated, 't')})"
                if curated.version else "")
             + (f" and not (lower(coalesce(t.{curated.protect[0]}, '')) = '{curated.protect[1]}'"
                f" and lower(coalesce(excluded.{curated.protect[0]}, '')) <> '{curated.protect[1]}')"
@@ -172,4 +191,4 @@ def count(conn: Any, table: str) -> int:
 
 __all__ = ["CURATED", "connect", "count", "dedupe_latest", "eligible", "ensure_schema", "is_protected_value",
            "join_feed", "protected_pks", "prune_retention", "retention_cut", "stored_protected", "upsert",
-           "within_retention"]
+           "version_key", "version_sql", "within_retention"]

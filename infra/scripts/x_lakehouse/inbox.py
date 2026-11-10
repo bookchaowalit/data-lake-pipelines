@@ -258,6 +258,7 @@ create index if not exists ingest_inbox_feed_post_idx on {INBOX} ((row ->> 'post
 
 def _upsert_fn(c: Curated) -> str:
     """SQL twin of curated.upsert for one table, fed with the accepted rows of one ingest() call."""
+    assert not c.version_also, f"{c.table}: version_also is drain-only (private tables have no SQL upsert)"
     ds = c.source
     cols = [n for n, _ in c.data_columns]
     joined = {n for n, _, _ in c.joined}

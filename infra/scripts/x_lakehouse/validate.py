@@ -94,14 +94,26 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 # Expected keys: the scoped Sheet rows plus, for raw-backed tables, the scoped raw rows
                 # (after cutover the lake is the only writer, so raw is what Postgres must match).
                 cut = cur.retention_cut(c, now)
-                kept = (lambda v: v is None or v >= cut) if cut is not None else (lambda v: True)
-                expected = {tuple(r.values.get(k) for k in c.pk) for r in rows if kept(r.values.get(c.retain_col))}
+                vcols = [x for x in (c.version, c.version_also, c.protect[0] if c.protect else None, c.retain_col) if x]
+                cand = [(tuple(r.values.get(k) for k in c.pk), {x: r.values.get(x) for x in vcols}) for r in rows]
                 if ds.raw and tbl is not None:
-                    keys = zip(*(tbl.column(k).to_pylist() for k in c.pk))
-                    if cut is not None:
-                        keys = (k for k, v in zip(keys, tbl.column(c.retain_col).to_pylist()) if kept(v))
-                    expected |= set(keys)
-                expected = {k for k in expected if all(v is not None for v in k)}
+                    cols = {x: tbl.column(x).to_pylist() for x in vcols}
+                    cand += [(pk, {x: cols[x][i] for x in vcols})
+                             for i, pk in enumerate(zip(*(tbl.column(k).to_pylist() for k in c.pk)))]
+                cand = [(pk, v) for pk, v in cand if all(x is not None for x in pk)]
+                if c.version:
+                    # Retention is judged on each key's newest version: a bookmark pruned 180 days after its
+                    # removal still has older active versions in raw, and those must not be expected.
+                    latest: dict[tuple[Any, ...], dict[str, Any]] = {}
+                    for pk, v in cand:
+                        k_new, k_old = cur.version_key(c, v), cur.version_key(c, latest.get(pk, {}))
+                        if pk not in latest or (k_new is not None and (k_old is None or k_new >= k_old)):
+                            latest[pk] = v
+                    judged = list(latest.items())
+                else:
+                    judged = cand
+                expected = {pk for pk, v in judged
+                            if cut is None or v.get(c.retain_col) is None or v[c.retain_col] >= cut}
                 with conn.cursor() as q:
                     q.execute(f"select {', '.join(c.pk)} from {c.qualified}")
                     stored = {tuple(row) for row in q.fetchall()}
@@ -112,15 +124,14 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 if c.version:
                     # A newer version can reach raw while its upsert fails: the key exists, the row is stale.
                     gcol = c.protect[0] if c.protect else c.version
-                    pairs = [(tuple(r.values.get(k) for k in c.pk), r.values.get(c.version), r.values.get(gcol))
-                             for r in rows]
-                    if ds.raw and tbl is not None:
-                        pairs += list(zip(zip(*(tbl.column(k).to_pylist() for k in c.pk)),
-                                          tbl.column(c.version).to_pylist(), tbl.column(gcol).to_pylist()))
-                    pairs = [(pk, v, g) for pk, v, g in pairs if v is not None and all(x is not None for x in pk)]
+                    pairs = [(pk, cur.version_key(c, v), v.get(gcol)) for pk, v in cand]
+                    pairs = [(pk, k, g) for pk, k, g in pairs if k is not None]
+                    sel = [c.version] + ([c.version_also] if c.version_also else [])
                     with conn.cursor() as q:
-                        q.execute(f"select {', '.join(c.pk)}, {gcol}, {c.version} from {c.qualified}")
-                        stored_rows = [(tuple(row[:-2]), row[-2], row[-1]) for row in q.fetchall()]
+                        q.execute(f"select {', '.join(c.pk)}, {gcol}, {', '.join(sel)} from {c.qualified}")
+                        stored_rows = [(tuple(row[:len(c.pk)]), row[len(c.pk)],
+                                        cur.version_key(c, dict(zip(sel, row[len(c.pk) + 1:]))))
+                                       for row in q.fetchall()]
                     stored_v = {pk: v for pk, _, v in stored_rows}
                     # Protected claims: once Book checked a claim (stored or any version), only Book's
                     # versions are eligible; the newest eligible one is what Postgres must hold.

@@ -471,6 +471,23 @@ class DigestPostgresTests(unittest.TestCase):
             [rep] = self.run_digest(self.auth_failure(), now=at(f"2026-11-{d} 16:20"))
         self.assertEqual((rep["provider_auth_streak"], rep.get("auth_alert")), (3, None))
 
+    def test_d4_skipped_digests_and_a_fourth_failure_do_not_repeat_the_alert(self):
+        alerts = []
+        for d in (10, 11, 12, 13, 14, 15):
+            now = at(f"2026-11-{d} 16:20")
+            if d not in (13, 15):  # 13 and 15 have no signals: the gateway is not called (skipped)
+                with self.conn.cursor() as c:
+                    c.execute("insert into x_intel.x_signals (post_id, collected_at, alert_tier) values (%s, %s, 'digest')",
+                              (f"q{d}", now - timedelta(hours=1)))
+                self.conn.commit()
+            [rep] = self.run_digest(self.auth_failure(), now=now)
+            alerts.append(rep.get("auth_alert"))
+        self.assertEqual(alerts, [None, None, "sent", None, None, None])
+        with self.conn.cursor() as c:
+            c.execute("select count(*) from x_intel.digest_log where auth_alerted_at is not null")
+            self.assertEqual(c.fetchone()[0], 1)
+        self.conn.commit()
+
     def test_d5_no_token_or_message_text_in_the_log_or_reports(self):
         self.cfg.env |= {"AI_GATEWAY_TOKEN": "GW-TOKEN-SYNTH", "TELEGRAM_NOTI_BOT_TOKEN": "TG-TOKEN-SYNTH"}
         svc = self.auth_failure()

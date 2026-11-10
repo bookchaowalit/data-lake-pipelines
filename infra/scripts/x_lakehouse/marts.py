@@ -77,6 +77,8 @@ create table if not exists {S}.digest_log (
 alter table {S}.digest_log add column if not exists ai_status text;
 alter table {S}.digest_log add column if not exists fallback_reason text;
 alter table {S}.digest_log add column if not exists telegram_message_ids jsonb;
+-- When the provider_auth alert went out for the streak ending at this digest (once per streak).
+alter table {S}.digest_log add column if not exists auth_alerted_at timestamptz;
 
 do $$ begin
   if exists (select 1 from pg_roles where rolname = 'anon') then

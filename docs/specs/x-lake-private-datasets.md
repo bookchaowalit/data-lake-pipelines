@@ -35,7 +35,8 @@ Sheet's ICT wall time) stored as `timestamptz`; a key sent again with the same v
 different values it is refused ("send a new version"); unknown columns reject that row (and only that
 row) and are reported by name. Phone numbers in free text become `[phone]` in `ingest()` itself and
 again when the drain types the row (`coerce.PHONE_PATTERN`, one pattern used by Python and SQL):
-`text` of the three private post datasets, `x_spaces.title`, `x_communities.name` / `description`.
+Thai mobiles, Bangkok and provincial landlines (`053-123-456`), area codes in parentheses and
+`+<country>` numbers (`+1 (555) 123-4567`) in `text` of the three private post datasets, `x_spaces.title`, `x_communities.name` / `description`.
 The row is never dropped for a phone number.
 
 Writer responsibilities (the lake stores what it is sent, it does not compute): `followers_delta`,
@@ -157,9 +158,9 @@ Grants: `postgres` may `SELECT` the five tables and `drain_log` (like the read v
 
 ## 4. Section 9: `digest_log`
 
-`x_intel.digest_log` (marts.py) gets three nullable columns (`alter table … add column if not
+`x_intel.digest_log` (marts.py) gets four nullable columns (`alter table … add column if not
 exists`): `ai_status text`, `fallback_reason text`, `telegram_message_ids jsonb` (a list of the
-delivered Telegram `message_id`s; the existing `sent_messages` count stays).
+delivered Telegram `message_id`s; the existing `sent_messages` count stays), `auth_alerted_at timestamptz`.
 
 | `ai_status` | meaning |
 |---|---|
@@ -172,8 +173,10 @@ or a message blocked for a client term (`status = blocked`). A delivered digest 
 when the AI summary fell back. `sent` is still set only after Telegram answers HTTP 200 with `ok:true`.
 
 Alert: when the newest 3 digests that called the gateway all fell back on `provider_auth`, one message
-goes to the same Telegram chat the digest uses (`TELEGRAM_NOTI_CHAT_ID`), once per streak (at exactly
-3). Any digest whose gateway call does not fail on `provider_auth` resets the count. Switch off with
+goes to the same Telegram chat the digest uses (`TELEGRAM_NOTI_CHAT_ID`), once per streak: only a
+digest that itself failed on `provider_auth` can send it, and the sending row is marked in a fourth
+nullable column, `auth_alerted_at`. Skipped digests (gateway not called) neither count nor reset; any
+gateway call that does not fail on `provider_auth` resets the count. Switch off with
 `X_DIGEST_AUTH_ALERT=off` (history stays). No new service, credential or recipient; the alert text
 holds no token or gateway body.
 
@@ -193,8 +196,11 @@ To read old sent rows the new way:
 - Raw keys of `x_bookmarks` (+ `last_seen_at`, `removed_at`) and `x_list_sources` (+ `verified_at`)
   carry the version column, like `x_signals` / `claims`, so a re-seen or removed bookmark and a new
   verification are new raw versions instead of a refused "changed values" row. The curated primary
-  keys are the spec's (`post_id, folder_id` / `list_id`), newest version wins. A removal row should
-  carry the stored `last_seen_at` (or later).
+  keys are the spec's (`post_id, folder_id` / `list_id`), newest version wins. A bookmark version is
+  ranked by `(greatest(last_seen_at, removed_at), removed_at is not null)`, so a removal outranks a
+  late active row with the same or an earlier `last_seen_at`, and only a later re-bookmark undoes it.
+  `validate` judges retention on each key's newest version (a pruned bookmark's older active versions
+  in raw are not expected in Postgres).
 - Section 8 cites commit `774f038`; `main` is at `fb8767f` (x-insights BI site). Only `inbox.py` and
   `scheduled.py` changed in between (the BI step), nothing in the drain/append path.
 - Retention runs inside the existing cron after an ok run (inbox/both: with the inbox prune; sheet mode:

@@ -169,7 +169,11 @@ class OfflineTests(unittest.TestCase):
     def test_i4_phone_numbers_are_masked_and_ids_dates_kept(self):
         self.assertEqual(mask_phones("โทร 081-234-5678 / 02 123 4567 / +1 555 123 4567"),
                          "โทร [phone] / [phone] / [phone]")
-        for keep in ("2114407239578710300", "2026-11-10 08:00", "1,234", "0812345678901", "+5 likes"):
+        for phone in ("053-123-456", "053 123 456", "(053) 123-456", "(02) 123 4567", "+1 (555) 123-4567",
+                      "+66 (2) 123 4567", "+44 20 7946 0958"):
+            self.assertEqual(mask_phones(f"call {phone} now"), "call [phone] now", phone)
+        for keep in ("2114407239578710300", "2026-11-10 08:00", "1,234", "0812345678901", "+5 likes",
+                     "0531234567", "๐๘๑๒๓๔๕๖๗๘"):
             self.assertEqual(mask_phones(keep), keep)
         typed = type_row(DATASETS["x_bookmarks"], row("x_bookmarks", text=PHONE_TEXT))
         self.assertNotIn("081-234-5678", typed.values["text"])
@@ -383,10 +387,39 @@ class PrivatePostgresTests(unittest.TestCase):
     def test_i4_sql_and_python_mask_the_same_way(self):
         samples = [PHONE_TEXT, "081 234 5678", "0812345678", "02-123-4567", "+66812345678", "+1 (555) 123 4567",
                    "x0812345678", "08123456789", "tel:+44 20 7946 0958", "๐๘๑๒๓๔๕๖๗๘", "2026-11-10T08:00:00+07:00",
-                   "1900000000000000001", "", "no digits"]
+                   "1900000000000000001", "", "no digits", "053-123-456", "(02) 123 4567", "+1 (555) 123-4567",
+                   "0531234567"]
         for t in samples:
             [(sql,)] = self.q("select x_intel._mask_phones(%s)", t)
             self.assertEqual(sql, mask_phones(t), t)
+
+    def test_bookmark_removal_outranks_a_late_active_row_with_the_same_last_seen(self):
+        seen = ago(hours=3)
+        removed = row("x_bookmarks", 1, last_seen_at=seen, removed_at=ago(hours=1))
+        active = row("x_bookmarks", 1, last_seen_at=seen)
+        self.ingest("x_bookmarks", [removed])
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.ingest("x_bookmarks", [active])  # a delayed observation from before the removal
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.assertEqual(self.q("select removed_at is not null from x_intel_private.x_bookmarks"), [(True,)])
+        self.ingest("x_bookmarks", [active, removed], run_id="run1110u")  # same pair in one batch, any order
+        again = row("x_bookmarks", 1, last_seen_at=ago(minutes=5))  # bookmarked again later
+        self.ingest("x_bookmarks", [again])
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.assertEqual(self.q("select removed_at is null from x_intel_private.x_bookmarks"), [(True,)])
+
+    def test_validate_does_not_expect_a_pruned_bookmark_from_its_older_active_version(self):
+        from x_lakehouse import validate
+        now = datetime.now(timezone.utc)
+        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=200))),
+                                    row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=200)),
+                                        removed_at=ict(now - timedelta(days=190)))])
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 0)  # newest version is past retention
+        self.assertEqual(read_dataset(self.store, "", DATASETS["x_bookmarks"]).num_rows, 2)
+        cfg = Config(env={"X_LAKE_DB_URL": DB, "X_LAKE_URI": f"file://{self.tmp.name}"})
+        rep = validate.reconcile(cfg, ["x_bookmarks"], None, None, sheet=False)["datasets"]["x_bookmarks"]
+        self.assertEqual((rep["postgres_missing_keys"], rep["postgres_stale_versions"], rep["ok"]), (0, 0, True), rep)
 
     # -- I7 ----------------------------------------------------------------------------------------
     def test_i7_list_sources_upsert_by_list_id_newest_verification_wins(self):

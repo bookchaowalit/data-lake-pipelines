@@ -374,6 +374,10 @@ class Curated:
     indexes: tuple[tuple[str, ...], ...] = ()
     # Column that orders versions of one key: an older version never replaces a newer one.
     version: str | None = None
+    # Second timestamp that also orders versions (x_bookmarks.removed_at): a version's rank is
+    # (greatest(version, version_also), version_also is not null), so a removal outranks an active
+    # observation with the same or an earlier last_seen_at, and a later re-bookmark outranks both.
+    version_also: str | None = None
     # (column, value): a stored row whose column equals value (case-insensitive) is only replaced by a
     # row carrying the same value. Claims: a claim Book checked is never overwritten by a bot.
     protect: tuple[str, str] | None = None
@@ -463,7 +467,8 @@ PRIVATE_CURATED: dict[str, Curated] = {
                 schema=PRIVATE_SCHEMA),
         Curated("x_bookmarks", X_BOOKMARKS, pk=("post_id", "folder_id"),
                 indexes=(("last_seen_at",), ("time_bound_date",)), partial_indexes=((("removed_at",), "removed_at is not null"),),
-                version="last_seen_at", retain_col="removed_at", retain_days=180, schema=PRIVATE_SCHEMA),
+                version="last_seen_at", version_also="removed_at", retain_col="removed_at", retain_days=180,
+                schema=PRIVATE_SCHEMA),
         Curated("x_home_timeline", X_HOME_TIMELINE, pk=("post_id", "collected_at"),
                 indexes=(("collected_at",),), retain_col="collected_at", retain_days=30, schema=PRIVATE_SCHEMA),
     )
