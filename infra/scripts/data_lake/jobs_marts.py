@@ -150,6 +150,9 @@ def _export_mart(database: Path, mart: str, order_by: tuple[str, ...], destinati
     _, pq = _pyarrow()
     con = duckdb.connect(str(database), read_only=True)
     try:
+        # TIMESTAMPTZ columns take the session timezone into the Arrow schema; pin UTC so the same
+        # gold_run_id exports the same bytes on any host (the dbt profile's setting does not carry over).
+        con.execute("set TimeZone = 'UTC'")
         table = con.sql(f"select * from {mart} order by {', '.join(order_by)}").to_arrow_table()
     finally:
         con.close()

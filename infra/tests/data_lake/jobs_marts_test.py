@@ -385,5 +385,38 @@ class JobsMartsTests(unittest.TestCase):
             self.assertEqual(ObjectStore(root).list_keys("control/pointers/"), [])
 
 
+class ExportTimezoneTest(unittest.TestCase):
+    """Gold parts must be byte-identical whatever the host timezone, or a replay of the same
+    gold_run_id under another TZ fails with StorageConflict. The export pins DuckDB to UTC."""
+
+    def test_timestamptz_columns_export_as_utc_under_any_host_timezone(self):
+        import duckdb  # type: ignore
+
+        from data_lake.jobs_marts import _export_mart
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "marts.duckdb"
+            with duckdb.connect(str(database)) as con:
+                con.execute("set TimeZone = 'UTC'")
+                con.execute("create table m as select 1 as id, timestamptz '2026-11-01 03:00:00+00' as at")
+            outputs = []
+            for zone in ("UTC", "Asia/Bangkok"):
+                previous = os.environ.get("TZ")
+                os.environ["TZ"] = zone
+                try:
+                    destination = Path(tmp) / f"{zone.replace('/', '-')}.parquet"
+                    _export_mart(database, "m", ("id",), destination)
+                    outputs.append(destination.read_bytes())
+                finally:
+                    if previous is None:
+                        os.environ.pop("TZ", None)
+                    else:
+                        os.environ["TZ"] = previous
+            self.assertEqual(outputs[0], outputs[1])
+            import pyarrow.parquet as pq  # type: ignore
+
+            self.assertEqual(str(pq.read_schema(Path(tmp) / "UTC.parquet").field("at").type.tz), "UTC")
+
+
 if __name__ == "__main__":
     unittest.main()
