@@ -500,6 +500,9 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
     now = now or datetime.now(timezone.utc)
     ensure_marts(conn)
     denylist = load_denylist(cfg)  # fail closed, dry runs too: the facts must be the ones we would send
+    # Resolved before any digest is claimed: a missing setting must not leave a 'delivering' row that
+    # _reserve never takes over (the digest would then be skipped for good once the setting is fixed).
+    telegram = (cfg.require("TELEGRAM_NOTI_BOT_TOKEN"), cfg.require("TELEGRAM_NOTI_CHAT_ID")) if mode == "send" else None
     reports = []
     own = http is None
     client: httpx.Client = http if http is not None else httpx.Client()
@@ -543,8 +546,8 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
             for p in parts:
                 for attempt in (1, 2):  # one retry per part, only after a definite rejection
                     try:
-                        send_telegram(client, cfg.require("TELEGRAM_NOTI_BOT_TOKEN"),
-                                      cfg.require("TELEGRAM_NOTI_CHAT_ID"), p)
+                        assert telegram is not None  # send mode only
+                        send_telegram(client, telegram[0], telegram[1], p)
                         delivered += 1
                         failure = None
                         break
