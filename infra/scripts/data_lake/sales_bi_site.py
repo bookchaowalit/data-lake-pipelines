@@ -58,6 +58,8 @@ def load_snapshot(database: Path) -> Snapshot:
 
     con = duckdb.connect(str(database), read_only=True)
     try:
+        # TIMESTAMPTZ values come back in the session timezone; the page labels them UTC.
+        con.execute("set TimeZone = 'UTC'")
         meta = _rows(con, "select gold_run_id, as_of_date, max_received_at from gold_meta")[0]
         as_of = meta["as_of_date"]
         daily = (

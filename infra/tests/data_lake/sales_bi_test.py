@@ -76,6 +76,27 @@ class RevenuePageTests(unittest.TestCase):
                                                   _pay("bad", 0, "2026-11-09T14:09:00Z")])
             self.assertRegex(self._site(lake, out)["index.html"], r"1 event\(s\) were rejected")
 
+    def test_times_are_utc_and_pages_identical_under_any_host_timezone(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as lake:
+            _land(lake, "2026-11-09T14:05:00Z", [_pay("i1", 2000, "2026-11-09T14:08:00Z")])
+            pages = []
+            for zone in ("UTC", "Asia/Bangkok"):
+                previous = os.environ.get("TZ")
+                os.environ["TZ"] = zone
+                try:
+                    with tempfile.TemporaryDirectory() as out:
+                        pages.append(self._site(lake, out))
+                finally:
+                    if previous is None:
+                        os.environ.pop("TZ", None)
+                    else:
+                        os.environ["TZ"] = previous
+            self.assertEqual(pages[0], pages[1])
+            self.assertIn("14:08", pages[1]["sales/index.html"])
+            self.assertNotIn("21:08", pages[1]["sales/index.html"])
+
     def test_snapshot_rejects_tampered_parts_and_foreign_manifests(self):
         from data_lake.sales_bi_snapshot import BiSnapshotError, build_bi_snapshot
         from data_lake.sales_marts import run_sales_marts
