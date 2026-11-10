@@ -511,6 +511,7 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
     # Resolved before any digest is claimed: a missing setting must not leave a 'delivering' row that
     # _reserve never takes over (the digest would then be skipped for good once the setting is fixed).
     telegram = (cfg.require("TELEGRAM_NOTI_BOT_TOKEN"), cfg.require("TELEGRAM_NOTI_CHAT_ID")) if mode == "send" else None
+    gateway_token = cfg.require("AI_GATEWAY_TOKEN") if mode == "send" else ""
     reports = []
     own = http is None
     client: httpx.Client = http if http is not None else httpx.Client()
@@ -534,7 +535,7 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 try:
                     sent_facts = copy.deepcopy(facts)  # trimmed for the gateway; the fallback keeps all
                     rep["trimmed"] = fit_prompt(sent_facts)
-                    raw, usage = ask_gateway(client, cfg.require("AI_GATEWAY_TOKEN"),
+                    raw, usage = ask_gateway(client, gateway_token,
                                              cfg.get("X_DIGEST_ROUTE", "sheet-summaries"), sent_facts)
                     answer = validate_answer(raw, sent_facts, denylist)
                     rep["dropped_items"] = answer["dropped"]

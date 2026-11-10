@@ -300,6 +300,23 @@ class DigestPostgresTests(unittest.TestCase):
         self.cfg = good
         self.assertEqual(self.run_digest(svc)[0]["status"], "sent")
 
+    def test_missing_gateway_token_claims_nothing_so_a_fixed_rerun_sends(self):
+        from x_lakehouse.config import ConfigError
+
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        good = self.cfg
+        self.cfg = Config(env={"CLIENT_DENYLIST": "acme corp",
+                               "TELEGRAM_NOTI_BOT_TOKEN": "b", "TELEGRAM_NOTI_CHAT_ID": "1"})
+        with self.assertRaises(ConfigError):
+            self.run_digest(svc)
+        self.conn.rollback()
+        with self.conn.cursor() as c:
+            c.execute("select count(*) from x_intel.digest_log")
+            self.assertEqual(c.fetchone(), (0,))
+        self.conn.commit()
+        self.cfg = good
+        self.assertEqual(self.run_digest(svc)[0]["status"], "sent")
+
     def test_review2_malformed_gateway_envelopes_fall_back(self):
         from x_lakehouse.marts import ensure_marts
         ensure_marts(self.conn)
