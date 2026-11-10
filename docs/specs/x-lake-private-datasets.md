@@ -128,7 +128,9 @@ topic counts, account snapshots and Alpha Feed had no Postgres table. They are l
 | `x_intel.alpha_feed` | `pulled_at_ict, source, sub_source, url, title` | `time_bound_date`; `pulled_at_ict` | 90 days on `pulled_at_ict` |
 
 Columns are the datasets' columns in `schemas.py` (same kinds) plus `created_at`, `updated_at`,
-`_batch_id`. They are in `CURATED`, so `append_rows()` upserts them like `x_analyses`, `ingest()`
+`_batch_id`. They are **insert-only** (upsert-or-ignore: an existing key is never updated, first
+version wins exactly like raw, so a changed resend of a key drained before replay fingerprints existed
+cannot make Postgres disagree with raw). They are in `CURATED`, so `append_rows()` writes them like `x_analyses`, `ingest()`
 upserts them at once (it already accepted these names), and the Sheet catch-up (sheet/both mode)
 fills them from the Sheet history on its first run. Rows already past 90 days are not upserted, so a
 catch-up or a replay cannot bring back what the prune removed. `validate` does not expect them.

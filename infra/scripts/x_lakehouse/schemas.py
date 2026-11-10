@@ -389,6 +389,10 @@ class Curated:
     retain_col: str | None = None
     retain_days: int | None = None
     schema: str = PG_SCHEMA
+    # Upsert-or-ignore: an existing key is never updated (first version wins, exactly like raw). The
+    # section-8 tables use it, so a changed resend of a key drained before replay fingerprints existed
+    # cannot make Postgres disagree with raw.
+    insert_only: bool = False
 
     @property
     def data_columns(self) -> list[tuple[str, Kind]]:
@@ -432,16 +436,16 @@ CURATED: dict[str, Curated] = {
 SMALL_CURATED: dict[str, Curated] = {
     c.table: c
     for c in (
-        Curated("x_trends_th", X_TRENDS_TH, pk=("snapshot_at", "rank", "trend_name"),
+        Curated("x_trends_th", X_TRENDS_TH, insert_only=True, pk=("snapshot_at", "rank", "trend_name"),
                 indexes=(("snapshot_date",),), retain_col="snapshot_at", retain_days=90),
-        Curated("x_trends_intl", X_TRENDS_INTL, pk=("snapshot_at", "woeid", "rank", "trend_name"),
+        Curated("x_trends_intl", X_TRENDS_INTL, insert_only=True, pk=("snapshot_at", "woeid", "rank", "trend_name"),
                 indexes=(("snapshot_date", "woeid"),), retain_col="snapshot_at", retain_days=90),
-        Curated("x_topic_counts", X_TOPIC_COUNTS, pk=("snapshot_at", "query_id"),
+        Curated("x_topic_counts", X_TOPIC_COUNTS, insert_only=True, pk=("snapshot_at", "query_id"),
                 indexes=(("snapshot_date",),), partial_indexes=((("spike",), "spike"),),
                 retain_col="snapshot_at", retain_days=90),
-        Curated("x_account_snapshots", X_ACCOUNT_SNAPSHOTS, pk=("snapshot_at", "list", "handle"),
+        Curated("x_account_snapshots", X_ACCOUNT_SNAPSHOTS, insert_only=True, pk=("snapshot_at", "list", "handle"),
                 indexes=(("handle", "snapshot_at"),), retain_col="snapshot_at", retain_days=90),
-        Curated("alpha_feed", ALPHA_FEED, pk=("pulled_at_ict", "source", "sub_source", "url", "title"),
+        Curated("alpha_feed", ALPHA_FEED, insert_only=True, pk=("pulled_at_ict", "source", "sub_source", "url", "title"),
                 indexes=(("time_bound_date",), ("pulled_at_ict",)), retain_col="pulled_at_ict", retain_days=90),
     )
 }

@@ -712,6 +712,21 @@ class PrivatePostgresTests(unittest.TestCase):
         self.assertTrue(rep["ok"])
         self.assertEqual({r["postgres_skipped"] for r in rep["datasets"].values()}, {"schema x_intel_private not created yet"})
 
+    def test_small_tables_keep_the_first_version_like_raw(self):
+        first = row("x_trends_th", 1, post_count=100)
+        self.ingest("x_trends_th", [first])
+        self.assertEqual(self.run_scheduled()[0], 0)
+        with self.conn.cursor() as c:  # a key drained and pruned before replay fingerprints existed
+            c.execute("delete from x_intel.ingest_inbox")
+            c.execute("delete from x_intel.ingest_seen")
+        self.conn.commit()
+        out = self.ingest("x_trends_th", [first | {"post_count": 999}])
+        self.assertEqual(out["inserted"], 1)
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.assertEqual(self.q("select post_count from x_intel.x_trends_th"), [(100,)])  # = raw's first version
+        [raw] = read_dataset(self.store, "", DATASETS["x_trends_th"]).to_pylist()
+        self.assertEqual(raw["post_count"], 100)
+
     def test_small_tables_are_seeded_from_raw_history_they_never_saw(self):
         self.ingest("x_trends_th", [row("x_trends_th", i) for i in range(3)])
         self.ingest("x_trends_th", [row("x_trends_th", 7, snapshot_at=ago(days=100))])  # raw only: past 90 days

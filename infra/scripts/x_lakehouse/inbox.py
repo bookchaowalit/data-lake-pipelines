@@ -287,6 +287,8 @@ def _upsert_fn(c: Curated) -> str:
         guard += (f" and not (lower(coalesce(t.{col}, '')) = {_lit(val)}"
                   f" and lower(coalesce(excluded.{col}, '')) <> {_lit(val)})")
     col_list = ", ".join(cols)
+    conflict = ("do nothing" if c.insert_only else
+                f"do update set {', '.join(sets + ['_batch_id = excluded._batch_id', 'updated_at = now()'])}\n    {guard}")
     elig = ""
     if c.protect:
         # Mirrors curated.eligible: once Book checked the claim (stored or in this call), only Book's
@@ -313,8 +315,7 @@ begin
   ), up as (
     insert into {S}.{c.table} as t ({col_list}, _batch_id)
     select {col_list}, p_batch from latest
-    on conflict ({', '.join(c.pk)}) do update set {', '.join(sets + ['_batch_id = excluded._batch_id', 'updated_at = now()'])}
-    {guard}
+    on conflict ({', '.join(c.pk)}) {conflict}
     returning (xmax = 0) as ins
   )
   select count(*) filter (where ins), count(*) filter (where not ins), (select count(*) from latest)

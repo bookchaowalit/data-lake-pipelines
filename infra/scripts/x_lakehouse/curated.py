@@ -129,6 +129,12 @@ def upsert(conn: Any, curated: Curated, records: list[dict[str, Any]], batch_id:
         with cur.copy(f"copy {tmp} ({col_list}) from stdin") as cp:
             for rec in records:
                 cp.write_row([rec.get(c) for c in cols])
+        if curated.insert_only:
+            cur.execute(f"insert into {table} as t ({col_list}, _batch_id) select {col_list}, %s from {tmp} "
+                        f"on conflict ({', '.join(curated.pk)}) do nothing returning true", (batch_id,))
+            n = len(cur.fetchall())
+            conn.commit()
+            return {"rows": len(records), "inserted": n, "updated": 0}
         cur.execute(
             f"insert into {table} as t ({col_list}, _batch_id) "
             f"select {col_list}, %s from {tmp} "
