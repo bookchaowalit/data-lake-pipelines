@@ -115,8 +115,11 @@ def _bi(cfg: Config) -> None:
         from . import bi_site, pages_deploy
 
         denylist = digest.load_denylist(cfg)
+        from .marts import ensure_marts
+
         conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
         try:
+            ensure_marts(conn)  # the site reads the marts; do not rely on X_LAKE_DIGEST having created them
             snap = bi_site.load_snapshot(conn, denylist)
         finally:
             conn.close()

@@ -237,6 +237,16 @@ class ScheduledHookTests(unittest.TestCase):
         self.assertEqual(logs[0]["status"], "error")
         self.assertEqual(logs[0]["event"], "bi")
 
+    def test_b6_build_creates_the_marts_itself(self):
+        from x_lakehouse import marts
+
+        with mock.patch.object(cur, "connect", return_value=mock.MagicMock()), \
+                mock.patch.object(marts, "ensure_marts") as ensure, \
+                mock.patch.object(bi_site, "load_snapshot", return_value=snapshot()):
+            logs = self.run_bi({"X_LAKE_BI": "build", "CLIENT_DENYLIST": "acme corp", "X_LAKE_DB_URL": "x"})
+        self.assertEqual(logs[0]["status"], "built")
+        ensure.assert_called_once()
+
     def test_b6_build_logs_counts_only(self):
         with mock.patch.object(cur, "connect", return_value=mock.MagicMock()), \
                 mock.patch.object(bi_site, "load_snapshot", return_value=snapshot()):
@@ -285,6 +295,19 @@ class BiPostgresTests(unittest.TestCase):
     def tearDown(self):
         self.conn.rollback()
         self.conn.close()
+
+    def test_bi_hook_works_with_the_digest_off_on_a_fresh_database(self):
+        """No digest run has created the marts: the BI hook must create them itself."""
+        with self.conn.cursor() as c:
+            c.execute("drop view if exists x_intel.mart_x_signal_priority, x_intel.mart_x_domain_hourly, "
+                      "x_intel.mart_claims_queue")
+        self.conn.commit()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            scheduled._bi(Config(env={"X_LAKE_BI": "build", "CLIENT_DENYLIST": "acme corp", "X_LAKE_DB_URL": DB}))
+        log = json.loads(buf.getvalue().splitlines()[0])
+        self.assertEqual(log["status"], "built", log)
+        self.assertEqual(log["signals"], 2)
 
     def test_load_snapshot_windows_rank_and_screen(self):
         snap = bi_site.load_snapshot(self.conn, DENY)
