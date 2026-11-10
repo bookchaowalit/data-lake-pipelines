@@ -26,6 +26,7 @@ import json
 import re
 import sys
 import unicodedata
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -454,37 +455,44 @@ def send_telegram(http: httpx.Client, token: str, chat_id: str, text: str) -> No
 
 # -------------------------------------------------------------------------------------------- run
 
-def _reserve(conn: Any, w: Window) -> bool:
-    """Atomically claim a digest id for sending. False when it is sent, or another process is sending
-    it (a claim older than 15 minutes is treated as a crashed run and taken over)."""
+def _reserve(conn: Any, w: Window) -> str | None:
+    """Atomically claim a digest id for sending; returns the claim's owner token. None when it is sent,
+    or another process is sending it (a claim older than 15 minutes is treated as a crashed run and
+    taken over: the old owner's later updates then match nothing, see _mark / _log_row)."""
+    token = uuid.uuid4().hex
     with conn.cursor() as c:
-        c.execute(f"insert into {S}.digest_log (digest_id, kind, window_start, window_end, status) "
-                  f"values (%s, %s, %s, %s, 'sending') on conflict (digest_id) do update "
-                  f"set status = 'sending', window_end = excluded.window_end, updated_at = now() "
+        c.execute(f"insert into {S}.digest_log (digest_id, kind, window_start, window_end, status, owner) "
+                  f"values (%s, %s, %s, %s, 'sending', %s) on conflict (digest_id) do update "
+                  f"set status = 'sending', owner = excluded.owner, window_end = excluded.window_end, updated_at = now() "
                   f"where {S}.digest_log.status not in ('sent', 'sending', 'partial', 'unknown', 'delivering') "
                   f"or ({S}.digest_log.status = 'sending' and {S}.digest_log.updated_at < now() - interval '15 minutes') "
-                  f"returning digest_id", (w.digest_id, w.kind, w.start, w.end))
+                  f"returning digest_id", (w.digest_id, w.kind, w.start, w.end, token))
         ok = c.fetchone() is not None
+    conn.commit()
+    return token if ok else None
+
+
+def _mark(conn: Any, w: Window, status: str, owner: str) -> bool:
+    """Move our own 'sending' claim on; False when another process took the id over meanwhile."""
+    with conn.cursor() as c:
+        c.execute(f"update {S}.digest_log set status = %s, updated_at = now() "
+                  f"where digest_id = %s and owner = %s and status = 'sending'", (status, w.digest_id, owner))
+        ok = c.rowcount == 1
     conn.commit()
     return ok
 
 
-def _mark(conn: Any, w: Window, status: str) -> None:
-    with conn.cursor() as c:
-        c.execute(f"update {S}.digest_log set status = %s, updated_at = now() where digest_id = %s", (status, w.digest_id))
-    conn.commit()
-
-
-def _log_row(conn: Any, w: Window, status: str, **kw: Any) -> None:
+def _log_row(conn: Any, w: Window, status: str, owner: str, **kw: Any) -> None:
     with conn.cursor() as c:
         c.execute(f"insert into {S}.digest_log (digest_id, kind, window_start, window_end, status, signals, "
                   f"sent_messages, tokens_in, tokens_out, cost_usd, error) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                   f"on conflict (digest_id) do update set window_end = excluded.window_end, status = excluded.status, "
                   f"signals = excluded.signals, sent_messages = excluded.sent_messages, tokens_in = excluded.tokens_in, "
                   f"tokens_out = excluded.tokens_out, cost_usd = excluded.cost_usd, error = excluded.error, "
-                  f"updated_at = now() where {S}.digest_log.status not in ('sent', 'partial', 'unknown')",
+                  f"updated_at = now() where {S}.digest_log.status not in ('sent', 'partial', 'unknown') "
+                  f"and {S}.digest_log.owner = %s",
                   (w.digest_id, w.kind, w.start, w.end, status, kw.get("signals"), kw.get("sent"),
-                   kw.get("tokens_in"), kw.get("tokens_out"), kw.get("cost_usd"), kw.get("error")))
+                   kw.get("tokens_in"), kw.get("tokens_out"), kw.get("cost_usd"), kw.get("error"), owner))
     conn.commit()
 
 
@@ -509,7 +517,8 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
     try:
         for w in windows(now, kind):
             rep: dict[str, Any] = {"digest_id": w.digest_id, "kind": w.kind}
-            if mode == "send" and not _reserve(conn, w):
+            owner = _reserve(conn, w) if mode == "send" else None
+            if mode == "send" and owner is None:
                 reports.append(rep | {"status": "already_sent_or_sending"})
                 continue
             facts = build_facts(conn, w, denylist)
@@ -535,13 +544,15 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
             # What Telegram shows: tags dropped, entities decoded, word joiners removed.
             shown = html.unescape(re.sub(r"<[^>]+>", " ", text)).replace(WORD_JOINER, "")
             if contains_term(text, denylist) or contains_term(shown, denylist):
-                _log_row(conn, w, "blocked", signals=facts.totals["signals"], error="client term in message", **usage)
+                _log_row(conn, w, "blocked", owner, signals=facts.totals["signals"], error="client term in message", **usage)
                 reports.append(rep | {"status": "blocked"})
                 continue
             parts = split_message(text)
             # From here a crash may leave parts in the chat: 'delivering' is never taken over by
             # _reserve (unlike a stale 'sending'), so the id is not resent (at most once).
-            _mark(conn, w, "delivering")
+            if not _mark(conn, w, "delivering", owner):
+                reports.append(rep | {"status": "superseded"})  # another run took the id over and sends it
+                continue
             delivered, failure, unknown = 0, None, False
             for p in parts:
                 for attempt in (1, 2):  # one retry per part, only after a definite rejection
@@ -563,10 +574,10 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 # retryable ('error'). Some parts delivered: terminal ('partial'), so a later run never
                 # resends the parts the owner already has.
                 status = "unknown" if unknown else "partial" if delivered else "error"
-                _log_row(conn, w, status, signals=facts.totals["signals"], sent=delivered, error=failure, **usage)
+                _log_row(conn, w, status, owner, signals=facts.totals["signals"], sent=delivered, error=failure, **usage)
                 reports.append(rep | {"status": status, "messages": delivered, "of": len(parts), "error": failure})
                 continue
-            _log_row(conn, w, "sent", signals=facts.totals["signals"], sent=len(parts), error=error, **usage)
+            _log_row(conn, w, "sent", owner, signals=facts.totals["signals"], sent=len(parts), error=error, **usage)
             reports.append(rep | {"status": "sent", "ai": answer is not None, "fallback_reason": error,
                                   "messages": len(parts), **usage})
     finally:

@@ -308,12 +308,21 @@ def _ingest_fn() -> str:
                     f"req := {_arr(d.required_columns)};")
     upserts = "\n".join(f"    when {_lit(t)} then up := {S}._ingest_upsert_{t}(good, 'ingest-' || p_run_id);"
                         for t in CURATED)
+    # Config rows are applied by SQL only (the drain never re-upserts them), so a typed value the SQL
+    # coercers cannot read would be stored as NULL while Python accepts it: refuse it at the door.
+    typed = []
+    for n in REPLACEABLE:
+        checks = [f"case when {S}._raw_text(r -> {_lit(c)}) <> '' and {_cast(f'r -> {_lit(c)}', k)} is null "
+                  f"then {_lit(c)} end" for c, k in DATASETS[n].columns if k != "str"]
+        if checks:
+            typed.append(f"      when {_lit(n)} then untyped := array_remove(array[{', '.join(checks)}], null);")
+    typed_case = "\n".join(typed)
     return f"""
 create or replace function {S}.ingest(p_dataset text, p_rows jsonb, p_run_id text) returns jsonb
 language plpgsql security definer set search_path = pg_catalog, {S} as $f$
 declare
   cols text[]; keys text[]; req text[];
-  r jsonb; i int := 0; n int; bad text[]; nested text[]; blank text[]; rk text; seen text;
+  r jsonb; i int := 0; n int; bad text[]; nested text[]; blank text[]; untyped text[]; rk text; seen text;
   ins int := 0; skipped int := 0; errors jsonb := '[]'::jsonb; good jsonb := '[]'::jsonb; up jsonb;
 begin
   case p_dataset
@@ -355,6 +364,17 @@ begin
     if cardinality(blank) > 0 then
       errors := errors || jsonb_build_object('row', i, 'error', 'key column is blank', 'columns', to_jsonb(blank));
       continue;
+    end if;
+    if p_dataset = any({_arr(REPLACEABLE)}) then
+      case p_dataset
+{typed_case}
+        else untyped := '{{}}';
+      end case;
+      if cardinality(untyped) > 0 then
+        errors := errors || jsonb_build_object('row', i, 'error',
+          'unreadable values (timestamps YYYY-MM-DD HH:MM[:SS] or ISO 8601 with offset)', 'columns', to_jsonb(untyped));
+        continue;
+      end if;
     end if;
     rk := row_key(p_dataset, keys, r);
     if p_dataset = any({_arr(REPLACEABLE)}) then

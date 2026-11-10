@@ -70,6 +70,7 @@ create table if not exists {S}.digest_log (
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
+alter table {S}.digest_log add column if not exists owner text;  -- the current sender's claim token
 
 do $$ begin
   if exists (select 1 from pg_roles where rolname = 'anon') then

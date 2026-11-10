@@ -368,6 +368,24 @@ class DigestPostgresTests(unittest.TestCase):
         self.assertEqual((rep["status"], rep["ai"]), ("sent", False))
         self.assertIn("status/1", svc.messages[0])  # the fallback still lists the alert
 
+    def test_review6_a_sender_whose_claim_was_taken_over_never_sends(self):
+        from x_lakehouse.digest import windows
+        w = windows(self.NOW, "auto")[0]
+        from x_lakehouse.marts import ensure_marts
+        ensure_marts(self.conn)
+        stale = digest._reserve(self.conn, w)
+        with self.conn.cursor() as c:  # the first sender stalls past 15 minutes ...
+            c.execute("update x_intel.digest_log set updated_at = now() - interval '20 minutes'")
+        self.conn.commit()
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        self.assertEqual(self.run_digest(svc)[0]["status"], "sent")  # ... and a second run takes over
+        self.assertFalse(digest._mark(self.conn, w, "delivering", stale))  # the stale sender stops here
+        with self.conn.cursor() as c:
+            c.execute("select status, sent_messages from x_intel.digest_log")
+            self.assertEqual(c.fetchall(), [("sent", 1)])
+        self.conn.commit()
+        self.assertEqual(len(svc.messages), 1)
+
     def test_review5_a_connect_error_is_retried(self):
         svc = FakeServices({"headline_th": "h", "summary_th": ["a"]}, telegram_fail={1})
         svc.connect_error = True

@@ -259,6 +259,18 @@ class InboxPostgresTests(unittest.TestCase):
         self.assertEqual(self.ingest("claims", [book])["upserted"]["updated"], 1)
         self.assertEqual(read_dataset(self.store, "", DATASETS["claims"]).num_rows, 2)  # raw keeps all versions
 
+    def test_review6_a_config_timestamp_sql_cannot_read_is_refused_not_nulled(self):
+        qp = {"query_id": "Q2", "query": "duckdb", "runs": 1}
+        for bad in ("20261113T081600+0700", "2026-11-13", "13/11/2026 08:16"):
+            out = self.ingest("x_query_plan", [qp | {"last_run_at": bad}])
+            self.assertEqual((out["inserted"], out["errors"][0]["columns"]), (0, ["last_run_at"]), bad)
+        out = self.ingest("x_query_plan", [qp | {"runs": "many"}])
+        self.assertEqual(out["errors"][0]["columns"], ["runs"])
+        for good in ("2026-11-13 08:16", "2026-11-13T08:16:00+07:00"):
+            out = self.ingest("x_query_plan", [qp | {"last_run_at": good}], run_id=f"ok{good[-2:]}")
+            self.assertEqual(out["errors"], [], good)
+        self.assertEqual(self.ingest("x_query_plan", [qp | {"last_run_at": ""}], run_id="blank")["errors"], [])
+
     def test_config_rows_keep_the_newest_edit_for_the_drain(self):
         qp = {"query_id": "Q1", "query": "duckdb", "last_since_id": "100", "runs": 1}
         self.ingest("x_query_plan", [qp])
@@ -313,7 +325,12 @@ class InboxPostgresTests(unittest.TestCase):
         self.assertEqual(self.q("select count(*) from x_intel.ingest_inbox where drained_at is null")[0][0], 1)
 
     def test_config_coercion_error_fails_the_run_and_keeps_the_row(self):
-        self.ingest("x_query_plan", [{"query_id": "Q1", "query": "duckdb", "runs": "oops"}])
+        out = self.ingest("x_query_plan", [{"query_id": "Q1", "query": "duckdb", "runs": "oops"}])
+        self.assertEqual(out["errors"][0]["columns"], ["runs"])  # refused at the door since review 6
+        # A row stored before that gate still fails the drain (defence in depth).
+        self.q("insert into x_intel.ingest_inbox (dataset, run_id, row, row_key) select 'x_query_plan', 'old', r, "
+               "x_intel.row_key('x_query_plan', %s, r) from (select %s::jsonb r) s returning id",
+               list(DATASETS["x_query_plan"].key), json.dumps({"query_id": "Q1", "query": "duckdb", "runs": "oops"}))
         code, beats, ev = self.run_scheduled()
         self.assertEqual((code, beats), (1, [False]))
         self.assertEqual(ev["drain"]["config_coerce_errors"], {"x_query_plan": 1})
