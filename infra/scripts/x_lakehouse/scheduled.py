@@ -127,7 +127,7 @@ def _bi(cfg: Config) -> None:
                 result = pages_deploy.deploy(Path(tmp) / "site", account=cfg.require("CLOUDFLARE_ACCOUNT_ID"),
                                              project=cfg.get("X_LAKE_BI_PROJECT", "x-insights"),
                                              token=cfg.require("CLOUDFLARE_PAGES_TOKEN"), mark=str(built["mark"]))
-        _log(event="bi", mode=mode, **built, **result)
+        _log(event="bi", mode=mode, **{**built, **result})  # both carry "mark"
     except Exception as exc:  # noqa: BLE001 - reported, the lake run's result stands
         # PagesError text is the API step, HTTP status and error codes only; other errors log their type.
         detail = str(exc)[:200] if type(exc).__name__ == "PagesError" else None

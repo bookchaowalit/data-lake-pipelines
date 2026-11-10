@@ -245,6 +245,21 @@ class ScheduledHookTests(unittest.TestCase):
         self.assertTrue(logs[0]["mark"].startswith("x-insights@"))
         self.assertNotIn("grant open", json.dumps(logs))
 
+    def test_b6_deploy_logs_the_deployment(self):
+        fake = FakePages()
+        real = pages_deploy.deploy
+
+        def deploy(out, **kw):
+            with httpx.Client(transport=httpx.MockTransport(fake)) as http:
+                return real(out, http=http, **kw)
+        with mock.patch.object(cur, "connect", return_value=mock.MagicMock()), \
+                mock.patch.object(bi_site, "load_snapshot", return_value=snapshot()), \
+                mock.patch.object(pages_deploy, "deploy", side_effect=deploy):
+            logs = self.run_bi({"X_LAKE_BI": "deploy", "CLIENT_DENYLIST": "acme corp", "X_LAKE_DB_URL": "x",
+                                "CLOUDFLARE_ACCOUNT_ID": "a", "CLOUDFLARE_PAGES_TOKEN": "t"})
+        self.assertEqual((logs[0]["status"], logs[0]["deployment_id"]), ("deployed", "dep1"), logs)
+        self.assertTrue(logs[0]["mark"].startswith("x-insights@"))
+
 
 @unittest.skipUnless(DB, "set X_LAKE_TEST_DB_URL to a throwaway Postgres")
 class BiPostgresTests(unittest.TestCase):
