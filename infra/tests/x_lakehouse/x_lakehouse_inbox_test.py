@@ -496,6 +496,52 @@ class InboxPostgresTests(unittest.TestCase):
         self.assertEqual(self.ingest("x_signals", [row | {"opportunity_score": 4}])["errors"][0]["error"],
                          "key already stored with different values; send a new version")
 
+    def test_review5_a_changed_resend_during_prune_is_still_refused(self):
+        import threading
+
+        self.ingest("x_signals", [signal_row("7", category="news")])
+        inbox.drain(self.conn, store=self.store, prefix="", now=NOW)
+        self.q("update x_intel.ingest_inbox set drained_at = %s returning id", NOW - timedelta(days=4))
+        pruning, go = threading.Event(), threading.Event()
+
+        class HeldCommit:  # prune's statements run, its commit waits for the resend to start
+            def __init__(self, conn):
+                self.conn = conn
+
+            def cursor(self):
+                return self.conn.cursor()
+
+            def commit(self):
+                pruning.set()
+                go.wait(10)
+                self.conn.commit()
+
+        prune_conn, bot = cur.connect(DB), cur.connect(DB)
+        out = {}
+
+        def resend():
+            with bot.cursor() as c:
+                c.execute("select x_intel.ingest('x_signals', %s::jsonb, 'run1113r')",
+                          (json.dumps([signal_row("7", category="opinion")]),))
+                out["r"] = c.fetchone()[0]
+            bot.commit()
+
+        try:
+            t1 = threading.Thread(target=inbox.prune, args=(HeldCommit(prune_conn), NOW))
+            t1.start()
+            self.assertTrue(pruning.wait(10))
+            t2 = threading.Thread(target=resend)
+            t2.start()
+            t2.join(0.5)
+            go.set()
+            t1.join(10)
+            t2.join(10)
+        finally:
+            prune_conn.close()
+            bot.close()
+        self.assertEqual(out["r"]["errors"][0]["error"], "key already stored with different values; send a new version")
+        self.assertEqual(self.q("select category from x_intel.x_signals where post_id = '7'"), [("news",)])
+
     def test_inbox_validate_fails_when_a_drained_row_is_missing_from_raw(self):
         self.ingest("x_feed", [feed_row("1")])
         inbox.drain(self.conn, store=self.store, prefix="", now=NOW)

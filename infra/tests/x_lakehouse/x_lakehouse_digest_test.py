@@ -163,6 +163,8 @@ class FakeServices:
             if part in self.telegram_fail:
                 if getattr(self, "timeout", False):
                     raise httpx.ReadTimeout("timed out", request=request)
+                if getattr(self, "connect_error", False):
+                    raise httpx.ConnectError("refused", request=request)
                 return httpx.Response(429, json={"ok": False})
             self.messages.append(json.loads(request.content)["text"])
             return httpx.Response(200, json={"ok": True, "result": {"message_id": len(self.messages)}})
@@ -302,12 +304,42 @@ class DigestPostgresTests(unittest.TestCase):
         svc = FakeServices(long_answer, telegram_fail={2})
         svc.timeout = True
         [rep] = self.run_digest(svc)
-        self.assertEqual((rep["status"], rep["messages"]), ("partial", 1))
+        self.assertEqual((rep["status"], rep["messages"]), ("unknown", 1))
         self.assertIn("ReadTimeout", rep["error"])
+        self.assertEqual(svc.attempts, 2)  # part 2 once: Telegram may already show it, so no retry
         with self.conn.cursor() as c:
             c.execute("select status, sent_messages from x_intel.digest_log")
-            self.assertEqual(c.fetchall(), [("partial", 1)])
+            self.assertEqual(c.fetchall(), [("unknown", 1)])
         self.conn.commit()
+
+    def test_review5_an_unknown_first_part_is_never_resent(self):
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]}, telegram_fail={1})
+        svc.timeout = True
+        self.assertEqual(self.run_digest(svc)[0]["status"], "unknown")
+        svc.telegram_fail.clear()
+        self.assertEqual(self.run_digest(svc)[0]["status"], "already_sent_or_sending")
+        self.assertEqual(svc.attempts, 1)
+
+    def test_review5_a_connect_error_is_retried(self):
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]}, telegram_fail={1})
+        svc.connect_error = True
+        [rep] = self.run_digest(svc)
+        self.assertEqual((rep["status"], svc.attempts), ("error", 2))
+
+    def test_review5_a_large_window_is_trimmed_to_the_gateway_budget(self):
+        from x_lakehouse import digest as dg
+        with self.conn.cursor() as c:
+            for i in range(100, 160):
+                c.execute("insert into x_intel.x_signals (post_id, collected_at, domain, alert_tier, opportunity_score, "
+                          "cred_tier, signal_type, post_text, post_url, author_handle, suggested_action) "
+                          "values (%s, '2026-11-10 10:30+07', 'D5 Technology', %s, 4, 'T1', 'Opportunity', %s, %s, 'a', %s)",
+                          (str(i), "digest" if i % 2 else "none", "ข่าว" * 70, f"https://x.com/a/status/{i}", "ทำ" * 100))
+        self.conn.commit()
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        [rep] = self.run_digest(svc)
+        self.assertGreater(rep["trimmed"], 0)
+        self.assertTrue(rep["ai"])
+        self.assertLessEqual(len(dg.SYSTEM.encode()) + len(svc.prompts[0].encode()), dg.PROMPT_BYTES)
 
     def test_review4_a_client_term_past_the_text_cut_still_withholds_the_row(self):
         with self.conn.cursor() as c:

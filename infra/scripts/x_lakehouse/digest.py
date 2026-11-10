@@ -63,6 +63,11 @@ SYSTEM = (
 )
 
 
+class DeliveryUnknown(RuntimeError):
+    """Telegram may or may not have shown the message (timeout after sending, 5xx, unreadable 200).
+    Never retried: the digest is at most once, so the id is closed as 'unknown'."""
+
+
 class DigestError(RuntimeError):
     pass
 
@@ -226,12 +231,36 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
 
 # ---------------------------------------------------------------------------------------- gateway
 
+# The gateway refuses a request whose estimated input (UTF-8 bytes per message + 32, plus its own
+# language-policy message) and max output exceed token_budget, and caps token_budget at 24,576.
+MAX_TOKEN_BUDGET = 24576
+MAX_OUTPUT_TOKENS = 1500
+PROMPT_BYTES = MAX_TOKEN_BUDGET - MAX_OUTPUT_TOKENS - 2048  # room for the policy message and overhead
+
+
+def prompt_bytes(facts: Facts) -> int:
+    return len(SYSTEM.encode()) + len(json.dumps(facts.as_prompt(), ensure_ascii=False, default=str).encode())
+
+
+def fit_prompt(facts: Facts) -> int:
+    """Drop the lowest-ranked items (top signals, then opportunities, claims, alerts, domains) until the
+    prompt fits PROMPT_BYTES. Returns how many were dropped; DigestError when even the totals do not fit."""
+    dropped = 0
+    while prompt_bytes(facts) > PROMPT_BYTES:
+        part = next((p for p in (facts.top, facts.opportunities, facts.claims, facts.alerts, facts.domains) if p), None)
+        if part is None:
+            raise DigestError("facts do not fit the gateway budget")
+        part.pop()
+        dropped += 1
+    return dropped
+
+
 def ask_gateway(http: httpx.Client, token: str, route: str, facts: Facts) -> tuple[dict[str, Any], dict[str, Any]]:
     user = json.dumps(facts.as_prompt(), ensure_ascii=False, default=str)
-    out = 1500
+    out = MAX_OUTPUT_TOKENS
     body = {"route": route, "prompt_version": PROMPT_VERSION, "profile": "fast", "privacy_class": "internal",
             "response_format": {"type": "json_object"}, "reasoning_effort": "low", "max_output_tokens": out,
-            "token_budget": min(24576, len(SYSTEM.encode()) + len(user.encode()) + out + 768),
+            "token_budget": min(MAX_TOKEN_BUDGET, len(SYSTEM.encode()) + len(user.encode()) + out + 2048),
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]}
     try:
         r = http.post(f"{GATEWAY_URL}/api/ai/generate", json=body, timeout=120,
@@ -383,16 +412,25 @@ def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:
 
 
 def send_telegram(http: httpx.Client, token: str, chat_id: str, text: str) -> None:
+    """DigestError = Telegram surely did not take the message (safe to retry); DeliveryUnknown = it
+    may have. Exception texts are dropped because they can carry the token-bearing URL."""
     try:
         r = http.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=30,
                       json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
-        ok = r.status_code == 200 and (r.json() or {}).get("ok") is True
-    except (httpx.HTTPError, ValueError, AttributeError) as exc:
-        # A timeout or bad body joins the retry and partial/error bookkeeping in run(); the exception
-        # text is dropped because it can carry the token-bearing URL.
-        raise DigestError(f"telegram {type(exc).__name__}") from None
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        raise DigestError(f"telegram {type(exc).__name__}") from None  # never reached Telegram
+    except httpx.HTTPError as exc:
+        raise DeliveryUnknown(f"telegram {type(exc).__name__}") from None  # sent, answer lost
+    if 400 <= r.status_code < 500:
+        raise DigestError(f"telegram http {r.status_code}")  # a definite rejection
+    if r.status_code != 200:
+        raise DeliveryUnknown(f"telegram http {r.status_code}")
+    try:
+        ok = (r.json() or {}).get("ok") is True
+    except (ValueError, AttributeError):
+        ok = False
     if not ok:
-        raise DigestError(f"telegram http {r.status_code}")  # never echo the token-bearing URL
+        raise DeliveryUnknown("telegram unreadable 200 answer")
 
 
 # -------------------------------------------------------------------------------------------- run
@@ -404,7 +442,7 @@ def _reserve(conn: Any, w: Window) -> bool:
         c.execute(f"insert into {S}.digest_log (digest_id, kind, window_start, window_end, status) "
                   f"values (%s, %s, %s, %s, 'sending') on conflict (digest_id) do update "
                   f"set status = 'sending', window_end = excluded.window_end, updated_at = now() "
-                  f"where {S}.digest_log.status not in ('sent', 'sending', 'partial') "
+                  f"where {S}.digest_log.status not in ('sent', 'sending', 'partial', 'unknown') "
                   f"or ({S}.digest_log.status = 'sending' and {S}.digest_log.updated_at < now() - interval '15 minutes') "
                   f"returning digest_id", (w.digest_id, w.kind, w.start, w.end))
         ok = c.fetchone() is not None
@@ -419,7 +457,7 @@ def _log_row(conn: Any, w: Window, status: str, **kw: Any) -> None:
                   f"on conflict (digest_id) do update set window_end = excluded.window_end, status = excluded.status, "
                   f"signals = excluded.signals, sent_messages = excluded.sent_messages, tokens_in = excluded.tokens_in, "
                   f"tokens_out = excluded.tokens_out, cost_usd = excluded.cost_usd, error = excluded.error, "
-                  f"updated_at = now() where {S}.digest_log.status not in ('sent', 'partial')",
+                  f"updated_at = now() where {S}.digest_log.status not in ('sent', 'partial', 'unknown')",
                   (w.digest_id, w.kind, w.start, w.end, status, kw.get("signals"), kw.get("sent"),
                    kw.get("tokens_in"), kw.get("tokens_out"), kw.get("cost_usd"), kw.get("error")))
     conn.commit()
@@ -457,6 +495,7 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 error = "client term in the facts; gateway not called"  # never send it out
             elif facts.totals["signals"]:
                 try:
+                    rep["trimmed"] = fit_prompt(facts)  # before the call; links shrink with the facts
                     raw, usage = ask_gateway(client, cfg.require("AI_GATEWAY_TOKEN"),
                                              cfg.get("X_DIGEST_ROUTE", "sheet-summaries"), facts)
                     answer = validate_answer(raw, facts, denylist)
@@ -470,9 +509,9 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 reports.append(rep | {"status": "blocked"})
                 continue
             parts = split_message(text)
-            delivered, failure = 0, None
+            delivered, failure, unknown = 0, None, False
             for p in parts:
-                for attempt in (1, 2):  # one retry per part
+                for attempt in (1, 2):  # one retry per part, only after a definite rejection
                     try:
                         send_telegram(client, cfg.require("TELEGRAM_NOTI_BOT_TOKEN"),
                                       cfg.require("TELEGRAM_NOTI_CHAT_ID"), p)
@@ -481,12 +520,16 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                         break
                     except DigestError as exc:
                         failure = str(exc)
+                    except DeliveryUnknown as exc:
+                        failure, unknown = str(exc), True
+                        break
                 if failure:
                     break
             if failure:
-                # Nothing delivered: retryable ('error'). Some parts delivered: terminal ('partial'), so a
-                # later run never resends the parts the owner already has.
-                status = "partial" if delivered else "error"
+                # Outcome unknown: terminal ('unknown'), never resent (at most once). Nothing delivered:
+                # retryable ('error'). Some parts delivered: terminal ('partial'), so a later run never
+                # resends the parts the owner already has.
+                status = "unknown" if unknown else "partial" if delivered else "error"
                 _log_row(conn, w, status, signals=facts.totals["signals"], sent=delivered, error=failure, **usage)
                 reports.append(rep | {"status": status, "messages": delivered, "of": len(parts), "error": failure})
                 continue

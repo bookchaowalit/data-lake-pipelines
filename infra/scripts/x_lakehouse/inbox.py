@@ -51,6 +51,9 @@ S = PG_SCHEMA
 INBOX = f"{S}.ingest_inbox"
 DRAIN_LOCK = 0x786C616B65  # "xlake": pg_try_advisory_lock key held by the one drainer
 CONFIG_LOCK = 0x786C616B6563  # "xlakec": transaction lock serialising config ingest() with the replay
+# Raw ingest() holds it shared for its transaction, prune() exclusively: a key's move from the inbox to
+# ingest_seen is never seen half-done (no inbox row yet no ingest_seen row) by a resend in flight.
+PRUNE_LOCK = 0x786C616B6570  # "xlakep"
 KEEP_DRAINED = timedelta(days=3)
 KEEP_DELIVERIES = timedelta(days=30)  # longer than any bot retry
 # Datasets whose stored inbox row is replaced by a newer version of the same key (no raw history:
@@ -329,6 +332,8 @@ begin
   end if;
   if p_dataset = any({_arr(REPLACEABLE)}) then
     perform pg_advisory_xact_lock({CONFIG_LOCK});  -- one config writer at a time (see reapply_config)
+  elsif p_dataset = any({_arr(SEEN_GUARDED)}) then
+    perform pg_advisory_xact_lock_shared({PRUNE_LOCK});  -- wait out a prune in progress (see prune)
   end if;
   for r in select value from jsonb_array_elements(p_rows) loop
     i := i + 1;
@@ -588,6 +593,7 @@ def landed(conn: Any, store: Any, prefix: str, since: datetime) -> dict[str, int
 def prune(conn: Any, now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     with conn.cursor() as c:
+        c.execute("select pg_advisory_xact_lock(%s)", (PRUNE_LOCK,))  # no raw ingest() mid-flight
         c.execute(f"insert into {S}.ingest_seen (dataset, row_key, payload_md5) "
                   f"select dataset, row_key, {S}.payload_md5(row) from {INBOX} "
                   f"where drained_at < %s and dataset = any(%s) on conflict do nothing",
