@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -83,16 +84,28 @@ class RenderTests(unittest.TestCase):
             digest.validate_answer(ok | {"summary_th": ["ดู https://evil.example/y"]}, f, ["zzz"])
         with self.assertRaises(digest.DigestError):
             digest.validate_answer({"summary_th": []}, f, ["zzz"])
-        # Links or bare hosts hidden in any model-written field are refused (Telegram links bare hosts).
+        # Links or bare hosts hidden in a model-written item drop that item (Telegram links bare hosts);
+        # in the headline they fail the answer.
         for poisoned in (ok | {"alerts": [{"title": "ดู evil.example/login", "why": "w", "link": ""}]},
                          ok | {"opportunities": [{"title": "t", "why": "ไปที่ https://evil.example", "link": ""}]},
-                         ok | {"watch": ["phish.example.co"]},
-                         ok | {"headline_th": "สรุป bit.ly/abc"}):
-            with self.assertRaises(digest.DigestError, msg=str(poisoned)):
-                digest.validate_answer(poisoned, f, ["zzz"])
+                         ok | {"watch": ["phish.example.co"]}):
+            out = digest.validate_answer(poisoned, f, ["zzz"])
+            self.assertEqual((out["dropped"], out["opportunities"], out["watch"]), (1, [], []), str(poisoned))
+            self.assertNotIn("evil", json.dumps(out))
+        with self.assertRaises(digest.DigestError):
+            digest.validate_answer(ok | {"headline_th": "สรุป bit.ly/abc"}, f, ["zzz"])
         # Hosts of the facts' own links, version numbers and Thai text stay allowed.
         fine = ok | {"summary_th": ["โพสต์บน x.com เพิ่มขึ้น 1.5 เท่า", "Python 3.12 ออกแล้ว"]}
         self.assertEqual(digest.validate_answer(fine, f, ["zzz"])["summary_th"][0], "โพสต์บน x.com เพิ่มขึ้น 1.5 เท่า")
+
+    def test_review5_thai_abbreviations_are_not_hosts_and_a_bad_bullet_is_dropped(self):
+        f = self._facts()
+        thai = ["สตง.ตรวจสอบโครงการ", "ก.ล.ต.เตือนนักลงทุน", "ธปท.ประกาศดอกเบี้ย", "อ.เมือง จ.เชียงใหม่"]
+        out = digest.validate_answer({"headline_th": "ธปท.คงดอกเบี้ย", "summary_th": thai + ["ดู evil.example"]},
+                                     f, ["zzz"])
+        self.assertEqual((out["summary_th"], out["dropped"]), (thai[:4], 1))
+        with self.assertRaises(digest.DigestError):  # nothing usable left
+            digest.validate_answer({"headline_th": "h", "summary_th": ["ดู evil.example"]}, f, ["zzz"])
 
     def test_review_malformed_answer_fields_raise_digest_error(self):
         f = self._facts()
@@ -319,6 +332,24 @@ class DigestPostgresTests(unittest.TestCase):
         svc.telegram_fail.clear()
         self.assertEqual(self.run_digest(svc)[0]["status"], "already_sent_or_sending")
         self.assertEqual(svc.attempts, 1)
+
+    def test_review5_a_crash_while_delivering_is_never_resent(self):
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        with patch.object(digest, "send_telegram", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_digest(svc)
+        with self.conn.cursor() as c:  # long after the crash: a stale 'sending' would be taken over
+            c.execute("update x_intel.digest_log set updated_at = now() - interval '1 hour'")
+        self.conn.commit()
+        self.assertEqual(self.run_digest(svc)[0]["status"], "already_sent_or_sending")
+        self.assertEqual(svc.messages, [])
+
+    def test_review5_the_fallback_keeps_the_facts_the_prompt_trim_dropped(self):
+        with patch.object(digest, "PROMPT_BYTES", 1):
+            svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+            [rep] = self.run_digest(svc)
+        self.assertEqual((rep["status"], rep["ai"]), ("sent", False))
+        self.assertIn("status/1", svc.messages[0])  # the fallback still lists the alert
 
     def test_review5_a_connect_error_is_retried(self):
         svc = FakeServices({"headline_th": "h", "summary_th": ["a"]}, telegram_fail={1})

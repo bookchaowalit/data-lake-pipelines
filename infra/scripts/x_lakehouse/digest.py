@@ -20,6 +20,7 @@ the Telegram message is HTML-escaped (X text is untrusted). Logs carry counts on
 from __future__ import annotations
 
 import argparse
+import copy
 import html
 import json
 import re
@@ -48,7 +49,9 @@ MAX_MESSAGE = 4000  # Telegram's limit is 4,096 characters
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 # Host-like text in model prose, scanned after NFKC (full-width dots become "."): labels may be
 # non-ASCII (IDN), and bare IPv4 addresses count too. Telegram turns such text into links by itself.
-HOST_RE = re.compile(r"((?:[\w-]+\.)+[^\W\d_][\w-]{1,62})((?:/[^\s\"'<>]*)?)")
+# The TLD must be ASCII letters, punycode or .ไทย: Thai abbreviations glued to the next word ("สตง.ตรวจสอบ",
+# "ก.ล.ต.เตือน") are ordinary prose, not hosts (render() also breaks every dot with a word joiner).
+HOST_RE = re.compile(r"((?:[\w-]+\.)+(?:[A-Za-z]{2,63}|xn--[A-Za-z0-9-]{1,59}|ไทย))(?![\w-])((?:/[^\s\"'<>]*)?)")
 IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 WORD_JOINER = "\u2060"
 LINE_BREAK_RE = re.compile(r"\s*[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+\s*")
@@ -322,22 +325,38 @@ def validate_answer(answer: Any, facts: Facts, denylist: Sequence[str]) -> dict[
         raise DigestError("answer contains a client term")
     # Model prose may name only facts links, or a facts host on its own (e.g. "x.com"); a bare host
     # with a path must be exactly a facts link without its scheme. No IP addresses.
-    prose = [out["headline_th"], *out["summary_th"], *out["watch"]]
-    prose += [v for part in ("alerts", "opportunities") for i in out[part] for v in (i["title"], i["why"])]
+    # An item whose prose breaks that rule is dropped (it never reaches Telegram); a bad headline, or
+    # no summary left, fails the answer (facts-only fallback).
     hosts = {(urlsplit(u).hostname or "").lower() for u in allowed}
     bare = {u.split("://", 1)[-1].rstrip("/").lower() for u in allowed}
-    for chunk in prose:
+
+    def problem(chunk: str) -> str | None:
         norm = unicodedata.normalize("NFKC", chunk)
-        for url in URL_RE.findall(norm):
-            if url not in allowed:
-                raise DigestError("answer has a link that is not in the facts")
+        if any(url not in allowed for url in URL_RE.findall(norm)):
+            return "answer has a link that is not in the facts"
         rest = URL_RE.sub(" ", norm)
         if IPV4_RE.search(rest):
-            raise DigestError("answer names an IP address")
+            return "answer names an IP address"
         for host, path in HOST_RE.findall(rest):
             h = host.lower()
             if h not in hosts or (path.strip("/") and f"{h}{path}".rstrip("/").lower() not in bare):
-                raise DigestError("answer names a host that is not in the facts")
+                return "answer names a host that is not in the facts"
+        return None
+
+    if (why := problem(out["headline_th"])) is not None:
+        raise DigestError(why)
+    dropped = 0
+    for key in ("summary_th", "watch"):
+        keep = [x for x in out[key] if problem(x) is None]
+        dropped += len(out[key]) - len(keep)
+        out[key] = keep
+    for part in ("alerts", "opportunities"):
+        keep = [i for i in out[part] if problem(i["title"]) is None and problem(i["why"]) is None]
+        dropped += len(out[part]) - len(keep)
+        out[part] = keep
+    if not out["summary_th"]:
+        raise DigestError("answer has no usable summary")
+    out["dropped"] = dropped
     return out
 
 
@@ -442,12 +461,18 @@ def _reserve(conn: Any, w: Window) -> bool:
         c.execute(f"insert into {S}.digest_log (digest_id, kind, window_start, window_end, status) "
                   f"values (%s, %s, %s, %s, 'sending') on conflict (digest_id) do update "
                   f"set status = 'sending', window_end = excluded.window_end, updated_at = now() "
-                  f"where {S}.digest_log.status not in ('sent', 'sending', 'partial', 'unknown') "
+                  f"where {S}.digest_log.status not in ('sent', 'sending', 'partial', 'unknown', 'delivering') "
                   f"or ({S}.digest_log.status = 'sending' and {S}.digest_log.updated_at < now() - interval '15 minutes') "
                   f"returning digest_id", (w.digest_id, w.kind, w.start, w.end))
         ok = c.fetchone() is not None
     conn.commit()
     return ok
+
+
+def _mark(conn: Any, w: Window, status: str) -> None:
+    with conn.cursor() as c:
+        c.execute(f"update {S}.digest_log set status = %s, updated_at = now() where digest_id = %s", (status, w.digest_id))
+    conn.commit()
 
 
 def _log_row(conn: Any, w: Window, status: str, **kw: Any) -> None:
@@ -495,10 +520,12 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 error = "client term in the facts; gateway not called"  # never send it out
             elif facts.totals["signals"]:
                 try:
-                    rep["trimmed"] = fit_prompt(facts)  # before the call; links shrink with the facts
+                    sent_facts = copy.deepcopy(facts)  # trimmed for the gateway; the fallback keeps all
+                    rep["trimmed"] = fit_prompt(sent_facts)
                     raw, usage = ask_gateway(client, cfg.require("AI_GATEWAY_TOKEN"),
-                                             cfg.get("X_DIGEST_ROUTE", "sheet-summaries"), facts)
-                    answer = validate_answer(raw, facts, denylist)
+                                             cfg.get("X_DIGEST_ROUTE", "sheet-summaries"), sent_facts)
+                    answer = validate_answer(raw, sent_facts, denylist)
+                    rep["dropped_items"] = answer["dropped"]
                 except DigestError as exc:
                     error = str(exc)  # facts-only fallback below
             text = render(facts, answer)
@@ -509,6 +536,9 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 reports.append(rep | {"status": "blocked"})
                 continue
             parts = split_message(text)
+            # From here a crash may leave parts in the chat: 'delivering' is never taken over by
+            # _reserve (unlike a stale 'sending'), so the id is not resent (at most once).
+            _mark(conn, w, "delivering")
             delivered, failure, unknown = 0, None, False
             for p in parts:
                 for attempt in (1, 2):  # one retry per part, only after a definite rejection
