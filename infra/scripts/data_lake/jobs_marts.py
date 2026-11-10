@@ -90,11 +90,16 @@ def _model_fingerprint() -> str:
     return digest.hexdigest()
 
 
+# Bump when the bytes _export_mart writes change for the same inputs (utc-v1: TIMESTAMPTZ pinned to
+# UTC), so Gold run ids change too and a replay never meets an older part under the same key.
+EXPORT_FORMAT = "utc-v1"
+
+
 def _writer_versions() -> dict[str, str]:
     import duckdb  # type: ignore
 
     pa, _ = _pyarrow()
-    return {"duckdb": duckdb.__version__, "pyarrow": pa.__version__}
+    return {"duckdb": duckdb.__version__, "pyarrow": pa.__version__, "export": EXPORT_FORMAT}
 
 
 def _run_dbt(

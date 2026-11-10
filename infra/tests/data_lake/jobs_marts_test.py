@@ -417,6 +417,14 @@ class ExportTimezoneTest(unittest.TestCase):
 
             self.assertEqual(str(pq.read_schema(Path(tmp) / "UTC.parquet").field("at").type.tz), "UTC")
 
+    def test_the_export_format_is_part_of_every_gold_run_fingerprint(self):
+        # Parts written before the UTC pin may carry another timezone under the same inputs; a new
+        # format version gives UTC exports new gold_run_ids instead of a StorageConflict on replay.
+        from data_lake.jobs_marts import EXPORT_FORMAT, _writer_versions
+
+        self.assertEqual(_writer_versions()["export"], EXPORT_FORMAT)
+        self.assertEqual(EXPORT_FORMAT, "utc-v1")
+
 
 if __name__ == "__main__":
     unittest.main()
