@@ -345,6 +345,7 @@ run is not a FAIL, but the owner decides whether day 2 counts.
    even when it is dated before the validate window. Exit: 3+ runs with no mismatch and 0 coercion errors.
 
 *Phase 2 — lake only (≈ from 16 Nov).*
+Prepared 2026-11-10: runbook `2026-11-10-x-sheet-cutover-runbook.md` (watchlist row map, run record, Chief Data brief).
 1. Chief Data stops the X tab appends and the X Query Plan G:P run-state write; config reads come from
    `x_intel.v_query_plan_sheet`, `x_intel.v_watchlist_sheet` (Sheet column order, Sheet cell format)
    and `x_intel.v_claims_open`; config edits go through `ingest('x_query_plan' | 'x_watchlist', …)`.
