@@ -432,6 +432,16 @@ class InboxPostgresTests(unittest.TestCase):
         self.ingest("x_query_plan", [qp | {"last_since_id": "300"}], run_id="runB")
         self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("300",)])
 
+    def test_a_retried_config_file_with_the_number_written_differently_is_still_a_retry(self):
+        # jsonb treats 1 and 1.0 as equal, so the delivery hash must too, or the retry of runA
+        # passes the dedupe and rolls the cursor back to 100.
+        qp = {"query_id": "Q1", "query": "duckdb", "priority": 1, "last_since_id": "100"}
+        self.ingest("x_query_plan", [qp], run_id="runA")
+        self.ingest("x_query_plan", [qp | {"last_since_id": "200"}], run_id="runB")
+        retry = self.ingest("x_query_plan", [qp | {"priority": 1.0}], run_id="runA")
+        self.assertEqual((retry["inserted"], retry["skipped"]), (0, 1))
+        self.assertEqual(self.q("select last_since_id from x_intel.x_query_plan"), [("200",)])
+
     def test_a_raw_key_resent_with_other_values_is_refused_not_half_applied(self):
         self.ingest("x_signals", [signal_row("5", category="news")])
         out = self.ingest("x_signals", [signal_row("5", category="opinion")])

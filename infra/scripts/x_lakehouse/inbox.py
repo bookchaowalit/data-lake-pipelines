@@ -360,7 +360,7 @@ begin
     if p_dataset = any({_arr(REPLACEABLE)}) then
       -- The same delivery again (a retried file): skip it, even if a later run changed the row since.
       insert into ingest_deliveries (dataset, row_key, run_id, payload_md5)
-      values (p_dataset, rk, p_run_id, md5(r::text)) on conflict do nothing;
+      values (p_dataset, rk, p_run_id, payload_md5(r)) on conflict do nothing;
       get diagnostics n = row_count;
       if n = 0 then skipped := skipped + 1; continue; end if;
       insert into ingest_inbox as t (dataset, run_id, row, row_key) values (p_dataset, p_run_id, r, rk)
