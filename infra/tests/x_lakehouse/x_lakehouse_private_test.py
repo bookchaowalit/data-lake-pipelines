@@ -170,7 +170,7 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual(mask_phones("โทร 081-234-5678 / 02 123 4567 / +1 555 123 4567"),
                          "โทร [phone] / [phone] / [phone]")
         for phone in ("053-123-456", "053 123 456", "(053) 123-456", "(02) 123 4567", "+1 (555) 123-4567",
-                      "+66 (2) 123 4567", "+44 20 7946 0958"):
+                      "+66 (2) 123 4567", "+44 20 7946 0958", "+44 (20) (7946) 0958"):
             self.assertEqual(mask_phones(f"call {phone} now"), "call [phone] now", phone)
         for keep in ("2114407239578710300", "2026-11-10 08:00", "1,234", "0812345678901", "+5 likes",
                      "0531234567", "๐๘๑๒๓๔๕๖๗๘", "+1 2 3", "+12 34 56", "score +10 20 30", "+500 likes 1,234"):
@@ -254,6 +254,21 @@ class OfflineTests(unittest.TestCase):
         env = {**os.environ, "X_LAKE_NEW_DATASETS": "off", "X_LAKE_SMALL_CURATED": "off"}
         out = json.loads(subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
                                         check=True).stdout)
+        guard = "\n".join([
+            f"import sys; sys.path.insert(0, {str(SCRIPTS)!r})",
+            "from x_lakehouse import inbox, serve_sheet",
+            "print(sorted(set(inbox.SEEN_GUARDED) & {'x_trends_th', 'alpha_feed'}))",
+            "class S:",
+            "    def cursor(self): return self",
+            "    def __enter__(self): return self",
+            "    def __exit__(self, *a): return False",
+            "    def execute(self, *a): pass",
+            "    def fetchall(self): return []",
+            "print(sorted(serve_sheet.fetch(S(), small_tabs=True)))"])
+        lines = subprocess.run([sys.executable, "-c", guard], env={**os.environ, "X_LAKE_SMALL_CURATED": "off"},
+                               capture_output=True, text=True, check=True).stdout.splitlines()
+        self.assertEqual(lines[0], "['alpha_feed', 'x_trends_th']")  # still replay-guarded while off
+        self.assertEqual(eval(lines[1]), sorted(SERVE_TABS.values()))  # optional tabs skipped, no failure
         names, tables, ptables, priv_in_public, spaces_in_public, priv_door = out
         self.assertEqual(len(names), 14)
         self.assertFalse(set(NEW_NAMES) & set(names))

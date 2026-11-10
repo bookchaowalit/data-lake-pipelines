@@ -60,7 +60,9 @@ REPLACEABLE = tuple(n for n, d in PUBLIC_DATASETS.items() if not d.raw)
 # Raw datasets with a curated table: prune keeps each pruned key's payload hash in ingest_seen, so a
 # key resent with other values is still refused once its inbox row is gone (raw keeps the first
 # version and would never take the change; curated alone would diverge from raw).
-SEEN_GUARDED = tuple(n for n, d in PUBLIC_DATASETS.items() if d.raw and n in CURATED)
+# The section-8 datasets stay guarded while X_LAKE_SMALL_CURATED=off, so switching their tables back on
+# cannot take a changed resend that raw refused.
+SEEN_GUARDED = tuple(n for n, d in PUBLIC_DATASETS.items() if d.raw and (n in CURATED or n in SMALL_CURATED))
 CLOSED_STATES = ("closed", "done", "resolved", "archived", "dismissed")  # same list as serve_sheet
 
 # Python's str.strip() whitespace set, so SQL trims exactly what coerce.raw_text trims.

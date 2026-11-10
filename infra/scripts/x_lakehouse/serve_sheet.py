@@ -99,7 +99,9 @@ def fetch(conn: Any, *, small_tabs: bool = False) -> dict[str, tuple[list[str], 
         out = {SERVE_TABS["x_signals"]: (SIGNAL_COLUMNS, signals), SERVE_TABS["claims"]: (CLAIM_COLUMNS, claims),
                SERVE_TABS["x_query_plan"]: (QUERY_PLAN_COLUMNS, plan)}
         if small_tabs:
-            for name, (days, col, order) in SMALL_TAB_DAYS.items():
+            # With X_LAKE_SMALL_CURATED=off their tables are not maintained: the tabs are skipped (not
+            # written, not failed), so the three existing tabs still refresh.
+            for name, (days, col, order) in ((n, v) for n, v in SMALL_TAB_DAYS.items() if n in CURATED):
                 tab, table = source_for(name)
                 cols = DATASETS[name].names
                 c.execute(f"select {', '.join(cols)} from {table} where {col} >= now() - interval '{days} days' "
