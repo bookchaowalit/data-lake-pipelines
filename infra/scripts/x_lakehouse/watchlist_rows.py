@@ -188,6 +188,11 @@ def main(argv: list[str] | None = None) -> int:
     if missing or "x_watchlist" not in typed:
         print(json.dumps({"status": "failed", "error": "X Watchlist tab missing"}))
         return 2
+    from .pipeline import validate_rows
+    from .schemas import DATASETS
+
+    # load() only checks the header; the row checks (blank keys, duplicates) need validate_rows.
+    validate_rows(DATASETS["x_watchlist"], typed["x_watchlist"], checks["x_watchlist"], sample=0)
     bad = header_problems(checks["x_watchlist"])
     if bad:  # a renamed key column would drop rows and renumber their entries by key: refuse
         print(json.dumps({"status": "failed", "error": "X Watchlist header", **bad}))
@@ -202,11 +207,9 @@ def main(argv: list[str] | None = None) -> int:
                 exists = c.fetchone()[0] is not None
             conn.commit()
             if not exists:  # dry run before the DDL exists: compare against an empty map
-                sheet = sheet_keys(typed["x_watchlist"])
-                plan = plan_seed(sheet, {})
-                print(json.dumps({"status": "dry_run", "map_exists": False,
-                                  **{k: (len(v) if isinstance(v, list) else v) for k, v in plan.items()}}))
-                return 0
+                report = _report(plan_seed(sheet_keys(typed["x_watchlist"]), {}))
+                print(json.dumps({"status": "dry_run", "map_exists": False, **report}))
+                return 1 if report["blocked"] else 0  # the readiness check must fail on what --execute refuses
         report = seed(conn, sheet_keys(typed["x_watchlist"]), execute=args.execute)
     finally:
         conn.close()

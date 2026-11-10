@@ -46,6 +46,55 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(wr.header_problems(NS(missing_columns=[], blank_key_rows=3)), {"blank_key_rows": 3})
         self.assertEqual(wr.header_problems(NS(missing_columns=[], blank_key_rows=0, order_differs=True)), {})
 
+    def test_cli_refuses_blank_keys_and_blocks_duplicates_before_the_migration(self):
+        """main(): row checks run (blank keys), and a dry run without the map fails on duplicates."""
+        import contextlib
+        import io
+        import json
+        from unittest import mock
+
+        from x_lakehouse import backfill
+        from x_lakehouse.pipeline import DatasetCheck
+
+        from x_lakehouse.coerce import type_row
+        from x_lakehouse.schemas import DATASETS
+
+        def rows(*vals):  # typed exactly as backfill.load() types the tab
+            return [type_row(DATASETS["x_watchlist"], dict(zip(wr.KEY, v)), sheet_row=i + 2)
+                    for i, v in enumerate(vals)]
+
+        class Conn:
+            def cursor(self):
+                return self
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, *a):
+                pass
+
+            def fetchone(self):
+                return (None,)  # to_regclass: the map does not exist yet
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        for tab, code, field in ((rows(A, ("chief-x", "keyword", "")), 2, "blank_key_rows"),
+                                 (rows(A, A), 1, "duplicate_keys_in_sheet")):
+            check = DatasetCheck("x_watchlist", "X Watchlist")
+            out = io.StringIO()
+            with mock.patch.object(backfill, "load", return_value=({"x_watchlist": tab}, {"x_watchlist": check}, [])), \
+                    mock.patch("x_lakehouse.curated.connect", return_value=Conn()), \
+                    mock.patch.dict(os.environ, {"X_LAKE_DB_URL": "x"}), contextlib.redirect_stdout(out):
+                self.assertEqual(wr.main(["--seed"]), code)
+            self.assertTrue(json.loads(out.getvalue()).get(field), out.getvalue())
+
     def test_duplicate_keys_in_the_tab_are_reported(self):
         self.assertEqual(wr.plan_seed([(2, A), (5, A)], {})["duplicate_keys_in_sheet"], [5])
 
