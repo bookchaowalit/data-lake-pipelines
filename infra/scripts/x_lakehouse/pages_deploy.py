@@ -61,13 +61,16 @@ def collect(out_dir: Path) -> tuple[dict[str, tuple[str, bytes, str]], dict[str,
     return assets, special
 
 
-def live_mark(http: httpx.Client, account: str, project: str, token: str) -> str:
+def live_mark(http: httpx.Client, account: str, project: str, token: str, branch: str = "main") -> str:
     res = _ok(http.get(f"{API}/accounts/{account}/pages/projects/{project}",
                        headers={"Authorization": f"Bearer {token}"}), "project")
     # The latest deployment counts too unless it failed: right after a deploy, canonical can still be the
     # previous one while the new one finishes, and a second upload of the same build would be wasted.
+    # Only a production deployment of the same branch counts: a preview carrying the mark is not live.
     latest = (res or {}).get("latest_deployment") or {}
-    if ((latest.get("latest_stage") or {}).get("status") or "") not in ("failure", "canceled"):
+    meta = (latest.get("deployment_trigger") or {}).get("metadata") or {}
+    if (latest.get("environment") == "production" and meta.get("branch") == branch
+            and ((latest.get("latest_stage") or {}).get("status") or "") not in ("failure", "canceled")):
         mark = _mark(latest)
         if mark:
             return mark
@@ -83,7 +86,7 @@ def deploy(out_dir: Path, *, account: str, project: str, token: str, mark: str, 
     own = http is None
     client = http or httpx.Client(timeout=60)
     try:
-        if not force and live_mark(client, account, project, token) == mark:
+        if not force and live_mark(client, account, project, token, branch) == mark:
             return {"status": "unchanged", "mark": mark}
         jwt = _ok(client.get(f"{API}/accounts/{account}/pages/projects/{project}/upload-token",
                            headers={"Authorization": f"Bearer {token}"}), "upload-token")["jwt"]

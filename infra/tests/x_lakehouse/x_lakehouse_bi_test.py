@@ -188,8 +188,8 @@ class DeployTests(unittest.TestCase):
     def test_b5_latest_in_progress_deployment_counts_unless_failed(self):
         def project(stage):
             def handler(request):
-                dep = {"deployment_trigger": {"metadata": {"commit_message": self.info["mark"]}},
-                       "latest_stage": {"status": stage}}
+                dep = {"deployment_trigger": {"metadata": {"commit_message": self.info["mark"], "branch": "main"}},
+                       "environment": "production", "latest_stage": {"status": stage}}
                 return httpx.Response(200, json={"success": True, "result": {
                     "latest_deployment": dep, "canonical_deployment": {"deployment_trigger": {"metadata": {}}}}})
             return handler
@@ -197,6 +197,17 @@ class DeployTests(unittest.TestCase):
             self.assertEqual(pages_deploy.live_mark(http, "a", "x-insights", "t"), self.info["mark"])
         with httpx.Client(transport=httpx.MockTransport(project("failure"))) as http:
             self.assertEqual(pages_deploy.live_mark(http, "a", "x-insights", "t"), "")
+
+    def test_a_preview_deployment_with_the_mark_does_not_count_for_production(self):
+        def handler(request):
+            preview = {"deployment_trigger": {"metadata": {"commit_message": self.info["mark"], "branch": "review"}},
+                       "environment": "preview", "latest_stage": {"status": "success"}}
+            older = {"deployment_trigger": {"metadata": {"commit_message": "old@abc", "branch": "main"}},
+                     "environment": "production"}
+            return httpx.Response(200, json={"success": True, "result": {
+                "latest_deployment": preview, "canonical_deployment": older}})
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            self.assertEqual(pages_deploy.live_mark(http, "a", "x-insights", "t", branch="main"), "old@abc")
 
     def test_uploads_missing_assets_and_creates_deployment(self):
         assets, special = pages_deploy.collect(self.out)
