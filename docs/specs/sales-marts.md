@@ -29,7 +29,7 @@ is an ADR-0008 envelope: `id`, `type`, `version`, `occurred_at`, `producer`, `da
 | type | data fields used | producer status |
 |---|---|---|
 | `payment.intent.succeeded` | `workspace_id`, `intent_id`, `amount` (minor units), `currency`, `provider` | live (platform-payment 9eb7c86) |
-| `payment.refund.succeeded` | `workspace_id`, `intent_id`, `refund_id`, `amount` (minor units), `currency` | contract only; not emitted yet |
+| `payment.refund.succeeded` | `workspace_id`, `intent_id`, `refund_id`, `amount` (minor units), `currency` | live (platform-payment fb1034d, when a refund settles as succeeded) |
 
 Other `type`s are ignored. The customer is the paying workspace (`workspace_id`). No personal
 data is read; envelopes carry reference ids only.
