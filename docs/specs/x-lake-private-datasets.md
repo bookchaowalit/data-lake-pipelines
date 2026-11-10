@@ -81,7 +81,7 @@ under `private/`, and checks every drained private row reached R2 (`private.land
 Grants (`private._grants`, re-applied on every inbox/both run): `REVOKE ALL` on the schema, its
 tables, sequences and functions from `PUBLIC`, `anon` and `authenticated`; `postgres` (the bots'
 connector role) gets `USAGE` on the schema and `EXECUTE` on `x_intel_private.ingest()` only — no
-`SELECT` on any private table. RLS is enabled on every private table as an extra layer. The schema is
+`SELECT` on any private table. RLS is enabled on every private table (including `retention_watermark`) as an extra layer. The schema is
 owned by the lake role `x_lake`.
 
 Logs: ingest/drain/retention log dataset names and counts only (`event=drain_private`,
@@ -200,7 +200,10 @@ To read old sent rows the new way:
   ranked by `(greatest(last_seen_at, removed_at), removed_at is not null)`, so a removal outranks a
   late active row with the same or an earlier `last_seen_at`, and only a later re-bookmark undoes it.
   `validate` judges retention on each key's newest version (a pruned bookmark's older active versions
-  in raw are not expected in Postgres).
+  in raw are not expected in Postgres). Bookmark versions are never filtered by age before the upsert
+  (an expired removal still ends a stored active bookmark, and the prune then deletes it); when the
+  prune deletes a bookmark it records the key's last version in `x_intel_private.retention_watermark`
+  (key + version only, no content), so a late, older observation cannot bring it back.
 - Section 8 cites commit `774f038`; `main` is at `fb8767f` (x-insights BI site). Only `inbox.py` and
   `scheduled.py` changed in between (the BI step), nothing in the drain/append path.
 - Retention runs inside the existing cron after an ok run (inbox/both: with the inbox prune; sheet mode:

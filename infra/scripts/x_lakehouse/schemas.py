@@ -479,6 +479,11 @@ if not NEW_DATASETS_ON:
     PRIVATE_CURATED = {}
 
 
+# Retention watermarks (curated.watermarked) exist only in the private schema's DDL.
+assert all(c.schema == PRIVATE_SCHEMA for c in {**CURATED, **PRIVATE_CURATED}.values()
+           if c.version and c.retain_col), "a versioned table with retention needs a retention_watermark table"
+
+
 def curated_for(name: str) -> Curated | None:
     """The curated table of a dataset, public (x_intel) or private (x_intel_private)."""
     return CURATED.get(name) or PRIVATE_CURATED.get(name)

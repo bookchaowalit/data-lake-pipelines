@@ -488,6 +488,25 @@ class DigestPostgresTests(unittest.TestCase):
             self.assertEqual(c.fetchone()[0], 1)
         self.conn.commit()
 
+    def test_d4_a_long_streak_is_counted_whole_and_stays_alerted(self):
+        from x_lakehouse.marts import ensure_marts
+        ensure_marts(self.conn)
+        with self.conn.cursor() as c:
+            c.execute("insert into x_intel.digest_log (digest_id, kind, window_start, window_end, status, ai_status, "
+                      "fallback_reason, updated_at) values ('ok:0', 'midday', now(), now(), 'sent', 'ok', null, "
+                      "now() - interval '100 hours')")
+            for i in range(60):
+                c.execute("insert into x_intel.digest_log (digest_id, kind, window_start, window_end, status, ai_status, "
+                          "fallback_reason, auth_alerted_at, updated_at) values (%s, 'midday', now(), now(), 'sent', "
+                          "'fallback', 'gateway http 502 provider_auth', %s, now() - make_interval(hours => %s))",
+                          (f"a:{i:02d}", None if i != 57 else at("2026-11-01 08:00"), 60 - i))
+        self.conn.commit()
+        self.assertEqual(digest.auth_failure_streak(self.conn), (60, True))
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.digest_log set auth_alerted_at = null")
+        self.conn.commit()
+        self.assertEqual(digest.auth_failure_streak(self.conn), (60, False))
+
     def test_d5_no_token_or_message_text_in_the_log_or_reports(self):
         self.cfg.env |= {"AI_GATEWAY_TOKEN": "GW-TOKEN-SYNTH", "TELEGRAM_NOTI_BOT_TOKEN": "TG-TOKEN-SYNTH"}
         svc = self.auth_failure()

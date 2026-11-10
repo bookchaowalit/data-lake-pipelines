@@ -158,18 +158,66 @@ def retention_cut(curated: Curated, now: datetime) -> datetime | date | None:
     return now.astimezone(timezone.utc) - timedelta(days=curated.retain_days)
 
 
+def watermarked(curated: Curated) -> bool:
+    """Versioned tables with retention (x_bookmarks): pruning records each key's last version in
+    ``<schema>.retention_watermark``, so a late, older version can never bring a pruned key back."""
+    return bool(curated.version and curated.retain_col and curated.retain_days)
+
+
+def watermark_table(curated: Curated) -> str:
+    return f"{curated.schema}.retention_watermark"
+
+
+WATERMARK_DDL = """create table if not exists {table} (
+    tbl text not null,
+    pk jsonb not null,
+    version_at timestamptz not null,
+    version_flag boolean not null,
+    primary key (tbl, pk)
+);"""
+
+
+def _pk_text(curated: Curated, rec: dict[str, Any]) -> list[str | None]:
+    """Primary key as text, the way the prune stores it (``jsonb_build_array(col::text, ...)``)."""
+    return [None if rec.get(k) is None else str(rec[k]) for k in curated.pk]
+
+
 def within_retention(curated: Curated, records: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
     """Drop records the retention prune would delete, so a replay or a Sheet catch-up cannot bring
-    them back. A null ``retain_col`` is always kept (e.g. a bookmark that is still bookmarked)."""
+    them back. A null ``retain_col`` is always kept (e.g. a bookmark that is still bookmarked).
+    Versioned tables keep every record: an expired removal must still replace an older stored version
+    (the prune then deletes it); the watermark (drop_watermarked) stops resurrection instead."""
     cut = retention_cut(curated, now)
-    if cut is None:
+    if cut is None or watermarked(curated):
         return records
     col = curated.retain_col
     return [r for r in records if r.get(col) is None or r[col] >= cut]
 
 
+def drop_watermarked(conn: Any, curated: Curated, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Records not newer than the version their key had when retention pruned it are dropped."""
+    if not watermarked(curated) or not records:
+        return records
+    import json
+
+    with conn.cursor() as c:
+        c.execute(f"select pk, version_at, version_flag from {watermark_table(curated)} where tbl = %s "
+                  "and pk = any(%s::jsonb[])",
+                  (curated.table, [json.dumps(_pk_text(curated, r), ensure_ascii=False) for r in records]))
+        marks = {tuple(pk): (v, f) for pk, v, f in c.fetchall()}
+    conn.commit()
+    out = []
+    for r in records:
+        mark = marks.get(tuple(_pk_text(curated, r)))
+        key = version_key(curated, r)
+        if mark is None or (key is not None and key > mark):
+            out.append(r)
+    return out
+
+
 def prune_retention(conn: Any, tables: list[Curated], now: datetime | None = None) -> dict[str, int]:
-    """Delete curated rows past each table's retention. Idempotent; raw files are never touched."""
+    """Delete curated rows past each table's retention. Idempotent; raw files are never touched.
+    Watermarked tables first record each pruned key's version (see drop_watermarked)."""
     now = now or datetime.now(timezone.utc)
     out: dict[str, int] = {}
     with conn.cursor() as c:
@@ -177,7 +225,19 @@ def prune_retention(conn: Any, tables: list[Curated], now: datetime | None = Non
             cut = retention_cut(t, now)
             if cut is None:
                 continue
-            c.execute(f"delete from {t.qualified} where {t.retain_col} is not null and {t.retain_col} < %s", (cut,))
+            past = f"{t.retain_col} is not null and {t.retain_col} < %s"
+            if watermarked(t):
+                top = (f"greatest({t.version}, {t.version_also})" if t.version_also else t.version)
+                flag = f"{t.version_also} is not null" if t.version_also else "false"
+                pk = "jsonb_build_array(" + ", ".join(f"{k}::text" for k in t.pk) + ")"
+                c.execute(f"insert into {watermark_table(t)} (tbl, pk, version_at, version_flag) "
+                          f"select %s, {pk}, {top}, {flag} from {t.qualified} where {past} "
+                          "on conflict (tbl, pk) do update set version_at = excluded.version_at, "
+                          "version_flag = excluded.version_flag "
+                          f"where row(excluded.version_at, excluded.version_flag) > "
+                          f"row({watermark_table(t)}.version_at, {watermark_table(t)}.version_flag)",
+                          (t.table, cut))
+            c.execute(f"delete from {t.qualified} where {past}", (cut,))
             out[t.table] = c.rowcount
     conn.commit()
     return out
@@ -191,4 +251,4 @@ def count(conn: Any, table: str) -> int:
 
 __all__ = ["CURATED", "connect", "count", "dedupe_latest", "eligible", "ensure_schema", "is_protected_value",
            "join_feed", "protected_pks", "prune_retention", "retention_cut", "stored_protected", "upsert",
-           "version_key", "version_sql", "within_retention"]
+           "version_key", "version_sql", "watermarked", "within_retention", "drop_watermarked"]

@@ -279,6 +279,9 @@ class PrivatePostgresTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.rollback()
+        with self.conn.cursor() as c:  # leave no private rows behind for the other suites on this database
+            c.execute("drop schema if exists x_intel_private cascade")
+        self.conn.commit()
         self.conn.close()
         self.tmp.cleanup()
 
@@ -408,6 +411,24 @@ class PrivatePostgresTests(unittest.TestCase):
         self.assertEqual(self.run_scheduled()[0], 0)
         self.assertEqual(self.q("select removed_at is null from x_intel_private.x_bookmarks"), [(True,)])
 
+    def test_an_expired_removal_still_ends_a_stored_bookmark_and_nothing_older_revives_it(self):
+        now = datetime.now(timezone.utc)
+        seen = ict(now - timedelta(days=200))
+        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=seen)])
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 1)  # still bookmarked: kept
+        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=seen, removed_at=ict(now - timedelta(days=190)))])
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 0)  # removal applied, then pruned
+        self.assertEqual(self.q("select tbl, pk from x_intel_private.retention_watermark"),
+                         [("x_bookmarks", [row("x_bookmarks", 1)["post_id"], ""])])
+        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=210)))])  # late, older
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 0)
+        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=ago(minutes=5))])  # bookmarked again
+        self.assertEqual(self.run_scheduled()[0], 0)
+        self.assertEqual(self.q("select removed_at from x_intel_private.x_bookmarks"), [(None,)])
+
     def test_validate_does_not_expect_a_pruned_bookmark_from_its_older_active_version(self):
         from x_lakehouse import validate
         now = datetime.now(timezone.utc)
@@ -500,7 +521,7 @@ class PrivatePostgresTests(unittest.TestCase):
             self.assertEqual(privs, [(False, False)], role)
         rls = self.q("select relname, relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace "
                      "where nspname = 'x_intel_private' and relkind = 'r' order by 1")
-        self.assertEqual(len(rls), 2 + len(PRIVATE_CURATED))
+        self.assertEqual(len(rls), 3 + len(PRIVATE_CURATED))  # inbox, seen, retention_watermark + curated
         self.assertTrue(all(on for _, on in rls))
         with self.conn.cursor() as c:
             c.execute("drop owned by anon, authenticated")

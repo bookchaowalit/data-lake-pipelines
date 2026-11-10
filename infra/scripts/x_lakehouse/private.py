@@ -86,6 +86,7 @@ create index if not exists ingest_inbox_drained_at_idx on {P_INBOX} (drained_at)
 """]
     for c in PRIVATE_CURATED.values():
         out += table_ddl(c)
+    out.append(cur.WATERMARK_DDL.format(table=f"{P}.retention_watermark"))
     return "\n".join(out) + "\n"
 
 
@@ -165,7 +166,7 @@ revoke all on function {P}.ingest(text, jsonb, text) from public;
 
 
 def _grants() -> str:
-    tables = [P_INBOX, P_SEEN] + [c.qualified for c in PRIVATE_CURATED.values()]
+    tables = [P_INBOX, P_SEEN, f"{P}.retention_watermark"] + [c.qualified for c in PRIVATE_CURATED.values()]
     rls = "".join(f"alter table {t} enable row level security;\n" for t in tables)
     deny = "\n".join(
         f"  if exists (select 1 from pg_roles where rolname = {_lit(role)}) then\n"

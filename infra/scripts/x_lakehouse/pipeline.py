@@ -135,6 +135,7 @@ def run(typed: dict[str, list[TypedRow]], *, store: Store | None, prefix: str, c
         records = cur.join_feed(latest, feed, c) if c.joined else [dict(r.values) for r in latest]
         records = cur.within_retention(c, records, now)
         if execute and conn is not None:
+            records = cur.drop_watermarked(conn, c, records)
             result.curated[name] = cur.upsert(conn, c, records, batch_id)
         else:
             joined_missing = (sum(1 for r in latest if str(r.values.get("post_id")) not in feed)

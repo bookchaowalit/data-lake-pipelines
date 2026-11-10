@@ -448,20 +448,24 @@ def _log_row(conn: Any, w: Window, status: str, **kw: Any) -> None:
 
 def auth_failure_streak(conn: Any) -> tuple[int, bool]:
     """(digests in a row, newest first, gateway actually called, whose summary fell back on
-    provider_auth; whether this streak was already alerted). Rows from before 2026-11-10 (ai_status
-    null) and digests that never called the gateway (skipped) neither count nor reset."""
+    provider_auth; whether this streak was already alerted). The whole streak back to the newest
+    gateway call that did not fail on provider_auth is counted, however long. Rows from before
+    2026-11-10 (ai_status null) and digests that never called the gateway neither count nor reset."""
+    auth = f"position({digest_lit(AUTH_FAILURE)} in coalesce(fallback_reason, '')) > 0"
     with conn.cursor() as c:
-        c.execute(f"select coalesce(fallback_reason, ''), auth_alerted_at is not null from {S}.digest_log "
-                  f"where ai_status in ('ok', 'fallback') order by updated_at desc, digest_id desc limit 50")
-        rows = c.fetchall()
+        c.execute(f"with b as (select updated_at, digest_id from {S}.digest_log "
+                  f"where ai_status in ('ok', 'fallback') and not ({auth}) "
+                  f"order by updated_at desc, digest_id desc limit 1) "
+                  f"select count(*), coalesce(bool_or(d.auth_alerted_at is not null), false) "
+                  f"from {S}.digest_log d left join b on true where d.ai_status in ('ok', 'fallback') and {auth} "
+                  f"and (b.updated_at is null or (d.updated_at, d.digest_id) > (b.updated_at, b.digest_id))")
+        n, alerted = c.fetchone()
     conn.commit()
-    n, alerted = 0, False
-    for reason, marked in rows:
-        if AUTH_FAILURE not in reason:
-            break
-        n += 1
-        alerted = alerted or bool(marked)
-    return n, alerted
+    return int(n), bool(alerted)
+
+
+def digest_lit(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
 
 
 def _auth_alert(conn: Any, cfg: Config, client: httpx.Client, w: Window, ai: dict[str, Any]) -> dict[str, Any]:
