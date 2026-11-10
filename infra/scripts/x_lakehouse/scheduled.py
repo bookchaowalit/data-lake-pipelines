@@ -21,6 +21,7 @@ Source (``X_LAKE_SOURCE``, default ``sheet``; see inbox.py for the bot side):
 inbox/both take a Postgres advisory lock: a second drainer exits 0 without writing.
 ``X_LAKE_SERVE=execute`` refreshes the serving tabs after an ok run (default: dry run, counts only).
 ``X_LAKE_DIGEST=dry|send`` builds (and sends) the Telegram digest at the end of every run (digest.py).
+``X_LAKE_GOLD=write`` lands the queries/ results as Gold Parquet on the lake (gold.py).
 ``X_LAKE_BI=build|deploy`` then renders the x-insights site (bi_site.py) and, with ``deploy``, uploads it to
 Cloudflare Pages (pages_deploy.py; spec docs/specs/x-insights.md).
 """
@@ -137,6 +138,25 @@ def _bi(cfg: Config) -> None:
         _log(event="bi", mode=mode, status="error", error=type(exc).__name__, detail=detail)
 
 
+def _gold(cfg: Config) -> None:
+    """X_LAKE_GOLD=write: queries/ over raw -> gold/ on the lake. Logged (counts, query names, exception types),
+    never fatal to the lake run."""
+    mode = cfg.get("X_LAKE_GOLD", "off").lower() or "off"
+    if mode == "off":
+        return
+    try:
+        if mode != "write":
+            raise ValueError("X_LAKE_GOLD must be off or write")
+        from . import gold
+
+        report = gold.run(cfg, write=True)
+        _log(event="gold", run_id=report["run_id"], ok=report["ok"],
+             rows={q: r.get("rows") for q, r in report["queries"].items()},
+             errors={q: r["error"] for q, r in report["queries"].items() if r["status"] != "ok"})
+    except Exception as exc:  # noqa: BLE001 - reported, the lake run's result stands
+        _log(event="gold", status="error", error=type(exc).__name__)
+
+
 def _source(cfg: Config) -> str:
     src = cfg.get("X_LAKE_SOURCE", "sheet").lower()
     if src not in ("sheet", "both", "inbox"):
@@ -176,6 +196,7 @@ def _finish(ok: bool, started: datetime, cfg: Config) -> int:
     else:
         _log(event="serve_dry_run", rows=_serve_counts(cfg))
     _digest(cfg)
+    _gold(cfg)
     _bi(cfg)
     _log(event="done", ok=ok, seconds=round((datetime.now(timezone.utc) - started).total_seconds()))
     _heartbeat(ok)
