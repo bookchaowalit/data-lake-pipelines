@@ -81,8 +81,22 @@ def normalize_url(url: str) -> str:
     return urlunsplit(("https", host, path, query, ""))
 
 
+def _safe_url(url: str) -> str | None:
+    """normalize_url, or None for a link urlsplit cannot read (e.g. ``https://[broken``): one bad link
+    never fails the capture or the batch."""
+    try:
+        return normalize_url(url)
+    except ValueError:
+        return None
+
+
 def platform_of(url: str | None) -> str:
-    return HOSTS.get(_host(urlsplit(url).netloc), "unknown") if url else "unknown"
+    if not url:
+        return "unknown"
+    try:
+        return HOSTS.get(_host(urlsplit(url).netloc), "unknown")
+    except ValueError:
+        return "unknown"
 
 
 def url_key(url: str) -> str:
@@ -114,7 +128,7 @@ def parse_message(text: str, urls: Sequence[str]) -> Parsed:
     text = text or ""
     found = list(urls) + URL_RE.findall(text)
     body = URL_RE.sub(" ", text)
-    links = [normalize_url(u) for u in found]
+    links = [n for n in (_safe_url(u) for u in found) if n]
     meta_links = [u for u in links if platform_of(u) != "unknown"]
     p.post_url = (meta_links or links or [None])[0]
     p.platform = platform_of(p.post_url)
@@ -235,7 +249,8 @@ def land(store: Any, prefix: str, *, deleted: set[str], curated: set[str], write
 
 COLUMNS = ("post_key", "capture_ids", "first_captured_at", "last_captured_at", "platform", "surface", "group_label",
            "post_url", "url_key", "author_name", "text", "text_source", "image_keys", "tags", "owner_note",
-           "content_label", "route", "domain", "topic", "withheld", "triage_version", "ocr_tries", "label_tries")
+           "content_label", "route", "domain", "topic", "withheld", "full_hit", "triage_version", "ocr_tries",
+           "label_tries")
 
 
 def ddl() -> str:
@@ -262,11 +277,13 @@ create table if not exists {S}.meta_posts (
     domain text,
     topic text,
     withheld boolean not null default false,
+    full_hit boolean not null default false,
     triage_version text,
     ocr_tries int not null default 0,
     label_tries int not null default 0,
     updated_at timestamptz not null default now()
 );
+alter table {S}.meta_posts add column if not exists full_hit boolean not null default false;
 create index if not exists meta_posts_captures_idx on {S}.meta_posts using gin (capture_ids);
 create table if not exists {S}.meta_parts (
     raw_key text primary key,
@@ -282,7 +299,7 @@ create or replace view {S}.mart_meta_priority as
 select post_key, last_captured_at, platform, surface, group_label, post_url, text, tags, owner_note,
        content_label, route, domain, topic
   from {S}.meta_posts
- where not withheld and route in ('alert_digest', 'verify')
+ where not withheld and not full_hit and route in ('alert_digest', 'verify')
  order by (route = 'alert_digest') desc, last_captured_at desc;
 do $$ begin
   if exists (select 1 from pg_roles where rolname = 'anon') then
@@ -329,7 +346,8 @@ def _merge_capture(parts: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[str, Any]:
     """Merge row ``drop`` into row ``keep`` (same post) and delete ``drop``. The label is cleared."""
-    pasted = keep if keep["text_source"] == "pasted" else drop if drop["text_source"] == "pasted" else keep
+    both = [x for x in (keep, drop) if x["text_source"] == "pasted"]
+    pasted = max(both, key=lambda x: x["last_captured_at"]) if both else keep  # the newest pasted text wins
     surface = keep["surface"] if keep["surface"] != "unknown" else drop["surface"]
     upd = {"capture_ids": _union(keep["capture_ids"], drop["capture_ids"]),
            "first_captured_at": min(keep["first_captured_at"], drop["first_captured_at"]),
@@ -341,7 +359,7 @@ def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[st
            "image_keys": _union(keep["image_keys"], drop["image_keys"]), "tags": _union(keep["tags"], drop["tags"]),
            "owner_note": " / ".join(dict.fromkeys(x for x in (keep["owner_note"], drop["owner_note"]) if x)) or None,
            "content_label": None, "route": None, "domain": None, "topic": None, "withheld": False, "label_tries": 0,
-           "ocr_tries": 0}
+           "ocr_tries": 0, "full_hit": keep["full_hit"] or drop["full_hit"]}
     if pasted["text_source"] != "pasted" and set(upd["image_keys"]) != set(keep["image_keys"]):
         upd |= {"text": "", "text_source": "none"}  # OCR again over every image
     with conn.cursor() as c:
@@ -351,14 +369,25 @@ def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[st
     return keep | upd
 
 
-def upsert(conn: Any, parts: list[dict[str, Any]]) -> int:
-    """Merge newly landed parts into meta_posts. Returns the number of posts written."""
+def full_hit(texts: Iterable[Any], denylist: Sequence[str] | None) -> bool:
+    """Screen the untruncated text (stored text is cut at MAX_TEXT, so a term past the cut would be lost).
+    Without a denylist, a text longer than MAX_TEXT counts as a hit (fails closed)."""
+    items = [t for t in texts if t]
+    if denylist is None:
+        return any(len(str(t)) > MAX_TEXT for t in items)
+    return any_term(items, denylist)
+
+
+def upsert(conn: Any, parts: list[dict[str, Any]], denylist: Sequence[str] | None = None) -> int:
+    """Merge newly landed parts into meta_posts. Returns the number of posts written. ``full_hit`` is
+    sticky: once any capture of a post matched on its full text, the post never leaves the lake."""
     by_capture: dict[str, list[dict[str, Any]]] = {}
     for p in parts:
         by_capture.setdefault(p["capture_id"], []).append(p)
     written = 0
     for cid, cparts in sorted(by_capture.items(), key=lambda kv: min(p["captured_at"] for p in kv[1])):
         cap = _merge_capture(cparts)
+        hit = full_hit([p["text"] for p in cparts], denylist)
         uk = url_key(cap["post_url"]) if cap["post_url"] else None
         rows = _fetch(conn, "%s = any(capture_ids)", (cid,))
         by_url = _fetch(conn, "url_key = %s", (uk,)) if uk else []
@@ -373,7 +402,7 @@ def upsert(conn: Any, parts: list[dict[str, Any]]) -> int:
                       "group_label": cap["group_label"], "post_url": cap["post_url"], "url_key": uk,
                       "author_name": cap["author_name"], "text": cap["text"],
                       "text_source": "pasted" if cap["text"] else "none", "image_keys": cap["image_keys"],
-                      "tags": cap["tags"], "owner_note": cap["owner_note"]}
+                      "tags": cap["tags"], "owner_note": cap["owner_note"], "full_hit": hit}
             cols = list(values)
             with conn.cursor() as c:
                 c.execute(f"insert into {S}.meta_posts ({', '.join(cols)}) values ({', '.join(['%s'] * len(cols))})",
@@ -391,7 +420,8 @@ def upsert(conn: Any, parts: list[dict[str, Any]]) -> int:
                    "post_url": r["post_url"] or cap["post_url"], "url_key": r["url_key"] or uk,
                    "author_name": None if surface == "group" else (r["author_name"] or cap["author_name"]),
                    "image_keys": _union(r["image_keys"], cap["image_keys"]), "tags": _union(r["tags"], cap["tags"]),
-                   "owner_note": " / ".join(dict.fromkeys(x for x in (r["owner_note"], cap["owner_note"]) if x)) or None}
+                   "owner_note": " / ".join(dict.fromkeys(x for x in (r["owner_note"], cap["owner_note"]) if x)) or None,
+                   "full_hit": r["full_hit"] or hit}
             new_images = bool(set(cap["image_keys"]) - set(r["image_keys"]))
             screened = ("group_label", "post_url", "author_name", "tags", "owner_note")
             if text_changed:
@@ -438,10 +468,11 @@ def tesseract(images: list[bytes]) -> str:
             texts.append(r.stdout.decode("utf-8", "replace"))
     # Tesseract puts spaces between Thai glyph clusters; Thai has no word spaces, so drop them there.
     joined = re.sub(r"(?<=[฀-๿]) (?=[฀-๿])", "", "\n".join(texts))
-    return re.sub(r"\n{2,}", "\n", re.sub(r"[ \t]+", " ", joined)).strip()[:MAX_TEXT]
+    return re.sub(r"\n{2,}", "\n", re.sub(r"[ \t]+", " ", joined)).strip()  # cut by run_ocr after the screen
 
 
-def run_ocr(conn: Any, store: Any, ocr: Callable[[list[bytes]], str]) -> dict[str, int]:
+def run_ocr(conn: Any, store: Any, ocr: Callable[[list[bytes]], str],
+            denylist: Sequence[str] | None = None) -> dict[str, int]:
     rows = _fetch(conn, "text = '' and cardinality(image_keys) > 0 and ocr_tries < %s", (MAX_TRIES,))
     conn.commit()
     done = failed = errors = 0
@@ -457,13 +488,14 @@ def run_ocr(conn: Any, store: Any, ocr: Callable[[list[bytes]], str]) -> dict[st
         text = ""
         if images:
             try:
-                text = ocr(images)[:MAX_TEXT]
+                text = ocr(images)
             except (OcrError, subprocess.SubprocessError, OSError):
                 text, errors = "", errors + 1
         with conn.cursor() as c:
             if text:
-                c.execute(f"update {S}.meta_posts set text = %s, text_source = 'ocr', updated_at = now() "
-                          f"where post_key = %s", (text, r["post_key"]))
+                hit = full_hit([text], denylist)  # before the cut
+                c.execute(f"update {S}.meta_posts set text = %s, text_source = 'ocr', full_hit = full_hit or %s, "
+                          f"updated_at = now() where post_key = %s", (text[:MAX_TEXT], hit, r["post_key"]))
                 done += 1
             else:
                 c.execute(f"update {S}.meta_posts set ocr_tries = ocr_tries + 1 where post_key = %s", (r["post_key"],))
@@ -565,7 +597,7 @@ def label(conn: Any, cfg: Config, http: httpx.Client) -> dict[str, Any]:
     withheld, todo = 0, []
     for r in rows:
         screen = [r["text"], r["group_label"], r["owner_note"], r["tags"], r["author_name"], r["post_url"]]
-        if any_term(screen, denylist):
+        if r["full_hit"] or any_term(screen, denylist):
             with conn.cursor() as c:
                 c.execute(f"update {S}.meta_posts set withheld = true, route = 'store', triage_version = %s, "
                           f"updated_at = now() where post_key = %s", (TRIAGE_VERSION, r["post_key"]))
@@ -685,15 +717,19 @@ def run(conn: Any, cfg: Config, *, mode: str, store: Any, prefix: str, now: date
         deleted = {r[0] for r in c.fetchall()}
     conn.commit()
     try:
+        denylist: tuple[str, ...] | None = load_denylist(cfg)
+    except DigestError:
+        denylist = None
+    try:
         parts = land(store, prefix, deleted=deleted, curated=_curated(conn))
         rep["landed"] = len(parts)
-        rep["posts_written"] = upsert(conn, parts) if parts else 0
+        rep["posts_written"] = upsert(conn, parts, denylist) if parts else 0
     except Exception as exc:  # noqa: BLE001 - the parts stay pending (no checkpoint); cleanup still runs
         conn.rollback()
         rep["landing"] = f"error {type(exc).__name__}"
     # OCR and labelling may fail (a missing setting, a bad image); deletes and retention must still run.
     try:
-        rep |= run_ocr(conn, store, ocr or tesseract)
+        rep |= run_ocr(conn, store, ocr or tesseract, denylist)
     except Exception as exc:  # noqa: BLE001 - counted, never fatal to the cleanup below
         conn.rollback()
         rep["ocr"] = f"error {type(exc).__name__}"

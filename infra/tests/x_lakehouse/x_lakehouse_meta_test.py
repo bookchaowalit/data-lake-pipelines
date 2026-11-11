@@ -368,6 +368,41 @@ class PgTests(unittest.TestCase):
         self.assertEqual(r["text"], "ลิงก์ตามมา")
         self.assertEqual(len(r["image_keys"]), 1)
 
+    def test_a_term_past_the_text_cut_still_withholds(self):
+        long = "ก" * (meta.MAX_TEXT + 10) + " SecretClientCo"
+        landing(self.store, "", msg_id=36, text=long)
+        landing(self.store, "", msg_id=37, images=[b"img"])
+        _, gw, _ = self.run_meta(ocr=FakeOcr("ข" * (meta.MAX_TEXT + 10) + " บริษัทลูกค้าลับ"))
+        rows = self.rows()
+        self.assertTrue(all(r["withheld"] for r in rows))
+        self.assertTrue(all(len(r["text"]) <= meta.MAX_TEXT for r in rows))
+        self.assertEqual(gw.bodies, [])
+
+    def test_without_a_denylist_a_long_text_fails_closed(self):
+        landing(self.store, "", msg_id=38, text="ก" * (meta.MAX_TEXT + 1))
+        self.run_meta(c=Config({"AI_GATEWAY_TOKEN": "t"}))
+        with self.conn.cursor() as c:
+            c.execute("select full_hit from x_intel.meta_posts")
+            self.assertEqual(c.fetchone()[0], True)
+        self.conn.commit()
+
+    def test_a_broken_link_does_not_block_the_batch(self):
+        landing(self.store, "", msg_id=39, text="ดู https://[broken และ https://facebook.com/a/posts/1")
+        landing(self.store, "", msg_id=40, text="ปกติ")
+        rep, _, _ = self.run_meta()
+        self.assertNotIn("landing", rep)
+        self.assertEqual(len(self.rows()), 2)
+
+    def test_absorb_keeps_the_newest_pasted_text(self):
+        url = "https://facebook.com/p/posts/7"
+        landing(self.store, "", msg_id=41, text="เก่า", urls=[url])
+        landing(self.store, "", msg_id=42, group="91", text="ใหม่กว่า", when=NOW + timedelta(minutes=5))
+        self.run_meta()
+        landing(self.store, "", msg_id=43, group="91", urls=[url], when=NOW + timedelta(minutes=6))
+        self.run_meta()
+        [r] = self.rows()
+        self.assertEqual(r["text"], "ใหม่กว่า")
+
     def test_m6_second_run_writes_nothing(self):
         landing(self.store, "", msg_id=8, text="x")
         self.run_meta()

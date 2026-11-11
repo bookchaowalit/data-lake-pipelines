@@ -4,6 +4,9 @@ import worker, { describe as guess, ictDate, linksOf, type Env } from '../src/wo
 
 class FakeBucket {
   objects = new Map<string, { body: string | ArrayBuffer; type?: string }>();
+  async delete(key: string) {
+    this.objects.delete(key);
+  }
   async put(key: string, body: string | ArrayBuffer, opts?: { onlyIf?: { etagDoesNotMatch?: string }; httpMetadata?: { contentType?: string } }) {
     if (opts?.onlyIf?.etagDoesNotMatch === '*' && this.objects.has(key)) return null;
     this.objects.set(key, { body, type: opts?.httpMetadata?.contentType });
@@ -147,6 +150,20 @@ describe('webhook', () => {
     expect(replies()).toEqual([]);
     expect((await post(msg({ text: 'x' }))).status).toBe(200);
     expect(replies()).toHaveLength(1);
+  });
+
+  it('a rejected confirmation is retried on the resend', async () => {
+    const realFetch = globalThis.fetch;
+    let reject = true;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+      if (String(input).endsWith('/sendMessage') && reject) { reject = false; return new Response('', { status: 429 }); }
+      return (realFetch as typeof fetch)(input, init);
+    }));
+    expect((await post(msg({ text: 'x' }))).status).toBe(500);
+    expect((await post(msg({ text: 'x' }))).status).toBe(200);
+    expect(replies()).toHaveLength(1);
+    expect(keys().filter((k) => k.endsWith('.json'))).toHaveLength(1);
+    expect(logs.join('\n')).toContain('"error":"ReplyFailed"');
   });
 
   it('refuses an empty message', async () => {

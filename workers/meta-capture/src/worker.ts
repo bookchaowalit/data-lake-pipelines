@@ -105,12 +105,20 @@ async function telegram(env: Env, method: string, body: Record<string, unknown>)
   });
 }
 
-async function reply(env: Env, msg: TelegramMessage, text: string): Promise<void> {
+/** True when Telegram accepted the message. */
+async function reply(env: Env, msg: TelegramMessage, text: string): Promise<boolean> {
   try {
-    await telegram(env, 'sendMessage', { chat_id: msg.chat.id, text, reply_to_message_id: msg.message_id, disable_web_page_preview: true });
+    const r = await telegram(env, 'sendMessage', { chat_id: msg.chat.id, text, reply_to_message_id: msg.message_id, disable_web_page_preview: true });
+    if (!r.ok) log(env, 'reply_failed', { status: r.status });
+    return r.ok;
   } catch (error) {
     log(env, 'reply_failed', { error: errorName(error) });
+    return false;
   }
+}
+
+class ReplyFailed extends Error {
+  override name = 'ReplyFailed';
 }
 
 /** Download one Telegram file; null when it is too big or Telegram refuses. */
@@ -182,12 +190,18 @@ async function handleCapture(env: Env, msg: TelegramMessage, hash: string): Prom
   // One reply per capture: an album arrives as one update per photo, captioned or not, so the first
   // update to claim the capture's ack marker replies. The marker is claimed after the landing write and
   // whether or not that write was fresh, so a retry after a crash between the two still replies once.
-  const ack = await putNew(env, landingKey(env, `landing/meta_capture/date=${day}/${id}/ack`), '', 'text/plain');
+  const ackKey = landingKey(env, `landing/meta_capture/date=${day}/${id}/ack`);
+  const ack = await putNew(env, ackKey, '', 'text/plain');
   if (ack) {
     const d = describe(text, links);
     const lost = fileId && !imageKeys.length ? '\n(โหลดรูปไม่ได้ ส่งใหม่ได้)' : '';
     const author = d.authorIgnored ? '\n(ไม่เก็บชื่อผู้โพสต์ในกลุ่ม)' : '';
-    await reply(env, msg, `เก็บแล้ว · ${d.platform}/${d.surface} · ${id}${author}${lost}`);
+    if (!(await reply(env, msg, `เก็บแล้ว · ${d.platform}/${d.surface} · ${id}${author}${lost}`))) {
+      // Release the marker and answer 500: Telegram resends the update and the confirmation is tried again
+      // (the landing files are write-once, so the resend stores nothing twice).
+      await env.LAKE.delete(ackKey);
+      throw new ReplyFailed();
+    }
   }
   return { status: fresh ? 'stored' : 'duplicate', images: imageKeys.length };
 }
