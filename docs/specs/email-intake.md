@@ -67,7 +67,11 @@ accepted items go to the cells that already own them (CRM, tasks, finance) throu
 
 Envelope columns stay as in v1 (`event_id`, `source`, `domain`, `dataset`, `schema_version`,
 `received_at`, `event_time`, `privacy_class`, `retention_class`, `ingest_date`, `payload_json`).
-`event_id` = sha256 of `account_hash8 + gmail message id`. `payload_json`:
+`event_id` = sha256 of `account_hash8 + gmail message id`. Two times, never mixed:
+`event_time` = the message's Gmail `internalDate` (never changes; activity date, retention age, mart day);
+`received_at` = when this metadata version was written (changes on refresh; only used to pick the newest
+version in `stg_emails`). `email_activity_daily` groups by `cast(event_time as date)` (today it uses
+`received_at`; this spec changes the mart and its quality test). `payload_json`:
 
 | field | rule |
 |---|---|
@@ -139,7 +143,11 @@ one (a `reopen` decision returns it to `suggested`). A tombstoned message also r
   call. A match is stored but gets `route = ignore` and never reaches the gateway or Telegram. Without the
   denylist the route step is skipped (fails closed); intake still runs.
 - **Gateway gets text only**, never attachments, headers beyond subject, or addresses (the sender is
-  replaced by `from_domain` + `known_contact: true/false`).
+  replaced by `from_domain` + `known_contact: true/false`). Before any outbound text (gateway prompt and
+  Telegram summary) a redact step replaces, in `subject`, `body_text` and `summary_th`: email addresses
+  (plain and written as `name [at] domain` / `name(at)domain`) with `<email>`, phone numbers (Thai and
+  international formats) with `<phone>`, and `mailto:` / `tel:` links with the same tokens. Redaction runs
+  after the denylist screen and before the byte budget; the stored Bronze text is not changed.
 - **Logs** carry counts, ids hashed, and exception types only; never addresses, subjects or bodies (test
   greps captured log output, like Meta M8).
 - **Idempotent.** A rerun over the same historyId window writes nothing new (`event_id` dedupe in
@@ -177,7 +185,7 @@ one (a `reopen` decision returns it to `suggested`). A tombstoned message also r
   - Silver / Gold: rebuilt from Bronze each run, so an expired body disappears from them at the next run;
     the DuckDB file in the container is temporary and not uploaded; no other replayable copy is kept
     (the Kafka / landing paths are not used for mail);
-  - metadata rows: deleted after 365 days;
+  - metadata rows: deleted when `event_time` is more than 365 days old;
   - Gold `mail_routes`: 90 days;
   - `state/`: kept (ids only).
 - **Token.** The refresh token lives only in Infisical `/mail-intake` and the Railway service variables;
@@ -234,6 +242,12 @@ heartbeat, Telegram summary.
   retention step before dbt runs, and the gateway client receives no call with it.
 - M18 after an `accepted` decision for `crm_activity`, a changed body or label in a later run does not change
   the item's route or target, and no gateway call is made for it; a `reopen` decision makes it `suggested`.
+- M19 reading or labelling a 10-day-old message writes a new metadata version but leaves it on its original
+  day in `email_activity_daily` (counts per day unchanged), and its retention age still counts from
+  `event_time`.
+- M20 a body that contains `someone@example.com`, `someone [at] example.com`, `mailto:` links and a Thai
+  mobile number reaches the gateway client and the Telegram sender with only `<email>` / `<phone>` tokens
+  (test inspects the actual payloads).
 - M14 an `accepted` decision survives two more runs and a full Gold rebuild; the item is not suggested again.
 - M15 a message read and labelled `lake` during a `historyId` gap has `is_read = true`, the new label and its
   body after the reconciliation run.
