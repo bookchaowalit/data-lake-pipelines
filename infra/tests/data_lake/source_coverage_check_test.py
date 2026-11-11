@@ -22,6 +22,8 @@ class LiveRegistryTests(unittest.TestCase):
         errors, summary = check(DEFAULT_PATH)
         self.assertEqual(errors, [])
         self.assertEqual(summary["sources"], 20)
+        data = yaml.safe_load(DEFAULT_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(len(data["sources"]), 20 * len(data["batches"]))
 
 
 class RuleTests(unittest.TestCase):
@@ -31,9 +33,10 @@ class RuleTests(unittest.TestCase):
         base = Path(self.tmp.name)
         self.path = base / "repository-catalog" / "registries" / "source-coverage.yaml"
         self.path.parent.mkdir(parents=True)
-        report = base / self.data["batches"][1]["report"]
-        report.parent.mkdir(parents=True)
-        report.write_text("report", encoding="utf-8")
+        for meta in self.data["batches"].values():
+            report = base / meta["report"]
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("report", encoding="utf-8")
         workflow = base / ".github" / "workflows" / "github-activity.yml"
         workflow.parent.mkdir(parents=True)
         workflow.write_text("name: x", encoding="utf-8")
@@ -109,7 +112,7 @@ class RuleTests(unittest.TestCase):
 
     def test_next_batch_required(self):
         data = copy.deepcopy(self.data)
-        data["next_batch"] = {"number": 2, "sources": ["github"]}
+        data["next_batch"] = {"number": data["current_batch"] + 1, "sources": ["github"]}
         self.assertTrue(any("repeats sources" in e for e in self._errors(data)))
 
 
