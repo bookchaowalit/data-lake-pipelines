@@ -194,6 +194,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--owner", default=DEFAULT_OWNER)
     parser.add_argument("--data-lake-uri", default=os.environ.get("SOLO_EMPIRE_DATA_LAKE_URI", DEFAULT_LAKE_URI))
+    parser.add_argument("--require-cloud", action="store_true",
+                        help="fail unless the lake URI is s3:// (scheduled runs must never fall back to a local path)")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -201,6 +203,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None, fetch: Fetch | None = None) -> int:
     args = build_parser().parse_args(argv)
     fetch = fetch or http_fetch(os.environ.get("GITHUB_TOKEN"))
+    uri = (args.data_lake_uri or "").strip()
+    if not uri or (args.require_cloud and not uri.startswith("s3://")):
+        # An empty or unset secret must fail the run, not write into the runner's checkout.
+        print(json.dumps({"status": "error", "error": "LakeUriNotConfigured"}))
+        return 2
+    args.data_lake_uri = uri
     try:
         report = capture(fetch, args.owner, args.data_lake_uri, dry_run=args.dry_run)
     except Exception as exc:  # noqa: BLE001 — public log: the exception type only

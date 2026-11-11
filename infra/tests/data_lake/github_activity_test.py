@@ -119,6 +119,13 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(out.getvalue()), {"status": "error", "error": "GitHubError"})
 
+    def test_empty_or_local_lake_uri_is_refused(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main(["--owner", "o", "--data-lake-uri", ""], fetch=FakeGitHub()), 2)
+            self.assertEqual(main(["--owner", "o", "--data-lake-uri", "/tmp/x", "--require-cloud"], fetch=FakeGitHub()), 2)
+        self.assertIn("LakeUriNotConfigured", out.getvalue())
+
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             report = capture(FakeGitHub(), "o", tmp, dry_run=True)

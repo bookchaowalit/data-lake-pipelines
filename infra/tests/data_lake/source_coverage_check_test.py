@@ -34,6 +34,9 @@ class RuleTests(unittest.TestCase):
         report = base / self.data["batches"][1]["report"]
         report.parent.mkdir(parents=True)
         report.write_text("report", encoding="utf-8")
+        workflow = base / ".github" / "workflows" / "github-activity.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: x", encoding="utf-8")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -58,6 +61,32 @@ class RuleTests(unittest.TestCase):
         data = copy.deepcopy(self.data)
         self._row(data, "sentry")["verdict"] = "ingest-now"
         self.assertTrue(any("needs a pipeline" in e for e in self._errors(data)))
+
+    def test_empty_pipeline_and_covered_without_data(self):
+        data = copy.deepcopy(self.data)
+        self._row(data, "github")["pipeline"] = {}
+        x = self._row(data, "x")
+        x["current_status"], x["coverage_pct"] = "missing", 0
+        errors = self._errors(data)
+        self.assertTrue(any("github: ingest-now needs a pipeline" in e for e in errors))
+        self.assertTrue(any("x: verdict covered needs data" in e for e in errors))
+
+    def test_priority_order_needs_reasons(self):
+        data = copy.deepcopy(self.data)
+        row = self._row(data, "stripe")
+        row["method"], row["scraping_allowed"] = "scrape", True
+        errors = self._errors(data)
+        self.assertTrue(any("stripe: method scrape needs api_gap" in e for e in errors))
+        self.assertTrue(any("stripe: method scrape needs mcp_gap" in e for e in errors))
+
+    def test_covered_needs_100_and_batch_must_exist(self):
+        data = copy.deepcopy(self.data)
+        x = self._row(data, "x")
+        x["current_status"] = "covered"
+        self._row(data, "reddit")["batch"] = 99
+        errors = self._errors(data)
+        self.assertTrue(any("x: covered sources have coverage_pct 100" in e for e in errors))
+        self.assertTrue(any("reddit: batch 99 is not declared" in e for e in errors))
 
     def test_missing_field_and_bad_values(self):
         data = copy.deepcopy(self.data)

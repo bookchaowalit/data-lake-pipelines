@@ -53,7 +53,7 @@ jobs:
           SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
         run: |
           set +e
-          .venv/bin/python infra/scripts/data_lake/github_activity.py > "$RUNNER_TEMP/result.json" 2> "$RUNNER_TEMP/stderr.log"
+          .venv/bin/python infra/scripts/data_lake/github_activity.py --require-cloud > "$RUNNER_TEMP/result.json" 2> "$RUNNER_TEMP/stderr.log"
           code=$?
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"

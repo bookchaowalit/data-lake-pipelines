@@ -39,7 +39,7 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SECRET_RE = re.compile(r"(sk_live_|sk_test_|rk_live_|ghp_|github_pat_|xox[abp]-|AKIA[0-9A-Z]{12}|-----BEGIN)")
 
 
-def _check_source(row: dict[str, Any], errors: list[str]) -> None:
+def _check_source(row: dict[str, Any], errors: list[str], repo_root: Path) -> None:
     sid = row.get("id", "?")
     for field in REQUIRED:
         if field not in row:
@@ -61,6 +61,8 @@ def _check_source(row: dict[str, Any], errors: list[str]) -> None:
         errors.append(f"{sid}: missing sources have coverage_pct 0")
     elif row.get("current_status") == "partial" and not 0 < pct < 100:
         errors.append(f"{sid}: partial sources have coverage_pct between 1 and 99")
+    elif row.get("current_status") == "covered" and pct != 100:
+        errors.append(f"{sid}: covered sources have coverage_pct 100")
     scores = row.get("scores") or {}
     for key in SCORE_KEYS:
         if not isinstance(scores.get(key), int) or not 1 <= scores[key] <= 5:
@@ -74,17 +76,26 @@ def _check_source(row: dict[str, Any], errors: list[str]) -> None:
         errors.append(f"{sid}: entities must be a non-empty list")
     if not DATE_RE.match(str(row.get("checked_at", ""))):
         errors.append(f"{sid}: checked_at must be YYYY-MM-DD")
-    # Priority order: scraping only when allowed, and never when an API or MCP route exists.
+    # Priority order API -> MCP -> scraping: a lower route needs the reason the better ones fail.
+    if row.get("method") in {"mcp", "scrape"} and not row.get("api_gap"):
+        errors.append(f"{sid}: method {row.get('method')} needs api_gap (why the official API is not enough)")
+    if row.get("method") == "scrape" and not row.get("mcp_gap"):
+        errors.append(f"{sid}: method scrape needs mcp_gap (why no MCP server is enough)")
     if row.get("method") == "scrape":
         if row.get("scraping_allowed") is not True:
             errors.append(f"{sid}: method scrape needs scraping_allowed: true (ToS and robots.txt checked)")
     if row.get("scraping_allowed") is False and row.get("method") == "scrape":
         errors.append(f"{sid}: scraping is not allowed for this source")
     verdict = row.get("verdict")
-    if verdict == "ingest-now" and not isinstance(row.get("pipeline"), dict):
+    pipeline = row.get("pipeline")
+    if verdict == "ingest-now" and not (
+        isinstance(pipeline, dict) and all(pipeline.get(k) for k in ("workflow", "heartbeat", "datasets"))
+    ):
         errors.append(f"{sid}: ingest-now needs a pipeline (workflow, heartbeat, datasets)")
-    if verdict == "covered" and row.get("current_status") == "missing":
-        errors.append(f"{sid}: verdict covered contradicts current_status missing")
+    elif isinstance(pipeline, dict) and pipeline.get("workflow") and not (repo_root / str(pipeline["workflow"])).is_file():
+        errors.append(f"{sid}: pipeline workflow {pipeline['workflow']!r} not found")
+    if verdict in {"covered", "ingest-now"} and (row.get("current_status") == "missing" or not pct):
+        errors.append(f"{sid}: verdict {verdict} needs data on the platform (status not missing, coverage_pct > 0)")
     if verdict in {"later", "skip", "blocked-legal"} and not row.get("verdict_reason"):
         errors.append(f"{sid}: verdict {verdict} needs a verdict_reason")
 
@@ -105,7 +116,7 @@ def check(path: Path) -> tuple[list[str], dict[str, Any]]:
         if not isinstance(row, dict):
             errors.append("every source must be a mapping")
             continue
-        _check_source(row, errors)
+        _check_source(row, errors, path.parents[2])
         if row.get("id") in seen:
             errors.append(f"{row.get('id')}: duplicate id")
         seen.add(str(row.get("id")))
@@ -122,6 +133,9 @@ def check(path: Path) -> tuple[list[str], dict[str, Any]]:
         report = (meta or {}).get("report")
         if not report or not (path.parents[2] / report).is_file():
             errors.append(f"batch {number}: report file {report!r} not found")
+    for row in sources:
+        if isinstance(row, dict) and row.get("batch") not in batches:
+            errors.append(f"{row.get('id')}: batch {row.get('batch')!r} is not declared in batches")
     if current not in batches:
         errors.append(f"current_batch {current!r} has no batches entry")
     nxt = data.get("next_batch") or {}
