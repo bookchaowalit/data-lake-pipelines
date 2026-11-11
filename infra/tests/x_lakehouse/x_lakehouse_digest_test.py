@@ -228,6 +228,22 @@ class DigestPostgresTests(unittest.TestCase):
         self.conn.rollback()
         self.conn.close()
 
+    def test_review8_the_weekly_digest_is_aggregates_and_the_top_10_only(self):
+        from x_lakehouse.marts import ensure_marts
+        with self.conn.cursor() as c:
+            for i in range(20, 34):
+                c.execute("insert into x_intel.x_signals (post_id, collected_at, domain, alert_tier, opportunity_score, "
+                          "signal_type, post_text, post_url) values (%s, '2026-11-12 10:00+07', 'D5', 'none', 4, "
+                          "'Opportunity', 'x', %s)", (str(i), f"https://x.com/a/status/{i}"))
+            c.execute("insert into x_intel.claims (claim_id, claim, queue_state) values ('CL-1', 'c', 'open')")
+        self.conn.commit()
+        ensure_marts(self.conn)
+        w = next(x for x in digest.windows(at("2026-11-16 08:20")) if x.kind == "weekly")
+        f = digest.build_facts(self.conn, w, ["acme corp"])
+        self.assertEqual((f.alerts, f.opportunities, f.claims), ([], [], []))
+        self.assertEqual(len(f.top), 10)
+        self.assertEqual(f.top[0]["link"], "https://x.com/a/status/1")  # the urgent post leads the one list
+
     def run_digest(self, svc, mode="send", now=None):
         with svc.client() as http:
             return digest.run(self.conn, self.cfg, mode=mode, now=now or self.NOW, http=http)

@@ -224,6 +224,10 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
         clean.append(r)
     if len(clean) > 60:
         clean = clean[:60]  # screened first, then cut: withheld rows never shrink the lists
+    if w.kind == "weekly":
+        # Spec: aggregates only plus the top 10 of the week (screened, by priority); no daily lists.
+        f.top = [_post(r) for r in clean][:top_n]
+        return f
     f.alerts = [_post(r) for r in clean if r["alert_tier"] and r["alert_tier"] != "none"][:12]
     seen = {a["link"] for a in f.alerts}
     f.top = [_post(r) for r in clean if r["post_url"] not in seen][:top_n]
