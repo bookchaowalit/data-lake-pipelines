@@ -73,6 +73,11 @@ class CollectTests(unittest.TestCase):
         with self.assertRaises(WikimediaError):
             collect(lambda url: {"nope": 1}, DAY, pause=0)
 
+    def test_project_without_usable_rows_is_an_error(self):
+        bad = {"items": [{"articles": [{"views": 3}]}]}
+        with self.assertRaises(WikimediaError):
+            collect(lambda url: bad, DAY, pause=0)
+
     def test_fetch_refuses_other_hosts(self):
         fetch = http_fetch()
         for url in ("file:///etc/passwd", "https://evil.example/api"):
@@ -91,7 +96,15 @@ class CaptureTests(unittest.TestCase):
                     for p in Path(tmp).rglob("*.parquet")
                 )
             )
-            self.assertFalse(capture(FakeApi(), tmp, day=DAY, pause=0)["new"])
+            revised = FakeApi(n=180)  # a different answer for the same day
+            second = capture(revised, tmp, day=DAY, pause=0)
+            self.assertEqual(second["status"], "exists")
+            self.assertFalse(second["new"])
+            self.assertEqual(revised.calls, [])
+            self.assertEqual(len(list(Path(tmp).rglob("*.parquet"))), 1)
+            self.assertTrue(
+                capture(FakeApi(), tmp, day=date(2026, 11, 11), pause=0)["new"]
+            )
 
     def test_errors_exit_2(self):
         out = io.StringIO()

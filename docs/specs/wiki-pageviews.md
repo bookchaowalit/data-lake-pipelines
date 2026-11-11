@@ -36,7 +36,7 @@ signal of what Thai and English readers look up.
 - Counts are aggregates, so there is no personal data. Titles of articles about living people are
   public encyclopaedia titles. `privacy_class=public`, and the licence `CC0-1.0` is stored in the
   metadata.
-- **Idempotence**: there is one ranking per `view_date`. A re-run for the same day writes nothing.
+- **Idempotence**: there is one ranking per `view_date`. After a write, a marker `control/state/source=wikimedia/dataset=wiki_top_articles/view_date=D.json` stops any later run for that day (even one with revised numbers) before it fetches.
 - **Cost**: 1 object and 3 R2 Class A writes per run, under 100 KB.
 
 ## Failure and heartbeat

@@ -27,7 +27,8 @@ SCRIPTS = ROOT / "infra" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from data_lake.ingest import ingest_records  # noqa: E402
+from data_lake.ingest import canonical_json, ingest_records  # noqa: E402
+from data_lake.storage import ObjectNotFound, ObjectStore  # noqa: E402
 
 SOURCE = "wikimedia"
 DOMAIN = "market-intelligence"
@@ -87,6 +88,7 @@ def collect(
             raise WikimediaError("unexpected response shape") from None
         if not isinstance(articles, list) or not articles:
             raise WikimediaError(f"empty ranking for {project}")
+        before = len(rows)
         for item in articles[:TOP_N]:
             if not isinstance(item, dict) or not item.get("article"):
                 continue
@@ -103,7 +105,13 @@ def collect(
                     "view_date": day.isoformat(),
                 }
             )
+        if len(rows) == before:
+            raise WikimediaError(f"no usable rows for {project}")
     return rows
+
+
+def _marker_key(day: date) -> str:
+    return f"control/state/source={SOURCE}/dataset={DATASET}/view_date={day.isoformat()}.json"
 
 
 def capture(
@@ -114,6 +122,22 @@ def capture(
     dry_run: bool = False,
     pause: float = PAUSE_SECONDS,
 ) -> dict[str, Any]:
+    store = ObjectStore(data_lake_uri)
+    marker = _marker_key(day)
+    if not dry_run:
+        try:
+            done = json.loads(store.get_bytes(marker))
+        except ObjectNotFound:
+            done = None
+        if done is not None:
+            # One ranking per view_date: a later fetch with revised numbers must not add a second one.
+            return {
+                "status": "exists",
+                "view_date": day.isoformat(),
+                "records": done.get("records"),
+                "new": False,
+                "manifest_key": done.get("manifest_key"),
+            }
     rows = collect(fetch, day, pause=pause)
     if dry_run:
         return {"status": "dry-run", "view_date": day.isoformat(), "records": len(rows)}
@@ -128,6 +152,13 @@ def capture(
         metadata={"provider": SOURCE, "licence": "CC0-1.0"},
         privacy_class="public",
         retention_class="operational",
+    )
+    store.put_bytes(
+        marker,
+        canonical_json(
+            {"manifest_key": result["manifest_key"], "records": len(rows)}
+        ).encode("utf-8"),
+        content_type="application/json",
     )
     return {
         "status": "captured",
