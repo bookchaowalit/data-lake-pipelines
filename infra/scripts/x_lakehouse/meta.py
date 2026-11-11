@@ -423,7 +423,9 @@ def upsert(conn: Any, parts: list[dict[str, Any]], denylist: Sequence[str] | Non
             new_text = cap["text"]
             if same_capture and r["text_source"] == "pasted" and new_text:
                 # More parts of one album: its captions add up (as when all parts land in one run).
-                new_text = "\n".join(dict.fromkeys(r["text"].split("\n") + new_text.split("\n")))[:MAX_TEXT]
+                joined = "\n".join(dict.fromkeys(r["text"].split("\n") + new_text.split("\n")))
+                hit = hit or full_hit([joined], denylist)  # the combined captions, before the cut
+                new_text = joined[:MAX_TEXT]
             # Different captures of one post: the newest text wins, by when the text was sent.
             newer = same_capture or r["text_at"] is None or (cap["text_at"] or cap["captured_at"]) >= r["text_at"]
             text_changed = bool(new_text) and (newer or r["text_source"] != "pasted") and new_text != r["text"]

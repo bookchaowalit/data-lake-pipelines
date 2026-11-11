@@ -432,6 +432,17 @@ class PgTests(unittest.TestCase):
         self.run_meta()
         self.assertEqual(self.rows()[0]["text"], "ภาพที่หนึ่ง\nภาพที่สอง")
 
+    def test_album_captions_over_the_cut_across_runs_fail_closed_without_a_denylist(self):
+        c = Config({"AI_GATEWAY_TOKEN": "t"})
+        landing(self.store, "", msg_id=58, group="95", text="ก" * (meta.MAX_TEXT - 10))
+        self.run_meta(c=c)
+        landing(self.store, "", msg_id=59, group="95", text="ข" * 50, when=NOW + timedelta(minutes=1))
+        self.run_meta(c=c)
+        with self.conn.cursor() as cur_:
+            cur_.execute("select full_hit from x_intel.meta_posts")
+            self.assertEqual(cur_.fetchone()[0], True)
+        self.conn.commit()
+
     def test_newest_text_is_by_when_the_text_was_sent(self):
         url = "https://facebook.com/p/posts/8"
         landing(self.store, "", msg_id=53, group="94", text="เก่า 09:00")
