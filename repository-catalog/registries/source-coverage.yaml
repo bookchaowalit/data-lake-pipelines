@@ -20,9 +20,10 @@
 # No secrets here: names, URLs and Infisical paths only.
 schema_version: data-lake-pipelines.source-coverage.v1
 updated: '2026-11-12'
-current_batch: 1
+current_batch: 2
 batches:
   1: {checked_at: '2026-11-12', report: docs/source-coverage/batch-01.md}
+  2: {checked_at: '2026-11-12', report: docs/source-coverage/batch-02.md}
 sources:
   - id: salesforce
     name: Salesforce
@@ -584,8 +585,664 @@ sources:
       - https://developers.line.biz/en/docs/messaging-api/receiving-messages/
       - https://github.com/line/line-bot-mcp-server
     checked_at: '2026-11-12'
+  - id: cloudflare
+    name: Cloudflare (usage + billing)
+    batch: 2
+    category: infrastructure
+    popularity_rank: 1
+    method: api
+    flow: paas-ops
+    api_docs_url: https://developers.cloudflare.com/analytics/graphql-api/
+    mcp_server: https://mcp.cloudflare.com/mcp (official; wraps the same API, no billing tool)
+    auth_type: API token with Account Analytics Read + Billing Read
+    rate_limit: GraphQL 300 queries per 5 min per user
+    cost: free; billable-usage endpoint beta (path /billing/usage/paygo), $0 accounts unconfirmed
+    entities:
+    - r2_usage
+    - workers_usage
+    - billable_usage_focus_rows
+    - zone_analytics
+    bulk_or_webhook: pull only; billing updates daily
+    coverage_pct: 10
+    current_status: partial
+    tos_notes: terms not read (unverified); ADR-0013 §7 R2 triggers already read monthly by the posture monitor
+    pii_level: low
+    scores:
+      value: 5
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: later
+    verdict_reason: 'top-5 next: one daily FOCUS cost + usage snapshot for the cost dashboard (paas-ops); needs a read-only token in the repo'
+    owner_action: API token (Account Analytics Read, Billing Read) at https://dash.cloudflare.com/profile/api-tokens -> Infisical /cloudflare CF_USAGE_READ_TOKEN, then data-lake-pipelines secret CF_USAGE_READ_TOKEN
+    evidence:
+    - https://developers.cloudflare.com/analytics/graphql-api/limits/
+    - https://blog.cloudflare.com/billable-usage-api/
+    - https://developers.cloudflare.com/api/resources/billing/subresources/usage/methods/paygo
+    checked_at: '2026-11-12'
+  - id: vercel
+    name: Vercel (usage + billing)
+    batch: 2
+    category: infrastructure
+    popularity_rank: 2
+    method: api
+    flow: paas-ops
+    api_docs_url: https://vercel.com/docs/rest-api/billing/list-focus-billing-charges
+    mcp_server: https://mcp.vercel.com (official; wraps REST)
+    auth_type: Bearer token + teamId (billing role needed)
+    rate_limit: per endpoint (https://vercel.com/docs/limits); charges endpoint figure unverified
+    cost: free API; Hobby access to /v1/billing/charges unconfirmed
+    entities:
+    - billing_charges_focus
+    - deployments
+    - projects
+    - web_analytics
+    bulk_or_webhook: FOCUS JSONL, 1-day granularity, 1-year range; drains
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: AI Product Terms apply to the MCP; API terms not read (unverified)
+    pii_level: low
+    scores:
+      value: 4
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: later
+    verdict_reason: 'top-5 next: daily FOCUS charges per project next to Cloudflare and Railway (100 deploys/day limit is the real constraint)'
+    owner_action: read-only token at https://vercel.com/account/settings/tokens -> Infisical /vercel VERCEL_USAGE_READ_TOKEN
+    evidence:
+    - https://vercel.com/docs/rest-api/billing/list-focus-billing-charges
+    - https://vercel.com/docs/limits
+    - https://vercel.com/docs/mcp/vercel-mcp
+    checked_at: '2026-11-12'
+  - id: railway
+    name: Railway (usage + invoices)
+    batch: 2
+    category: infrastructure
+    popularity_rank: 3
+    method: api
+    flow: paas-ops
+    api_docs_url: https://docs.railway.com/reference/public-api
+    mcp_server: https://mcp.railway.com (official; no usage tools)
+    auth_type: account or workspace token (Bearer)
+    rate_limit: Free 100/h, Hobby 1,000/h, Pro 10,000/h
+    cost: free API
+    entities:
+    - estimated_usage
+    - current_usage
+    - invoices
+    - deployments
+    bulk_or_webhook: none for usage; deployment webhooks
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified)
+    pii_level: low
+    scores:
+      value: 5
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: later
+    verdict_reason: 'top-5 next: the $40 usage-limit pause of 2026-11-07 went unseen; a daily estimatedUsage snapshot gives the warning (field names from a forum post, confirm in GraphiQL)'
+    owner_action: workspace token (read) at https://railway.com/account/tokens -> Infisical /railway RAILWAY_USAGE_READ_TOKEN
+    evidence:
+    - https://docs.railway.com/reference/public-api
+    - https://station.railway.com/feedback/document-billing-queries-for-third-party-9ce91173
+    checked_at: '2026-11-12'
+  - id: neon
+    name: Neon (consumption)
+    batch: 2
+    category: infrastructure
+    popularity_rank: 4
+    method: api
+    flow: paas-ops
+    api_docs_url: https://neon.com/docs/guides/consumption-metrics
+    mcp_server: https://mcp.neon.tech/mcp (official; same plan gate)
+    auth_type: API key (Bearer)
+    rate_limit: consumption endpoints about 50/min per account
+    cost: v2 consumption endpoints only on Launch and above (Free gets 403)
+    entities:
+    - consumption_daily
+    - projects
+    - branches
+    bulk_or_webhook: none
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified)
+    pii_level: low
+    scores:
+      value: 3
+      cost: 4
+      effort: 2
+      risk: 1
+    verdict: later
+    verdict_reason: Free plan returns 403 for daily consumption and buying a plan is the owner's call; per-project quota checks stay manual
+    owner_action: decide whether a Launch plan is worth it (https://neon.com/pricing); no key needed until then
+    evidence:
+    - https://neon.com/docs/guides/consumption-metrics
+    - https://neon.com/docs/introduction/plans
+    checked_at: '2026-11-12'
+  - id: supabase
+    name: Supabase (usage)
+    batch: 2
+    category: infrastructure
+    popularity_rank: 5
+    method: api
+    flow: paas-ops
+    api_docs_url: https://supabase.com/docs/reference/api/introduction
+    mcp_server: https://mcp.supabase.com/mcp (official; get_cost is a price quote only)
+    auth_type: personal access token or OAuth
+    rate_limit: 120/min per endpoint; usage endpoints 30/min
+    cost: free API; no cost or invoice endpoint
+    entities:
+    - api_counts
+    - request_counts
+    - projects
+    - logs
+    bulk_or_webhook: log drains
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: fair-use policy; storage terms not read (unverified)
+    pii_level: low
+    scores:
+      value: 2
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: later
+    verdict_reason: only request counts are reachable; spend lives in the dashboard (manual, no scraping)
+    owner_action: scoped PAT at https://supabase.com/dashboard/account/tokens -> Infisical /supabase when wanted
+    evidence:
+    - https://supabase.com/docs/reference/api/introduction
+    - https://supabase.com/docs/guides/platform/billing-faq
+    checked_at: '2026-11-12'
+  - id: google-play-console
+    name: Google Play Console
+    batch: 2
+    category: app-stores
+    popularity_rank: 6
+    method: api
+    flow: app-stores
+    api_docs_url: https://developers.google.com/play/developer/reporting
+    mcp_server: none official found
+    auth_type: service account invited in Play Console (View app information, View financial data)
+    rate_limit: Reviews API 200 GET/h per app
+    cost: free
+    entities:
+    - android_vitals
+    - reviews
+    - installs
+    - ratings
+    - earnings
+    bulk_or_webhook: monthly CSV bulk reports in the private GCS bucket pubsite_prod_rev* (UTF-16); Reviews API keeps 7 days only
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: Play Developer Distribution Agreement not read (unverified)
+    pii_level: medium
+    scores:
+      value: 3
+      cost: 1
+      effort: 3
+      risk: 2
+    verdict: later
+    verdict_reason: worth it once an app ships on Play; reviews older than 7 days only come from the GCS export
+    owner_action: service account at https://console.cloud.google.com/iam-admin/serviceaccounts invited at https://play.google.com/console/users-and-permissions -> Infisical /google-play
+    evidence:
+    - https://developers.google.com/play/developer/reporting
+    - https://developers.google.com/android-publisher/reply-to-reviews
+    - https://support.google.com/googleplay/android-developer/answer/6135870
+    checked_at: '2026-11-12'
+  - id: app-store-connect
+    name: App Store Connect
+    batch: 2
+    category: app-stores
+    popularity_rank: 7
+    method: api
+    flow: app-stores
+    api_docs_url: https://developer.apple.com/documentation/appstoreconnectapi/downloading-analytics-reports
+    mcp_server: none official found
+    auth_type: team API key (.p8, ES256 JWT, Sales and Reports role)
+    rate_limit: hourly limit per key (X-Rate-Limit header; numbers unverified)
+    cost: free with the developer programme
+    entities:
+    - sales_reports
+    - analytics_reports
+    - reviews
+    bulk_or_webhook: Analytics Reports requests (ONGOING) -> daily gzipped CSV; poll only
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: licence agreement not read (unverified); Apple drops small counts under privacy thresholds
+    pii_level: low
+    scores:
+      value: 3
+      cost: 1
+      effort: 3
+      risk: 1
+    verdict: later
+    verdict_reason: 'same as Play: once an iOS app is live'
+    owner_action: team key at https://appstoreconnect.apple.com/access/integrations/api -> Infisical /apple
+    evidence:
+    - https://developer.apple.com/documentation/appstoreconnectapi/downloading-analytics-reports
+    checked_at: '2026-11-12'
+  - id: ahrefs
+    name: Ahrefs API v3
+    batch: 2
+    category: seo
+    popularity_rank: 8
+    method: api
+    flow: seo-metrics
+    api_docs_url: https://docs.ahrefs.com/api/docs/introduction
+    mcp_server: Ahrefs MCP (official, connected in Claude; same unit pool)
+    auth_type: API key (Bearer)
+    rate_limit: 60 req/min default
+    cost: paid plans only; units per month Lite 25k .. Enterprise 2M (help-center table via search)
+    entities:
+    - backlinks
+    - referring_domains
+    - organic_keywords
+    - traffic
+    - rank_tracker
+    bulk_or_webhook: pull only
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms on storing/redistributing Ahrefs data not read (unverified)
+    pii_level: low
+    scores:
+      value: 3
+      cost: 3
+      effort: 2
+      risk: 2
+    verdict: later
+    verdict_reason: Search Console (batch 1) gives our own sites for free; buy units only for competitor data, owner decides
+    owner_action: confirm the plan includes API units at https://app.ahrefs.com/account/billing; key at https://app.ahrefs.com/api/keys -> Infisical /ahrefs
+    evidence:
+    - https://docs.ahrefs.com/api/docs/introduction
+    checked_at: '2026-11-12'
+  - id: tiktok
+    name: TikTok (Display API)
+    batch: 2
+    category: social
+    popularity_rank: 9
+    method: api
+    flow: content-channels
+    api_docs_url: https://developers.tiktok.com/doc/display-api-overview
+    mcp_server: TikTok for Business ads MCP only (no content MCP)
+    auth_type: OAuth 2.0 (user.info.basic, video.list)
+    rate_limit: unverified
+    cost: free
+    entities:
+    - own_profile
+    - own_public_videos
+    bulk_or_webhook: pull only; Research API is academic-only
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: developer terms not read (unverified); scraping is the high-risk path, not used
+    pii_level: medium
+    scores:
+      value: 2
+      cost: 1
+      effort: 2
+      risk: 3
+    verdict: later
+    verdict_reason: only own public video metadata; creator analytics need the TikTok Studio manual export
+    owner_action: name the account; register an app at https://developers.tiktok.com/apps -> Infisical /tiktok
+    evidence:
+    - https://developers.tiktok.com/doc/display-api-overview
+    checked_at: '2026-11-12'
+  - id: shopee
+    name: Shopee Open Platform (TH)
+    batch: 2
+    category: e-commerce
+    popularity_rank: 10
+    method: api
+    flow: marketplaces
+    api_docs_url: https://open.shopee.com/documents
+    mcp_server: none found
+    auth_type: Partner ID + key, signed requests, shop authorization token
+    rate_limit: 'unverified (third-party: about 100/min)'
+    cost: no fee found
+    entities:
+    - orders
+    - products
+    - returns
+    - escrow_payouts
+    bulk_or_webhook: push notifications (order, item, payment)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: official docs and terms blocked automated reading (unverified)
+    pii_level: high
+    scores:
+      value: 3
+      cost: 1
+      effort: 3
+      risk: 2
+    verdict: later
+    verdict_reason: self-serve for an own shop is likely ('Seller In House System' app) but approval for an individual TH seller is unconfirmed
+    owner_action: confirm a live shop; apply at https://open.shopee.com/ -> Infisical /shopee
+    evidence:
+    - https://open.shopee.com/documents
+    - https://www.odoo.com/documentation/19.0/applications/sales/sales/shopee_connector/setup.html
+    checked_at: '2026-11-12'
+  - id: lazada
+    name: Lazada Open Platform (TH)
+    batch: 2
+    category: e-commerce
+    popularity_rank: 11
+    method: api
+    flow: marketplaces
+    api_docs_url: https://open.lazada.com/apps/doc/doc?nodeId=10451&docId=108068
+    mcp_server: none found
+    auth_type: OAuth 2.0 per seller (app key/secret, signed)
+    rate_limit: per app and shop (not declared)
+    cost: free for seller apps (unverified)
+    entities:
+    - orders
+    - products
+    - finance
+    bulk_or_webhook: push messages (unverified)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified)
+    pii_level: high
+    scores:
+      value: 3
+      cost: 1
+      effort: 3
+      risk: 2
+    verdict: later
+    verdict_reason: 'same as Shopee: only once a shop sells there'
+    owner_action: confirm a live shop; app at https://open.lazada.com/apps -> Infisical /lazada
+    evidence:
+    - https://open.lazada.com/apps/doc/doc?nodeId=10451&docId=108068&docType=1
+    checked_at: '2026-11-12'
+  - id: paypal
+    name: PayPal
+    batch: 2
+    category: payments
+    popularity_rank: 12
+    method: api
+    flow: payments-wallets
+    api_docs_url: https://developer.paypal.com/docs/api/transaction-search/v1/
+    mcp_server: https://mcp.paypal.com/mcp (official)
+    auth_type: OAuth 2.0 client credentials (Transaction Search enabled)
+    rate_limit: not published (about 50/min per third party)
+    cost: free
+    entities:
+    - transactions
+    - balances
+    bulk_or_webhook: 31-day query window, 3 years history, up to 3 h lag; webhooks for events
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: user agreement returned 403 (unverified)
+    pii_level: high
+    scores:
+      value: 2
+      cost: 1
+      effort: 2
+      risk: 2
+    verdict: later
+    verdict_reason: not confirmed in use; Stripe is the main processor
+    owner_action: say whether PayPal receives money; app at https://developer.paypal.com/dashboard/applications -> Infisical /paypal
+    evidence:
+    - https://developer.paypal.com/docs/api/transaction-search/v1/
+    - https://developer.paypal.com/tools/mcp-server/
+    checked_at: '2026-11-12'
+  - id: wise
+    name: Wise
+    batch: 2
+    category: payments
+    popularity_rank: 13
+    method: manual-export
+    flow: payments-wallets
+    api_docs_url: https://docs.wise.com/api-reference/balance-statement
+    mcp_server: none official (community mcp-wise is payment-write, avoid)
+    auth_type: personal API token
+    rate_limit: unverified
+    cost: free
+    entities:
+    - balances
+    - statements
+    bulk_or_webhook: statement export from the web app (manual)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: personal tokens cannot read balance statements outside US/CA/AU/NZ/SG/MY (Thailand excluded); EU/UK need SCA
+    pii_level: high
+    scores:
+      value: 3
+      cost: 1
+      effort: 2
+      risk: 2
+    verdict: later
+    verdict_reason: no API route for a Thai personal profile; monthly CSV statement through intake by hand
+    owner_action: download the monthly statement at https://wise.com/balances/statements and upload it as finance evidence
+    evidence:
+    - https://docs.wise.com/guides/developer/auth-and-security/personal-api-token
+    - https://docs.wise.com/api-reference/balance-statement
+    checked_at: '2026-11-12'
+  - id: binance-th
+    name: Binance TH
+    batch: 2
+    category: finance
+    popularity_rank: 14
+    method: api
+    flow: investments
+    api_docs_url: https://www.binance.th/api-docs/en/
+    mcp_server: none official (community servers add trading, avoid)
+    auth_type: API key + HMAC-SHA256 signature
+    rate_limit: 1,000 weight per 10 s, 6,000 per min per IP
+    cost: free
+    entities:
+    - balances
+    - trades
+    - orders
+    bulk_or_webhook: user data WebSocket stream; poll for backfill
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified); keys must never allow trading or withdrawal
+    pii_level: high
+    scores:
+      value: 3
+      cost: 1
+      effort: 2
+      risk: 3
+    verdict: later
+    verdict_reason: investments flow candidate; read-only key with IP allowlist only, owner names the account first
+    owner_action: read-only key (no trade, no withdraw, IP allowlist) at https://www.binance.th/en/my/settings/api-management -> Infisical /binance-th
+    evidence:
+    - https://www.binance.th/api-docs/en/
+    checked_at: '2026-11-12'
+  - id: strava
+    name: Strava
+    batch: 2
+    category: health
+    popularity_rank: 15
+    method: api
+    flow: strava
+    api_docs_url: https://developers.strava.com/docs/
+    mcp_server: none found
+    auth_type: OAuth 2.0 (6 h access tokens, refresh token)
+    rate_limit: 200 per 15 min, 2,000 per day; single player mode
+    cost: free
+    entities:
+    - activities
+    - streams
+    - gear
+    bulk_or_webhook: push webhooks (incl. deauthorization)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: 'API Agreement 2026-06-01: own data shown only to the owner, delete all Strava data on termination (4.4); API Policy not read'
+    pii_level: high
+    scores:
+      value: 3
+      cost: 1
+      effort: 2
+      risk: 2
+    verdict: later
+    verdict_reason: feeds the health cell; mask start/end points (home and work) before Bronze
+    owner_action: authorize the existing app once to get a refresh token (https://www.strava.com/settings/api) -> Infisical /strava STRAVA_REFRESH_TOKEN
+    evidence:
+    - https://www.strava.com/legal/api
+    - https://developers.strava.com/docs/rate-limits/
+    checked_at: '2026-11-12'
+  - id: telegram
+    name: Telegram (channels and chats)
+    batch: 2
+    category: communication
+    popularity_rank: 16
+    method: api
+    flow: telegram-channels
+    api_docs_url: https://core.telegram.org/api
+    mcp_server: none official
+    auth_type: MTProto user API (api_id/api_hash) for own dialogs; Bot API for bot chats
+    rate_limit: flood limits (FLOOD_WAIT)
+    cost: free
+    entities:
+    - channel_posts
+    - own_dialogs
+    - bot_updates
+    bulk_or_webhook: updates stream, history pagination
+    coverage_pct: 30
+    current_status: partial
+    tos_notes: API Terms 1.5 no AI/ML training on Telegram data; 1.4 no acting without consent; unofficial clients are watched
+    pii_level: high
+    scores:
+      value: 3
+      cost: 1
+      effort: 3
+      risk: 4
+    verdict: later
+    verdict_reason: channels already reach the local lake by hand (telegram-channels); moving to R2 needs a chat allowlist, retention and no AI training use
+    owner_action: pick the channel allowlist; no new key (api_id already used locally)
+    evidence:
+    - https://core.telegram.org/api/terms
+    - https://core.telegram.org/api/obtaining_api_id
+    checked_at: '2026-11-12'
+  - id: discord
+    name: Discord
+    batch: 2
+    category: communication
+    popularity_rank: 17
+    method: api
+    api_docs_url: https://discord.com/developers/docs
+    mcp_server: none official
+    auth_type: bot token (user tokens not allowed)
+    rate_limit: unverified
+    cost: free
+    entities:
+    - guild_messages
+    bulk_or_webhook: gateway events
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: policy pages blocked automated reading (unverified); self-bots are forbidden
+    pii_level: high
+    scores:
+      value: 1
+      cost: 1
+      effort: 2
+      risk: 3
+    verdict: skip
+    verdict_reason: no server of ours with outside members; a bot only sees guilds it joins
+    owner_action: null
+    evidence:
+    - https://discord.com/developers/docs
+    checked_at: '2026-11-12'
+  - id: upwork
+    name: Upwork
+    batch: 2
+    category: freelance
+    popularity_rank: 18
+    method: api
+    flow: freelance-platforms
+    api_docs_url: https://www.upwork.com/developer/documentation/graphql
+    mcp_server: none official
+    auth_type: OAuth 2.0 (24 h tokens), key request reviewed by Upwork
+    rate_limit: 40,000 requests/day
+    cost: free
+    entities:
+    - contracts
+    - jobs
+    - profile
+    bulk_or_webhook: unverified
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: personal/internal use only, commercial use unsupported; bots-and-automation policy, no scraping (terms text not read)
+    pii_level: medium
+    scores:
+      value: 2
+      cost: 1
+      effort: 3
+      risk: 2
+    verdict: later
+    verdict_reason: approval-gated (1-2 weeks); only if Upwork becomes a real lead source
+    owner_action: request a key at https://www.upwork.com/developer/keys/apply -> Infisical /upwork
+    evidence:
+    - https://www.upwork.com/developer/documentation/graphql
+    checked_at: '2026-11-12'
+  - id: beehiiv-substack
+    name: Beehiiv / Substack
+    batch: 2
+    category: content
+    popularity_rank: 19
+    method: api
+    flow: newsletter
+    api_docs_url: https://developers.beehiiv.com/welcome/getting-started
+    mcp_server: Beehiiv MCP listed in the Claude directory; Substack none
+    auth_type: Beehiiv API key; Substack has no general API
+    rate_limit: unverified
+    cost: unverified
+    entities:
+    - subscribers
+    - posts
+    bulk_or_webhook: Beehiiv OpenAPI; Substack CSV export only
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified); Substack community scrapers use session tokens, not allowed
+    pii_level: high
+    scores:
+      value: 1
+      cost: 1
+      effort: 2
+      risk: 2
+    verdict: skip
+    verdict_reason: no newsletter running yet
+    owner_action: null
+    evidence:
+    - https://developers.beehiiv.com/welcome/getting-started
+    checked_at: '2026-11-12'
+  - id: cal-com-calendly
+    name: Cal.com / Calendly
+    batch: 2
+    category: productivity
+    popularity_rank: 20
+    method: api
+    flow: bookings
+    api_docs_url: https://cal.com/docs/api-reference/v2/introduction
+    mcp_server: https://mcp.calendly.com and https://mcp.cal.com/mcp (official)
+    auth_type: API key or OAuth
+    rate_limit: Cal.com 120/min per key
+    cost: plan requirement unclear for both
+    entities:
+    - bookings
+    - event_types
+    - invitees
+    bulk_or_webhook: webhooks on both
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified)
+    pii_level: medium
+    scores:
+      value: 1
+      cost: 1
+      effort: 1
+      risk: 1
+    verdict: skip
+    verdict_reason: no booking link in use; bookings also land in Google Calendar
+    owner_action: null
+    evidence:
+    - https://cal.com/docs/api-reference/v2/introduction
+    - https://developer.calendly.com/calendly-mcp-server
+    checked_at: '2026-11-12'
 next_batch:
-  number: 2
+  number: 3
   sources:
-    [cloudflare, vercel, railway, neon, supabase, google-play-console, app-store-connect, ahrefs, tiktok, shopee,
-     lazada, paypal, wise, binance-th, strava, telegram, discord, upwork, beehiiv-substack, cal-com-calendly]
+    [openai-usage, anthropic-usage, google-ads, meta-ads, resend, cloudinary, grab-merchant, line-man-wongnai, fastwork, readwise, spotify, zoom, bank-of-thailand-api, set-market-data, data-go-th, coingecko, jobsdb, jobthai, hugging-face, kaggle]
