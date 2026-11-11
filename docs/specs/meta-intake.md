@@ -1,6 +1,6 @@
 # SPEC: Meta intake (Facebook feed and groups, Instagram, Threads)
 
-Status: DRAFT 2026-11-11, waiting for the owner's approval. Nothing is built yet.
+Status: APPROVED by the owner 2026-11-11 ("อนุมัติ + merge"). Open questions below still to answer before build. Nothing is built yet.
 Code (planned): `infra/scripts/x_lakehouse/meta.py`, Worker `workers/meta-capture/`.
 Tests (planned): `infra/tests/x_lakehouse/x_lakehouse_meta_test.py`, `workers/meta-capture/test/`.
 
