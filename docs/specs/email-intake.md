@@ -1,7 +1,7 @@
 # SPEC: Email intake (Gmail → R2 lake → CRM / tasks / finance)
 
-Status: PROPOSED 2026-11-11, waits for the owner's answers in "Open questions". Standard: ADR-0004
-(spec, then failing test, then code). Nothing is built.
+Status: APPROVED by the owner 2026-11-11 ("รับตามที่เสนอ"): every proposal in Decisions accepted.
+Standard: ADR-0004 (spec, then failing test, then code). Nothing is built.
 Platform rules: ADR-0013 (one R2 lake, Parquet + DuckDB + dbt, no warehouse, no always-on server).
 Reuses: the generic Bronze envelope and manifests (`domain=communications/dataset=emails`), dbt models
 `stg_emails.sql` and `email_activity_daily.sql` that are still in this repo, and the denylist / gateway
@@ -241,13 +241,11 @@ heartbeat, Telegram summary.
   reconciliation run, and the checkpoint moves only after the reconciliation finishes (a crash halfway
   leaves the old state).
 
-## Open questions (owner)
+## Decisions (owner, 2026-11-11: "รับตามที่เสนอ")
 
-- **Q1 Which account?** Proposal: `bookchaowalit.work@gmail.com` only, since outside work is moving there
-  (work-email migration, 2026-11-05) and it has less personal mail. The personal account would be v3.
-- **Q2 Bodies at all?** Proposal: yes, but only under the body rule above. Option B: metadata only in v1,
-  bodies after a 2-week look at the metadata.
-- **Q3 Auto-write?** Proposal: v1 suggests only (review queue + Telegram); the owner switches each route to
-  auto-write in v2. Option B: auto-write CRM activities from day one (low risk, they are notes).
-- **Q4 Retention numbers** (90 days bodies / 365 days metadata): OK?
-- **Q5 Backfill depth** on the first run: 30 days proposed (longer backfill means more third-party data).
+1. **Account:** `bookchaowalit.work@gmail.com` only (`MAIL_ACCOUNT`). The personal account is v3.
+2. **Bodies:** yes, only under the body rule (exact address for public mail domains, verified org domains,
+   `lake` label, finance senders), re-checked every run.
+3. **Writes:** v1 suggests only (review queue + Telegram summary); auto-write per route in v2 after 14 days.
+4. **Retention:** bodies 90 days, metadata 365 days, Gold `mail_routes` 90 days.
+5. **First backfill:** 30 days.
