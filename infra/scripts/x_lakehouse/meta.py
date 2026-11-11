@@ -258,8 +258,9 @@ COLUMNS = ("post_key", "capture_ids", "first_captured_at", "last_captured_at", "
 
 
 def ddl() -> str:
+    # No "create schema": the x_lake role owns x_intel but may not CREATE on the database, and
+    # curated.ensure_schema already made the schema (the inbox drain runs first).
     return f"""
-create schema if not exists {S};
 create table if not exists {S}.meta_posts (
     post_key text primary key,
     capture_ids text[] not null,
