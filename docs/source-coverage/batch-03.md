@@ -43,7 +43,10 @@ Hugging Face รอบนี้) ส่วนอีก 16 แหล่ง missin
 - แต่ละวันเก็บ model, dataset และ space ที่ติด trending ประเภทละ 100 อันดับ ลง Bronze `domain=market-intelligence`
   ไม่เก็บ description และ card data
 - ทดสอบกับ API จริงในเครื่องแล้ว ได้ครบ 100/100/100
-- ผลการรันบน R2 อยู่ในส่วนบันทึกการรันด้านล่าง
+- รันจริงบน R2 วันที่ 2026-11-12 ([run 43074787900](https://github.com/bookchaowalit/data-lake-pipelines/actions/runs/43074787900)) ผ่านทั้ง capture และ heartbeat:
+  ได้ 100 model, 100 dataset และ 100 space ลง Bronze
+  manifest อยู่ที่ `control/manifests/source=huggingface/batch_id=1352be5a…`, `f2803fae…` และ `aedb4229…`
+- deploy แล้ว: uptime Worker target `hf-trending` (26 ชม., version `c09a5867`) และ jobs queue job `hf-trending` (`40 3 * * *` UTC, version `4a126fa5`)
 
 ## Top 5 ที่ควร ingest ต่อ
 
