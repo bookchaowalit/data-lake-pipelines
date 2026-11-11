@@ -1,0 +1,577 @@
+# Source coverage registry: how each SaaS / data source can reach the data platform, in priority order
+#   1. official API  ->  2. MCP server  ->  3. scraping (last resort, only where ToS and robots.txt allow).
+#
+# One row per source, one batch of 20 per round, most popular / most relevant first. A round ends with
+# every row of its batch filled in, a Thai report (docs/source-coverage/batch-NN.md) and the next batch listed.
+# Check: python3 infra/scripts/utils/source_coverage_check.py   (offline; part of CI)
+#
+# Fields
+#   method          the best allowed way in: api | mcp | scrape | manual-export | none
+#   current_status  covered | partial | missing   (what the platform holds today, not what is possible)
+#   coverage_pct    share of the useful entities the platform already holds (0-100)
+#   flow            id in solo-empire repository-catalog/registries/data-sources.yaml, when one exists
+#   scores          1 (low) .. 5 (high): value, cost, effort, risk
+#   verdict         ingest-now | later | skip | blocked-legal | covered
+#   owner_action    what only the owner can do, with the page URL and where the key goes (Infisical path)
+#   evidence        official URLs read for this row (docs, terms, MCP page); "unverified" notes stay in tos_notes
+#
+# Guardrails: no plan purchases, no client or company accounts (NexaTech, Oak, Happy-Teeth), no auth,
+# paywall or CAPTCHA bypass, no more personal data than needed (PDPA/GDPR). Unsure about legal = ask the owner.
+# No secrets here: names, URLs and Infisical paths only.
+schema_version: data-lake-pipelines.source-coverage.v1
+updated: '2026-11-12'
+current_batch: 1
+batches:
+  1: {checked_at: '2026-11-12', report: docs/source-coverage/batch-01.md}
+sources:
+  - id: salesforce
+    name: Salesforce
+    batch: 1
+    category: crm
+    popularity_rank: 1
+    method: api
+    api_docs_url: https://developer.salesforce.com/docs/platform/api-rest/guide/intro-rest-compatible-editions.html
+    mcp_server: Salesforce hosted MCP (official, enabled in Setup; https://developer.salesforce.com/docs/platform/hosted-mcp-servers/guide/products-supporting-mcp.html)
+    auth_type: OAuth 2.0 (External Client App / Connected App, JWT bearer); user needs "API Enabled"
+    rate_limit: Enterprise 100,000 calls/24 h + 1,000 per licence; Developer Edition 15,000/24 h
+    cost: API only on Enterprise, Unlimited, Performance and Developer editions; Professional needs the paid Web Services API add-on
+    entities: [Account, Contact, Lead, Opportunity, Case, Task, Event, custom objects]
+    bulk_or_webhook: Bulk API 2.0, Change Data Capture, Pub/Sub API
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: customer data stays the customer's; Main Services Agreement not read (unverified). Limits page answered 403, numbers from search snippets
+    pii_level: high
+    scores: {value: 1, cost: 4, effort: 3, risk: 2}
+    verdict: skip
+    verdict_reason: no Salesforce org in use; revisit only if a client or venture runs on it
+    owner_action: null
+    evidence:
+      - https://developer.salesforce.com/docs/platform/api-rest/guide/intro-rest-compatible-editions.html
+      - https://developer.salesforce.com/docs/platform/salesforce-app-limits-cheatsheet/guide/salesforce-app-limits-platform-api.html
+    checked_at: '2026-11-12'
+  - id: hubspot
+    name: HubSpot
+    batch: 1
+    category: crm
+    popularity_rank: 2
+    method: api
+    api_docs_url: https://developers.hubspot.com/docs/api-reference/overview
+    mcp_server: https://mcp.hubspot.com (official remote, OAuth 2.0; wraps the CRM API, no sensitive-data properties)
+    auth_type: Service Keys (single account; no webhooks) or OAuth 2.0 project app; new legacy private apps closed 2026-10-26
+    rate_limit: Free/Starter 100 req/10 s and 250,000/day; Professional 190/10 s and 625,000/day; Enterprise 190/10 s and 1,000,000/day
+    cost: CRM API usable on the free CRM (rate-limit table lists Free/Starter)
+    entities: [contacts, companies, deals, tickets, products, line_items, quotes, invoices, engagements, owners, pipelines, associations]
+    bulk_or_webhook: webhooks (project app only), batch endpoints, exports API
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: Developer Terms 4.B.6 cache only for reasonable and lawful periods, 4.B.8 no AI training on customer data; written for apps serving other customers
+    pii_level: high
+    scores: {value: 2, cost: 1, effort: 2, risk: 2}
+    verdict: skip
+    verdict_reason: our CRM is sales-crm (own cell); no HubSpot portal in use
+    owner_action: null
+    evidence:
+      - https://developers.hubspot.com/docs/developer-tooling/platform/usage-guidelines
+      - https://developers.hubspot.com/mcp
+      - https://legal.hubspot.com/developer-terms
+    checked_at: '2026-11-12'
+  - id: stripe
+    name: Stripe
+    batch: 1
+    category: payments
+    popularity_rank: 3
+    method: api
+    flow: stripe-account
+    api_docs_url: https://docs.stripe.com/api
+    mcp_server: https://mcp.stripe.com (official; secret/restricted keys must move to agent API keys before 2026-11-30)
+    auth_type: restricted API key (read-only) or OAuth
+    rate_limit: live 100 req/s account, 25 req/s per endpoint, Search 20 reads/s; read quota 500 reads per transaction over 30 days (min 10,000/month)
+    cost: API free; Data Pipeline and Sigma are paid add-ons
+    entities: [customers, products, prices, subscriptions, invoices, charges, refunds, disputes, payouts, balance_transactions, events]
+    bulk_or_webhook: webhooks / event destinations, Events API (30 days), Reports API, Data Pipeline
+    coverage_pct: 35
+    current_status: partial
+    tos_notes: Services Agreement 4.7 output data for internal business use only, no resale, delete on Stripe's written request; never store card numbers (PCI)
+    pii_level: high
+    scores: {value: 5, cost: 1, effort: 2, risk: 2}
+    verdict: later
+    verdict_reason: payments already land (stripe-income webhook + payment-relay -> sales marts); next is a daily snapshot of customers, subscriptions and invoices; top-5 next
+    owner_action: >-
+      create a read-only restricted key (Customers, Subscriptions, Invoices, Products, Prices: Read) at
+      https://dashboard.stripe.com/apikeys -> Infisical /stripe STRIPE_READONLY_KEY; also move the Stripe MCP to an
+      agent API key before 2026-11-30 (https://docs.stripe.com/mcp)
+    evidence:
+      - https://docs.stripe.com/rate-limits
+      - https://docs.stripe.com/mcp
+      - https://stripe.com/legal/ssa
+    checked_at: '2026-11-12'
+  - id: shopify
+    name: Shopify
+    batch: 1
+    category: e-commerce
+    popularity_rank: 4
+    method: api
+    flow: shopify
+    api_docs_url: https://shopify.dev/docs/api/admin-graphql
+    mcp_server: official Dev MCP (docs), Storefront MCP and Customer Accounts MCP; no official admin-data MCP confirmed
+    auth_type: custom app Admin API access token (X-Shopify-Access-Token)
+    rate_limit: GraphQL Admin restore rate 100 / 200 / 1,000 / 2,000 points/s (Standard / Advanced / Plus / Enterprise); max 1,000 points per query
+    cost: included with any store plan; no API fee
+    entities: [orders, products, variants, customers, inventory, collections, fulfillments, discounts, payouts]
+    bulk_or_webhook: bulk operations (async JSONL), webhooks (HTTPS, EventBridge, Pub/Sub)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: API Terms 6.2.1 keep only what the app needs, 6.2.3 delete within 30 days of uninstall, 2.3.24 no AI training without consent; written for apps on other merchants' stores
+    pii_level: high
+    scores: {value: 3, cost: 1, effort: 2, risk: 2}
+    verdict: later
+    verdict_reason: data-sources says confirm a live store first; capture with bulk operations once one sells
+    owner_action: confirm which store is live; then create a custom app at https://admin.shopify.com/settings/apps/development -> Infisical /shopify SHOPIFY_ADMIN_TOKEN
+    evidence:
+      - https://shopify.dev/docs/apps/build/apis/graphql-admin/rate-limits.md
+      - https://shopify.dev/docs/api/admin-graphql/latest
+      - https://www.shopify.com/legal/api-terms
+    checked_at: '2026-11-12'
+  - id: google-workspace
+    name: Google Workspace (Gmail, Calendar, Drive)
+    batch: 1
+    category: productivity
+    popularity_rank: 5
+    method: api
+    flow: gmail
+    api_docs_url: https://developers.google.com/workspace/gmail/api/reference/rest
+    mcp_server: official remote MCP in Developer Preview (gmailmcp / calendarmcp / drivemcp.googleapis.com); shares API quota
+    auth_type: OAuth 2.0 user consent (offline refresh token); restricted scopes for Gmail and Drive
+    rate_limit: Gmail 6,000 units/min/user; Calendar 600 req/min/user; Drive 325,000 units/min/user
+    cost: free within quota
+    entities: [messages, threads, labels, events, calendars, files, revisions, changes]
+    bulk_or_webhook: Gmail users.watch -> Pub/Sub + history.list; Calendar events.watch; Drive changes.watch; Takeout outside the API
+    coverage_pct: 5
+    current_status: partial
+    tos_notes: Google API Services User Data Policy (Limited Use, also for derived data; encrypt at rest; no human reading without consent)
+    pii_level: high
+    scores: {value: 5, cost: 1, effort: 4, risk: 3}
+    verdict: later
+    verdict_reason: Gmail is covered by the approved email-intake spec (docs/specs/email-intake.md, work account, bodies 90 d); Calendar and a Drive file index come after it; top-5 next
+    owner_action: Google OAuth client for the work account at https://console.cloud.google.com/apis/credentials -> Infisical /google-work (email-intake owner items)
+    evidence:
+      - https://developers.google.com/workspace/gmail/api/reference/quota
+      - https://developers.google.com/workspace/calendar/api/guides/quota
+      - https://developers.google.com/workspace/drive/api/guides/limits
+      - https://developers.google.com/workspace/guides/configure-mcp-servers
+      - https://developers.google.com/terms/api-services-user-data-policy
+    checked_at: '2026-11-12'
+  - id: microsoft-365
+    name: Microsoft 365 (Graph)
+    batch: 1
+    category: productivity
+    popularity_rank: 6
+    method: api
+    api_docs_url: https://learn.microsoft.com/en-us/graph/overview
+    mcp_server: Work IQ MCP (preview, Copilot licence per secondary sources); community Softeria/ms-365-mcp-server
+    auth_type: Microsoft Entra OAuth 2.0 (delegated or app-only with admin consent)
+    rate_limit: 130,000 req/10 s per app; Outlook 10,000 req/10 min per mailbox; Teams messages 1 rps per chat/channel
+    cost: no Graph fee for mail/calendar/OneDrive; Teams export APIs are metered
+    entities: [messages, events, driveItems, chats, chatMessages, users]
+    bulk_or_webhook: change notifications, delta queries, Teams getAllMessages (metered)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: Microsoft APIs Terms of Use not read (unverified)
+    pii_level: high
+    scores: {value: 1, cost: 2, effort: 3, risk: 4}
+    verdict: skip
+    verdict_reason: the only M365 tenant is NexaTech (company); company accounts are out of scope for this platform
+    owner_action: null
+    evidence:
+      - https://learn.microsoft.com/en-us/graph/throttling-limits
+      - https://learn.microsoft.com/en-us/graph/change-notifications-overview
+    checked_at: '2026-11-12'
+  - id: slack
+    name: Slack
+    batch: 1
+    category: communication
+    popularity_rank: 7
+    method: api
+    api_docs_url: https://docs.slack.dev/apis/web-api/
+    mcp_server: https://mcp.slack.com/mcp (official remote; Real-Time Search results may not be stored)
+    auth_type: OAuth 2.0 bot or user token; internal (non-distributed) app
+    rate_limit: tiers 1-4 (1+ to 100+ per minute); internal apps keep 50+/min and limit 1,000 on conversations.history (2025-05-29 change only hits non-Marketplace distributed apps)
+    cost: Web API free; message history depends on the workspace plan
+    entities: [conversations, messages, threads, users, files, reactions]
+    bulk_or_webhook: Events API (HTTP or Socket Mode); no bulk export outside admin export / Enterprise Discovery
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: API Terms forbid bulk export of messages/files without an extra agreement, no LLM training on API data, no persistent copies via Data Access / Real-Time Search API
+    pii_level: high
+    scores: {value: 2, cost: 1, effort: 3, risk: 4}
+    verdict: later
+    verdict_reason: no workspace with outside members confirmed; whether archiving our own workspace counts as "bulk export" is a legal question for the owner
+    owner_action: name the workspace that receives outside messages and confirm the bulk-export reading of https://slack.com/terms-of-service/api
+    evidence:
+      - https://docs.slack.dev/apis/web-api/rate-limits
+      - https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps
+      - https://slack.com/terms-of-service/api
+    checked_at: '2026-11-12'
+  - id: notion
+    name: Notion
+    batch: 1
+    category: knowledge
+    popularity_rank: 8
+    method: api
+    api_docs_url: https://developers.notion.com/reference/intro
+    mcp_server: https://mcp.notion.com/mcp (official hosted; old open-source server unmaintained)
+    auth_type: internal integration token or OAuth 2.0
+    rate_limit: 180 req/min per connection (600 on Business/Enterprise); data source query about 3 req/s
+    cost: API on every plan incl. Free
+    entities: [pages, databases, blocks, comments, users]
+    bulk_or_webhook: no bulk export API; webhooks exist (details unverified)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: API terms page returned 404 (unverified)
+    pii_level: medium
+    scores: {value: 1, cost: 1, effort: 2, risk: 1}
+    verdict: skip
+    verdict_reason: Notion is a destination (copies of what our systems wrote), not a source, per data-sources.yaml; register only if outside people start adding data
+    owner_action: null
+    evidence:
+      - https://developers.notion.com/reference/request-limits
+      - https://developers.notion.com/guides/mcp/get-started-with-mcp
+    checked_at: '2026-11-12'
+  - id: github
+    name: GitHub
+    batch: 1
+    category: dev-tools
+    popularity_rank: 9
+    method: api
+    flow: github
+    api_docs_url: https://docs.github.com/en/rest
+    mcp_server: https://api.githubcopilot.com/mcp/ (official remote; github/github-mcp-server locally); wraps REST/GraphQL
+    auth_type: Actions GITHUB_TOKEN (public data); fine-grained PAT for private repositories
+    rate_limit: REST 5,000/h per user, GITHUB_TOKEN 1,000/h per repo; GraphQL 5,000 points/h
+    cost: free on every plan
+    entities: [repositories, events, issues, pull_requests, workflow_runs, releases, dependabot_alerts]
+    bulk_or_webhook: webhooks, Events API (90 days, 300 events), Notifications API; audit log streaming is Enterprise-only
+    coverage_pct: 40
+    current_status: partial
+    tos_notes: ToS has no caching limit; no spam use, no token sharing to raise limits; you own your content
+    pii_level: low
+    scores: {value: 4, cost: 1, effort: 1, risk: 1}
+    verdict: ingest-now
+    verdict_reason: >-
+      live 2026-11-12: workflow github-activity (docs/specs/github-activity.md) lands public repos + events in
+      Bronze domain=engineering daily; private repos, Actions runs and Dependabot alerts are the next 60 %
+    pipeline: {workflow: .github/workflows/github-activity.yml, heartbeat: github-activity, jobs_queue: github-activity, datasets: [github_repos, github_events]}
+    owner_action: >-
+      optional, for private repos: fine-grained PAT (read-only Metadata, Actions, Dependabot alerts on all repos) at
+      https://github.com/settings/personal-access-tokens/new -> Infisical /github GITHUB_ACTIVITY_PAT
+    evidence:
+      - https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
+      - https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api
+      - https://docs.github.com/en/site-policy/github-terms/github-terms-of-service
+      - https://github.com/github/github-mcp-server
+    checked_at: '2026-11-12'
+  - id: linear
+    name: Linear
+    batch: 1
+    category: dev-tools
+    popularity_rank: 10
+    method: api
+    api_docs_url: https://linear.app/developers
+    mcp_server: https://mcp.linear.app/mcp (official)
+    auth_type: personal API key or OAuth 2.0
+    rate_limit: API key 2,500 req/h and 3,000,000 complexity points/h
+    cost: plan requirement for API unverified
+    entities: [issues, comments, projects, cycles, teams, documents]
+    bulk_or_webhook: webhooks (admin only), no bulk export API found
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: API terms not read (unverified)
+    pii_level: medium
+    scores: {value: 1, cost: 1, effort: 2, risk: 1}
+    verdict: skip
+    verdict_reason: destination (Book Dev tickets our agents write), not a source, per data-sources.yaml; the tasks cell is the source of truth
+    owner_action: null
+    evidence:
+      - https://linear.app/developers/rate-limiting
+      - https://linear.app/developers/webhooks
+    checked_at: '2026-11-12'
+  - id: jira
+    name: Jira Cloud
+    batch: 1
+    category: dev-tools
+    popularity_rank: 11
+    method: api
+    api_docs_url: https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/
+    mcp_server: Atlassian Rovo remote MCP (official; https://www.atlassian.com/platform/remote-mcp-server)
+    auth_type: email + API token (personal) or OAuth 2.0 (3LO)
+    rate_limit: points quota from 2026-03-02 for apps (65,000 points/h global pool); burst 100 RPS GET per tenant
+    cost: REST on every edition (unverified)
+    entities: [issues, projects, comments, worklogs, sprints, changelogs]
+    bulk_or_webhook: webhooks (dynamic ones expire after 30 days), JQL pagination
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: developer terms page 404 (unverified)
+    pii_level: high
+    scores: {value: 1, cost: 1, effort: 2, risk: 2}
+    verdict: skip
+    verdict_reason: Atlassian is a destination here; no outside party files tickets in it
+    owner_action: null
+    evidence:
+      - https://developer.atlassian.com/cloud/jira/platform/rate-limiting/
+      - https://developer.atlassian.com/cloud/jira/platform/webhooks/
+    checked_at: '2026-11-12'
+  - id: linkedin
+    name: LinkedIn
+    batch: 1
+    category: social
+    popularity_rank: 12
+    method: manual-export
+    flow: linkedin
+    api_docs_url: https://learn.microsoft.com/en-us/linkedin/dma/member-data-portability/member-data-portability-member
+    mcp_server: none official; the popular community server drives a logged-in browser (scraping, against the User Agreement) - do not use
+    auth_type: OAuth 2.0; Member Data Portability API only for members in the EEA and Switzerland
+    rate_limit: per app in the developer portal (unverified)
+    cost: no fee; most products partner-only
+    entities: [own_profile, own_posts, comments, reactions, connections_export, messages_export]
+    bulk_or_webhook: '"Get a copy of your data" archive (Settings > Data privacy); no webhooks'
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: User Agreement 8.2 bans scrapers, bots and automation, circumventing access controls and copying data without consent
+    scraping_allowed: false
+    pii_level: high
+    scores: {value: 3, cost: 1, effort: 2, risk: 5}
+    verdict: blocked-legal
+    verdict_reason: no API for a Thailand-based member and scraping is forbidden; only the owner's manual data archive is allowed (job-capture keeps public postings)
+    owner_action: when the data is needed, request the archive at https://www.linkedin.com/mypreferences/d/download-my-data (manual; no automated capture)
+    evidence:
+      - https://learn.microsoft.com/en-us/linkedin/dma/member-data-portability/member-data-portability-member
+      - https://www.linkedin.com/legal/user-agreement
+    checked_at: '2026-11-12'
+  - id: x
+    name: X (Twitter)
+    batch: 1
+    category: social
+    popularity_rank: 13
+    method: api
+    flow: x-feed
+    api_docs_url: https://docs.x.com/x-api
+    mcp_server: https://api.x.com/mcp (official; ?read_only=true); same per-resource billing
+    auth_type: OAuth 2.0 PKCE or app Bearer token
+    rate_limit: e.g. search/recent 450 per 15 min (app), users/:id/tweets 10,000 per 15 min; cap 3M post reads/month
+    cost: pay-per-use only (post read $0.005, user read $0.010, owned reads $0.001)
+    entities: [posts, users, search, followers, likes, bookmarks, lists, dms_own]
+    bulk_or_webhook: billed webhooks, filtered stream, account archive download
+    coverage_pct: 60
+    current_status: partial
+    tos_notes: mirror deletions/privatisations within 24 h of a request; redistribute IDs only; DMs need consent
+    pii_level: medium
+    scores: {value: 4, cost: 3, effort: 2, risk: 3}
+    verdict: covered
+    verdict_reason: watchlist and searches land through x-lakehouse (Chief Data bots -> Supabase inbox -> R2 x-intel-lake); the owner's own account (x-account flow) stays open
+    owner_action: null
+    evidence:
+      - https://docs.x.com/x-api/getting-started/pricing
+      - https://docs.x.com/x-api/fundamentals/rate-limits
+      - https://docs.x.com/tools/mcp.md
+      - https://docs.x.com/developer-terms/agreement-and-policy
+    checked_at: '2026-11-12'
+  - id: meta
+    name: Meta (Facebook Pages, Instagram, Threads)
+    batch: 1
+    category: social
+    popularity_rank: 14
+    method: api
+    flow: facebook-page
+    api_docs_url: https://developers.facebook.com/docs/graph-api/
+    mcp_server: official Meta Ads MCP only (ads); nothing official for Pages/Instagram/Threads content
+    auth_type: OAuth 2.0 user/Page tokens; Threads API own OAuth (threads_basic); App Review beyond own dev data
+    rate_limit: Pages 4,800 x engaged users / 24 h; Instagram and Threads 4,800 x impressions / 24 h
+    cost: free
+    entities: [own_page_posts, comments, insights, own_ig_media, own_threads_posts]
+    bulk_or_webhook: webhooks for Pages, Instagram, Threads; "Download your information"
+    coverage_pct: 25
+    current_status: partial
+    tos_notes: Platform Terms 3.d.i delete data without a business need or on request; 3.a.iv no selling/buying; facebook.com robots.txt disallows all automated collection
+    scraping_allowed: false
+    pii_level: high
+    scores: {value: 4, cost: 1, effort: 3, risk: 4}
+    verdict: covered
+    verdict_reason: feed and group posts arrive through the share-to-Telegram meta intake (@meta_capture_bot -> R2 -> x-lakehouse, live 2026-11-11); Threads API v2 for own posts is in the meta-intake spec
+    owner_action: null
+    evidence:
+      - https://developers.facebook.com/docs/graph-api/overview/rate-limiting/
+      - https://developers.facebook.com/docs/threads/overview
+      - https://developers.facebook.com/terms/
+      - https://www.facebook.com/robots.txt
+    checked_at: '2026-11-12'
+  - id: youtube
+    name: YouTube (Data API v3 + Analytics)
+    batch: 1
+    category: social
+    popularity_rank: 15
+    method: api
+    flow: content-channels
+    api_docs_url: https://developers.google.com/youtube/v3
+    mcp_server: none official; community kirbah/mcp-youtube (Data API)
+    auth_type: API key (public data), OAuth 2.0 (own channel, Analytics)
+    rate_limit: Data API 10,000 units/day (search.list own bucket of 100/day)
+    cost: free within quota
+    entities: [channels, videos, playlists, comments, own_channel_analytics]
+    bulk_or_webhook: PubSubHubbub for new videos, Takeout
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: Developer Policies III.E.4 public/other data max 30 days; own-channel analytics may be kept if authorisation is re-checked every 30 days; III.E.6 no scraping
+    scraping_allowed: false
+    pii_level: medium
+    scores: {value: 2, cost: 1, effort: 2, risk: 3}
+    verdict: later
+    verdict_reason: only own-channel Analytics may be kept long term; worth it once the content channels publish regularly
+    owner_action: name the channel; OAuth client at https://console.cloud.google.com/apis/credentials -> Infisical /youtube
+    evidence:
+      - https://developers.google.com/youtube/v3/determine_quota_cost
+      - https://developers.google.com/youtube/terms/developer-policies
+      - https://developers.google.com/youtube/analytics/reference
+    checked_at: '2026-11-12'
+  - id: reddit
+    name: Reddit
+    batch: 1
+    category: social
+    popularity_rank: 16
+    method: api
+    api_docs_url: https://www.reddit.com/dev/api/
+    mcp_server: none official; avoid reddit-mcp-buddy (no-registration mode skips Reddit's approval)
+    auth_type: OAuth 2.0 app (approval under the Responsible Builder Policy; unauthenticated access blocked since 2026-05-30)
+    rate_limit: 100 req/min per OAuth client (secondary source)
+    cost: free for approved non-commercial use; commercial needs an agreement
+    entities: [subreddit_listings, posts, comments, own_account]
+    bulk_or_webhook: no webhooks; personal data request export
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: delete content its author deletes, no ML training without permission (secondary sources only; official pages blocked the fetch)
+    pii_level: medium
+    scores: {value: 3, cost: 2, effort: 3, risk: 4}
+    verdict: later
+    verdict_reason: useful for social listening, but approval and the non-commercial reading must come first; terms read from secondary sources only
+    owner_action: read https://redditinc.com/policies/data-api-terms and apply for an app at https://www.reddit.com/prefs/apps -> Infisical /reddit
+    evidence:
+      - https://www.activepieces.com/blog/reddit-api-access-in-2026-how-to-get-started.md
+    checked_at: '2026-11-12'
+  - id: google-analytics-search-console
+    name: Google Analytics 4 + Search Console
+    batch: 1
+    category: analytics
+    popularity_rank: 17
+    method: api
+    flow: seo-metrics
+    api_docs_url: https://developers.google.com/webmaster-tools/v1/api_reference_index
+    mcp_server: GA4 official googleanalytics/google-analytics-mcp (experimental, read-only); Search Console none official
+    auth_type: service account added as Viewer / Search Console user (or OAuth readonly scopes)
+    rate_limit: GA4 200,000 tokens/property/day; Search Analytics 1,200 QPM per site, 30,000,000 QPD per project
+    cost: free; GA4 BigQuery export free in sandbox limits
+    entities: [search_queries, pages, clicks, impressions, ctr, position, ga4_reports]
+    bulk_or_webhook: GSC bulk export to BigQuery; GA4 BigQuery export (1M events/day on standard)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: Google API Services User Data Policy; own-site data, low risk
+    pii_level: low
+    scores: {value: 4, cost: 1, effort: 2, risk: 1}
+    verdict: later
+    verdict_reason: top-5 next; daily Search Console snapshot per site feeds the pSEO hub decisions; needs a service account first
+    owner_action: >-
+      service account at https://console.cloud.google.com/iam-admin/serviceaccounts, add it as a user per property in
+      https://search.google.com/search-console/users -> key JSON in Infisical /google-search-console
+    evidence:
+      - https://developers.google.com/webmaster-tools/limits
+      - https://developers.google.com/analytics/devguides/reporting/data/v1/quotas
+      - https://developers.google.com/analytics/devguides/MCP
+    checked_at: '2026-11-12'
+  - id: posthog
+    name: PostHog (EU)
+    batch: 1
+    category: analytics
+    popularity_rank: 18
+    method: api
+    flow: product-analytics
+    api_docs_url: https://posthog.com/docs/api
+    mcp_server: https://mcp.posthog.com/mcp (official; HogQL, flags, error triage)
+    auth_type: personal API key (scoped)
+    rate_limit: query endpoint 2,400/h per key; analytics endpoints 240/min
+    cost: query API included; batch exports usage-priced (about 1M rows/month free, search-snippet only)
+    entities: [events, persons, sessions, insights, feature_flags, experiments, surveys]
+    bulk_or_webhook: batch export to S3-compatible storage incl. Cloudflare R2 (documented)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: own data; terms not read (unverified); IP discard already on (W4c)
+    pii_level: high
+    scores: {value: 4, cost: 2, effort: 1, risk: 2}
+    verdict: later
+    verdict_reason: top-5 next; a native batch export straight into R2 landing needs no code, only an owner OK on the row-based price
+    owner_action: >-
+      confirm the batch-export price at https://posthog.com/data-pipelines/pricing; then create an R2 token scoped to the
+      lake bucket at https://dash.cloudflare.com/?to=/:account/r2/api-tokens -> Infisical /posthog R2_EXPORT_*
+    evidence:
+      - https://posthog.com/docs/cdp/batch-exports
+      - https://posthog.com/docs/cdp/batch-exports/s3
+      - https://posthog.com/docs/model-context-protocol
+    checked_at: '2026-11-12'
+  - id: sentry
+    name: Sentry
+    batch: 1
+    category: dev-tools
+    popularity_rank: 19
+    method: api
+    flow: app-errors
+    api_docs_url: https://docs.sentry.io/api/
+    mcp_server: https://mcp.sentry.dev/mcp (official)
+    auth_type: internal integration or organization token (Bearer)
+    rate_limit: per caller and endpoint, not published; read X-Sentry-Rate-Limit-* headers
+    cost: REST on every plan (unverified)
+    entities: [projects, issues, events, releases, stats]
+    bulk_or_webhook: integration webhooks; no S3 export
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: Terms 2.3 no non-public APIs, 6(iii) suspension for regular limit overruns; customer keeps service data and may export it
+    pii_level: medium
+    scores: {value: 3, cost: 1, effort: 1, risk: 1}
+    verdict: later
+    verdict_reason: top-5 next; daily issue counts per project (no event bodies) for delivery metrics
+    owner_action: >-
+      organization token with org:read + project:read at https://sentry.io/settings/auth-tokens/ -> Infisical /sentry
+      SENTRY_STATS_TOKEN, then add it as the data-lake-pipelines secret SENTRY_STATS_TOKEN
+    evidence:
+      - https://docs.sentry.io/api/ratelimits/
+      - https://docs.sentry.io/api/auth/
+      - https://sentry.io/terms/
+    checked_at: '2026-11-12'
+  - id: line-oa
+    name: LINE Official Account (Messaging API)
+    batch: 1
+    category: communication
+    popularity_rank: 20
+    method: api
+    flow: line-messages
+    api_docs_url: https://developers.line.biz/en/reference/messaging-api/
+    mcp_server: line/line-bot-mcp-server (preview; profile, quota, followers only, no chat history)
+    auth_type: channel access token v2.1; webhook signature with channel secret
+    rate_limit: 2,000 req/s per channel; insight endpoints 60/h
+    cost: API on free OA; message quota by plan (TH Free 300/month)
+    entities: [webhook_messages, follow_events, profiles, follower_ids, insights]
+    bulk_or_webhook: webhook only; no API to read past messages, so capture must start before history is needed
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: LINE Developers Agreement / User Data Policy not read (unverified); user files are deleted after a while
+    pii_level: high
+    scores: {value: 4, cost: 1, effort: 3, risk: 3}
+    verdict: later
+    verdict_reason: customer chats in Thailand run on LINE, but no history API exists; build a webhook -> intake capture once the owner names the OA
+    owner_action: name the OA and add its Messaging API channel at https://developers.line.biz/console/ -> Infisical /line LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN
+    evidence:
+      - https://developers.line.biz/en/reference/messaging-api/
+      - https://developers.line.biz/en/docs/messaging-api/receiving-messages/
+      - https://github.com/line/line-bot-mcp-server
+    checked_at: '2026-11-12'
+next_batch:
+  number: 2
+  sources:
+    [cloudflare, vercel, railway, neon, supabase, google-play-console, app-store-connect, ahrefs, tiktok, shopee,
+     lazada, paypal, wise, binance-th, strava, telegram, discord, upwork, beehiiv-substack, cal-com-calendly]
