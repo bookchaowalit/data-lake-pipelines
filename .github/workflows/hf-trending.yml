@@ -1,0 +1,79 @@
+# Hugging Face trending models/datasets/spaces → Bronze on the R2 lake (spec: docs/specs/hf-trending.md).
+# Batch 3 ingest-now source of the source coverage registry (repository-catalog/registries/source-coverage.yaml).
+# One snapshot per UTC day; a same-day re-run with unchanged numbers writes nothing.
+#
+# Public repository: GitHub-hosted runner, and the log is public, so only counts and object keys
+# are printed. Failures and missed runs reach Telegram through the uptime Worker heartbeat
+# `hf-trending`.
+name: Hugging Face trending (Bronze)
+
+on:
+  # Scheduled by the jobs queue (platform-jobs-worker job `hf-trending`, cron "40 3 * * *" UTC), ADR-0008.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hf-trending
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      exit_code: ${{ steps.capture.outputs.exit_code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install runtime from uv.lock
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.13.1
+          uv sync --frozen --no-dev
+
+      - name: Capture into Bronze
+        id: capture
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.JOB_DATA_R2_SECRET_ACCESS_KEY }}
+          DATA_LAKE_S3_ENDPOINT: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_ENDPOINT_URL: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+          DATA_LAKE_CLOUD_WRITE_ENABLED: "true"
+          SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
+        run: |
+          set +e
+          .venv/bin/python infra/scripts/data_lake/hf_trending.py --require-cloud > "$RUNNER_TEMP/result.json" 2> "$RUNNER_TEMP/stderr.log"
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          # Status, counts and manifest keys only (public log).
+          jq '{status, error, snapshot_date, datasets}' "$RUNNER_TEMP/result.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $code
+
+  heartbeat:
+    needs: capture
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Heartbeat
+        env:
+          HEARTBEAT_TOKEN: ${{ secrets.HEARTBEAT_TOKEN }}
+          CODE: ${{ needs.capture.outputs.exit_code }}
+        run: |
+          if [ "$CODE" = "0" ]; then
+            body='{"ok":true,"failed":[]}'
+          else
+            body='{"ok":false,"failed":["hf-trending"]}'
+          fi
+          curl -fsS -X POST https://monitor.bookchaowalit.com/heartbeat/hf-trending \
+            -H "Authorization: Bearer $HEARTBEAT_TOKEN" -H "Content-Type: application/json" -d "$body"

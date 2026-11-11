@@ -37,9 +37,11 @@ class RuleTests(unittest.TestCase):
             report = base / meta["report"]
             report.parent.mkdir(parents=True, exist_ok=True)
             report.write_text("report", encoding="utf-8")
-        workflow = base / ".github" / "workflows" / "github-activity.yml"
-        workflow.parent.mkdir(parents=True)
-        workflow.write_text("name: x", encoding="utf-8")
+        for row in self.data["sources"]:
+            workflow = (row.get("pipeline") or {}).get("workflow")
+            if workflow:
+                (base / workflow).parent.mkdir(parents=True, exist_ok=True)
+                (base / workflow).write_text("name: x", encoding="utf-8")
 
     def tearDown(self):
         self.tmp.cleanup()
