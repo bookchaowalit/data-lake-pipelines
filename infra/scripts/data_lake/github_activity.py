@@ -60,9 +60,12 @@ def http_fetch(token: str | None) -> Fetch:
         headers["Authorization"] = f"Bearer {token}"
 
     def fetch(url: str) -> tuple[Any, str]:
-        request = urllib.request.Request(url, headers=headers)
+        # Only the fixed https API host: no file:// or other scheme can reach urlopen.
+        if not url.startswith(API + "/"):
+            raise GitHubError("URL outside the GitHub API host")
+        request = urllib.request.Request(url, headers=headers)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:  # noqa: S310 (fixed https host)
+            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:  # noqa: S310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
                 body = json.loads(response.read().decode("utf-8"))
                 return body, response.headers.get("Link", "") or ""
         except urllib.error.HTTPError as exc:

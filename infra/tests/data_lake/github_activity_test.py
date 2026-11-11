@@ -21,6 +21,7 @@ from data_lake.github_activity import (  # noqa: E402
     _next_link,
     capture,
     collect,
+    http_fetch,
     main,
 )
 
@@ -93,6 +94,12 @@ class PagingTests(unittest.TestCase):
         fake = FakeGitHub(pages)
         collect(fake, "o")
         self.assertEqual(sum("/events/public" in c for c in fake.calls), MAX_EVENT_PAGES)
+
+    def test_http_fetch_refuses_other_hosts_and_schemes(self):
+        fetch = http_fetch(None)
+        for url in ("file:///etc/passwd", "https://evil.example/users"):
+            with self.assertRaises(GitHubError):
+                fetch(url)
 
     def test_never_follows_off_host_links(self):
         self.assertIsNone(_next_link('<https://evil.example/x>; rel="next"'))
