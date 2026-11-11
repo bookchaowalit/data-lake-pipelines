@@ -179,8 +179,11 @@ async function handleCapture(env: Env, msg: TelegramMessage, hash: string): Prom
   const rec = { v: 1, kind: 'capture', capture_id: id, message_id: msg.message_id, chat_hash: hash, date: msg.date,
     media_group_id: msg.media_group_id ?? null, text, urls: links, image_keys: imageKeys };
   const fresh = await putNew(env, landingKey(env, `landing/meta_capture/date=${day}/${id}/${msg.message_id}.json`), JSON.stringify(rec), 'application/json');
-  // One reply per capture: an album's other photos come without a caption.
-  if (fresh && (!msg.media_group_id || msg.caption)) {
+  // One reply per capture: an album arrives as one update per photo, captioned or not, so the first
+  // update to claim the capture's ack marker replies (write-once, like everything else here).
+  const ack = fresh && (!msg.media_group_id
+    || await putNew(env, landingKey(env, `landing/meta_capture/date=${day}/${id}/ack`), '', 'text/plain'));
+  if (ack) {
     const d = describe(text, links);
     const lost = fileId && !imageKeys.length ? '\n(โหลดรูปไม่ได้ ส่งใหม่ได้)' : '';
     const author = d.authorIgnored ? '\n(ไม่เก็บชื่อผู้โพสต์ในกลุ่ม)' : '';
@@ -195,6 +198,13 @@ export default {
     if (request.method === 'GET' && url.pathname === '/health') return Response.json({ ok: true });
     if (request.method !== 'POST' || url.pathname !== '/telegram') return new Response('not found', { status: 404 });
     // Wrong secret or chat: 200 with nothing written and no reply, so the bot gives nothing away.
+    // An unset or short secret refuses everything (never fail open on a missing setting).
+    const secret = env.META_CAPTURE_WEBHOOK_SECRET ?? '';
+    const header = request.headers.get('x-telegram-bot-api-secret-token');
+    if (secret.length < 24 || header === null) {
+      log(env, 'refused', { reason: secret.length < 24 ? 'unconfigured' : 'secret' });
+      return new Response('', { status: 200 });
+    }
     if (!safeEqual(request.headers.get('x-telegram-bot-api-secret-token') ?? '', env.META_CAPTURE_WEBHOOK_SECRET)) {
       log(env, 'refused', { reason: 'secret' });
       return new Response('', { status: 200 });

@@ -72,11 +72,20 @@ def _issues(events: list[dict[str, object]]) -> list[str]:
     out: list[str] = []
     for e in events:
         ev = e.get("event")
-        if ev not in ("digest", "weekly", "gold", "bi"):
+        if ev not in ("meta", "digest", "weekly", "gold", "bi"):
             continue
         if e.get("status") == "error":
             out.append(f"{ev}: error {str(e.get('error', '')).split(':', 1)[0][:60]}")
             continue
+        if ev == "meta":  # step-level errors inside an ok run (counts and exception types only)
+            for part in ("ocr", "labelling"):
+                if str(e.get(part, "")).startswith("error"):
+                    out.append(f"meta {part}: {str(e.get(part))[:60]}")
+            if e.get("labelling") == "gateway_error":
+                out.append("meta labelling: gateway_error")
+            ret = e.get("retention")
+            if isinstance(ret, dict) and ret.get("stale_landing"):
+                out.append("meta retention: stale landing left")
         if ev == "digest":
             for r in e.get("reports") or []:
                 if not isinstance(r, dict):

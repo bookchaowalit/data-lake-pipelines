@@ -18,7 +18,7 @@ let bucket: FakeBucket;
 let env: Env;
 let sent: { method: string; body: any }[];
 let logs: string[];
-const SECRET = 'hook-secret';
+const SECRET = 'hook-secret-0123456789abcdef';
 const CHAT = 4242;
 const DATE = Date.UTC(2026, 10, 12, 2, 0) / 1000; // 09:00 ICT 2026-11-12
 
@@ -98,6 +98,28 @@ describe('webhook', () => {
     expect(ids.size).toBe(1);
     expect([...ids][0]).toMatch(/-g77$/);
     expect(replies()).toHaveLength(1);
+  });
+
+  it('an album without a caption still gets exactly one reply', async () => {
+    await post(msg({ message_id: 50, media_group_id: '99', photo: [{ file_id: 'a' }] }));
+    await post(msg({ message_id: 51, media_group_id: '99', photo: [{ file_id: 'b' }] }), SECRET, 2);
+    await post(msg({ message_id: 51, media_group_id: '99', photo: [{ file_id: 'b' }] }), SECRET, 2); // resent
+    expect(replies()).toEqual([expect.stringMatching(/^เก็บแล้ว · unknown\/unknown · tg-[0-9a-f]{8}-g99$/)]);
+  });
+
+  it('an unset or short secret refuses everything, even a request without the header', async () => {
+    for (const configured of ['', 'short']) {
+      env.META_CAPTURE_WEBHOOK_SECRET = configured;
+      const bare = await worker.fetch(new Request('https://w.test/telegram', { method: 'POST',
+        body: JSON.stringify({ update_id: 1, message: msg({ text: 'x' }) }) }), env);
+      expect(bare.status).toBe(200);
+      expect((await post(msg({ text: 'x' }), configured)).status).toBe(200);
+    }
+    env.META_CAPTURE_WEBHOOK_SECRET = SECRET;
+    await worker.fetch(new Request('https://w.test/telegram', { method: 'POST',
+      body: JSON.stringify({ update_id: 1, message: msg({ text: 'x' }) }) }), env); // no header
+    expect(keys()).toEqual([]);
+    expect(sent).toEqual([]);
   });
 
   it('M2 a wrong secret or another chat writes nothing and gets no reply', async () => {

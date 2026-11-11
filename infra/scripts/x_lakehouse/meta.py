@@ -76,7 +76,7 @@ def normalize_url(url: str) -> str:
             return normalize_url(unquote(target))
     if host not in HOSTS:
         return urlunsplit((parts.scheme.lower() or "https", parts.netloc.lower(), parts.path, parts.query, ""))
-    query = urlencode([(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k in KEEP_PARAMS])
+    query = urlencode(sorted((k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k in KEEP_PARAMS))
     path = parts.path.rstrip("/") or "/"
     return urlunsplit(("https", host, path, query, ""))
 
@@ -210,23 +210,25 @@ def _parts(store: Any, prefix: str, sub: str) -> list[dict[str, Any]]:
     return sorted((p for p in out if p), key=lambda p: (p["captured_at"], p["message_id"]))
 
 
-def land(store: Any, prefix: str, *, deleted: set[str], write: bool = True) -> list[dict[str, Any]]:
-    """New landing parts -> raw Parquet (one file each). Returns the parts landed now. A part whose
-    capture was deleted is refused and its landing files removed."""
+def land(store: Any, prefix: str, *, deleted: set[str], curated: set[str], write: bool = True) -> list[dict[str, Any]]:
+    """Landing parts not yet in curated (``curated`` = raw keys recorded in ``meta_parts``). Writes the raw
+    file of each when it is missing. A raw file alone does not mean done: a crash between the raw write and
+    the curated commit is picked up again from the landing part. A part whose capture was deleted is
+    refused and its landing files removed."""
     have = set(store.list(key(prefix, "raw/meta_capture")))
-    new = []
+    out = []
     for part in _parts(store, prefix, "meta_capture"):
         if part["capture_id"] in deleted:
             if write:
                 _delete(store, [part["landing_key"], *part["image_keys"]])
             continue
         rk = _raw_key(prefix, part)
-        if rk in have:
+        if rk in curated:
             continue
-        if write:
+        if write and rk not in have:
             store.put_new(rk, _parquet(part))
-        new.append(part)
-    return new
+        out.append(part | {"raw_key": rk})
+    return out
 
 
 # -------------------------------------------------------------------------------------- curated
@@ -266,6 +268,12 @@ create table if not exists {S}.meta_posts (
     updated_at timestamptz not null default now()
 );
 create index if not exists meta_posts_captures_idx on {S}.meta_posts using gin (capture_ids);
+create table if not exists {S}.meta_parts (
+    raw_key text primary key,
+    capture_id text not null,
+    captured_at timestamptz not null,
+    curated_at timestamptz not null default now()
+);
 create table if not exists {S}.meta_deleted (
     capture_id text primary key,
     deleted_at timestamptz not null default now()
@@ -278,10 +286,10 @@ select post_key, last_captured_at, platform, surface, group_label, post_url, tex
  order by (route = 'alert_digest') desc, last_captured_at desc;
 do $$ begin
   if exists (select 1 from pg_roles where rolname = 'anon') then
-    revoke all on {S}.meta_posts, {S}.meta_deleted, {S}.mart_meta_priority from anon;
+    revoke all on {S}.meta_posts, {S}.meta_parts, {S}.meta_deleted, {S}.mart_meta_priority from anon;
   end if;
   if exists (select 1 from pg_roles where rolname = 'authenticated') then
-    revoke all on {S}.meta_posts, {S}.meta_deleted, {S}.mart_meta_priority from authenticated;
+    revoke all on {S}.meta_posts, {S}.meta_parts, {S}.meta_deleted, {S}.mart_meta_priority from authenticated;
   end if;
 end $$;
 """
@@ -354,13 +362,25 @@ def upsert(conn: Any, parts: list[dict[str, Any]]) -> int:
                    "author_name": None if surface == "group" else (r["author_name"] or cap["author_name"]),
                    "image_keys": _union(r["image_keys"], cap["image_keys"]), "tags": _union(r["tags"], cap["tags"]),
                    "owner_note": " / ".join(dict.fromkeys(x for x in (r["owner_note"], cap["owner_note"]) if x)) or None}
+            new_images = bool(set(cap["image_keys"]) - set(r["image_keys"]))
+            screened = ("group_label", "post_url", "author_name", "tags", "owner_note")
             if text_changed:
-                upd |= {"text": cap["text"], "text_source": "pasted", "content_label": None, "route": None,
-                        "withheld": False, "label_tries": 0}
+                upd |= {"text": cap["text"], "text_source": "pasted"}
+            elif new_images and r["text_source"] != "pasted":
+                upd |= {"text": "", "text_source": "none", "ocr_tries": 0}  # OCR again over every image
+            if text_changed or "text_source" in upd or any(upd[k] != r[k] for k in screened):
+                # Anything the screen reads changed: screen and label again (a new #author or note may
+                # name a client).
+                upd |= {"content_label": None, "route": None, "domain": None, "topic": None, "withheld": False,
+                        "label_tries": 0}
             with conn.cursor() as c:
                 c.execute(f"update {S}.meta_posts set {', '.join(f'{k} = %s' for k in upd)}, updated_at = now() "
                           f"where post_key = %s", [*upd.values(), r["post_key"]])
         written += 1
+    with conn.cursor() as c:  # checkpoint, same transaction as the posts
+        for p in parts:
+            c.execute(f"insert into {S}.meta_parts (raw_key, capture_id, captured_at) values (%s, %s, %s) "
+                      f"on conflict do nothing", (p["raw_key"], p["capture_id"], p["captured_at"]))
     conn.commit()
     return written
 
@@ -448,13 +468,12 @@ def _domains(conn: Any) -> list[str]:
 
 def ask_labels(http: httpx.Client, token: str, route: str, posts: Sequence[dict[str, Any]],
                domains: Sequence[str]) -> list[dict[str, Any]]:
-    user = json.dumps([{"i": i, "platform": p["platform"], "surface": p["surface"], "text": p["text"][:1500]}
-                       for i, p in enumerate(posts)], ensure_ascii=False)
-    out = 2500
-    system = SYSTEM + (" Domains: " + ", ".join(domains) if domains else "")
+    user = json.dumps([_post_json(i, p) for i, p in enumerate(posts)], ensure_ascii=False)
+    out = MAX_OUTPUT_TOKENS
+    system = _system(domains)
     body = {"route": route, "prompt_version": PROMPT_VERSION, "profile": "fast", "privacy_class": "internal",
             "response_format": {"type": "json_object"}, "reasoning_effort": "low", "max_output_tokens": out,
-            "token_budget": min(24576, len(system.encode()) + len(user.encode()) + out + 2048),
+            "token_budget": min(MAX_TOKEN_BUDGET, len(system.encode()) + len(user.encode()) + out + 2048),
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     try:
         r = http.post(f"{GATEWAY_URL}/api/ai/generate", json=body, timeout=180,
@@ -471,6 +490,38 @@ def ask_labels(http: httpx.Client, token: str, route: str, posts: Sequence[dict[
         raise DigestError("gateway answer is not the expected JSON") from None
     by_i = {it.get("i"): it for it in items if isinstance(it, dict)}
     return [by_i.get(i, {}) for i in range(len(posts))]
+
+
+MAX_TOKEN_BUDGET = 24576
+MAX_OUTPUT_TOKENS = 2500
+POST_CHARS = 1200  # Thai is 3 bytes a character in UTF-8: one post stays well under the budget
+
+
+def _system(domains: Sequence[str]) -> str:
+    return SYSTEM + (" Domains: " + ", ".join(domains) if domains else "")
+
+
+def _post_json(i: int, p: dict[str, Any]) -> dict[str, Any]:
+    return {"i": i, "platform": p["platform"], "surface": p["surface"], "text": p["text"][:POST_CHARS]}
+
+
+def batches(posts: Sequence[dict[str, Any]], domains: Sequence[str]) -> list[list[dict[str, Any]]]:
+    """Split posts so each request's input bytes + output stay inside the gateway's token_budget cap
+    (it compares UTF-8 bytes of the messages, plus overhead, with token_budget)."""
+    room = MAX_TOKEN_BUDGET - MAX_OUTPUT_TOKENS - 2048 - len(_system(domains).encode()) - 64
+    out: list[list[dict[str, Any]]] = []
+    cur: list[dict[str, Any]] = []
+    for p in posts:
+        trial = cur + [p]
+        size = len(json.dumps([_post_json(i, x) for i, x in enumerate(trial)], ensure_ascii=False).encode())
+        if cur and (size > room or len(trial) > BATCH):
+            out.append(cur)
+            cur = [p]
+        else:
+            cur = trial
+    if cur:
+        out.append(cur)
+    return out
 
 
 def label(conn: Any, cfg: Config, http: httpx.Client) -> dict[str, Any]:
@@ -498,8 +549,7 @@ def label(conn: Any, cfg: Config, http: httpx.Client) -> dict[str, Any]:
     route = cfg.get("X_META_ROUTE", cfg.get("X_WEEKLY_ROUTE", "x-digest"))
     domains = [d for d in _domains(conn) if not any_term(d, denylist)]
     labelled, errors = 0, 0
-    for i in range(0, len(todo), BATCH):
-        batch = todo[i:i + BATCH]
+    for batch in batches(todo, domains):
         try:
             answers = ask_labels(http, token, route, batch, domains)
         except DigestError:
@@ -544,6 +594,7 @@ def apply_deletes(conn: Any, store: Any, prefix: str) -> int:
         _delete(store, doomed)
         with conn.cursor() as c:
             c.execute(f"delete from {S}.meta_posts where %s = any(capture_ids)", (cid,))
+            c.execute(f"delete from {S}.meta_parts where capture_id = any(%s)", (list(ids),))
             for i in ids:
                 c.execute(f"insert into {S}.meta_deleted (capture_id) values (%s) on conflict do nothing", (i,))
         conn.commit()
@@ -564,6 +615,7 @@ def retention(conn: Any, store: Any, prefix: str, now: datetime) -> dict[str, in
     with conn.cursor() as c:
         c.execute(f"delete from {S}.meta_posts where last_captured_at < %s", (now - timedelta(days=KEEP_DAYS),))
         curated_deleted = c.rowcount
+        c.execute(f"delete from {S}.meta_parts where captured_at < %s", (now - timedelta(days=KEEP_DAYS),))
     conn.commit()
     stale = len(old(store.list(key(prefix, "landing")), land_cut))
     return {"landing_deleted": landing_deleted, "raw_deleted": raw_deleted, "curated_deleted": curated_deleted,
@@ -571,6 +623,14 @@ def retention(conn: Any, store: Any, prefix: str, now: datetime) -> dict[str, in
 
 
 # --------------------------------------------------------------------------------------------- run
+
+def _curated(conn: Any) -> set[str]:
+    with conn.cursor() as c:
+        c.execute(f"select raw_key from {S}.meta_parts")
+        out = {r[0] for r in c.fetchall()}
+    conn.commit()
+    return out
+
 
 def run(conn: Any, cfg: Config, *, mode: str, store: Any, prefix: str, now: datetime | None = None,
         ocr: Callable[[list[bytes]], str] | None = None, http: httpx.Client | None = None) -> dict[str, Any]:
@@ -586,7 +646,7 @@ def run(conn: Any, cfg: Config, *, mode: str, store: Any, prefix: str, now: date
         deleted = {r[0] for r in c.fetchall()}
     conn.commit()
     if mode == "dry":
-        return {"mode": "dry", "pending": len(land(store, prefix, deleted=deleted, write=False)),
+        return {"mode": "dry", "pending": len(land(store, prefix, deleted=deleted, curated=_curated(conn), write=False)),
                 "delete_requests": len([p for p in _parts(store, prefix, "meta_capture_del")
                                         if p["capture_id"] not in deleted])}
     rep: dict[str, Any] = {"mode": "write", "deleted": apply_deletes(conn, store, prefix)}
@@ -594,14 +654,22 @@ def run(conn: Any, cfg: Config, *, mode: str, store: Any, prefix: str, now: date
         c.execute(f"select capture_id from {S}.meta_deleted")
         deleted = {r[0] for r in c.fetchall()}
     conn.commit()
-    parts = land(store, prefix, deleted=deleted)
+    parts = land(store, prefix, deleted=deleted, curated=_curated(conn))
     rep["landed"] = len(parts)
     rep["posts_written"] = upsert(conn, parts) if parts else 0
-    rep |= run_ocr(conn, store, ocr or tesseract)
+    # OCR and labelling may fail (a missing setting, a bad image); deletes and retention must still run.
+    try:
+        rep |= run_ocr(conn, store, ocr or tesseract)
+    except Exception as exc:  # noqa: BLE001 - counted, never fatal to the cleanup below
+        conn.rollback()
+        rep["ocr"] = f"error {type(exc).__name__}"
     own = http is None
     client = http if http is not None else httpx.Client()
     try:
         rep |= label(conn, cfg, client)
+    except Exception as exc:  # noqa: BLE001
+        conn.rollback()
+        rep["labelling"] = f"error {type(exc).__name__}"
     finally:
         if own:
             client.close()
@@ -618,9 +686,11 @@ def digest_items(conn: Any, start: datetime, end: datetime, denylist: Sequence[s
         if c.fetchone()[0] is None:
             conn.commit()
             return []
-        c.execute(f"select platform, surface, group_label, text, post_url, route, to_jsonb(m) "
-                  f"from {S}.mart_meta_priority m where last_captured_at >= %s and last_captured_at < %s limit 50",
-                  (start, end))
+        # The screen reads the full meta_posts row (author, note, tags, ...), not only the mart's columns.
+        c.execute(f"select m.platform, m.surface, m.group_label, m.text, m.post_url, m.route, to_jsonb(p) "
+                  f"from {S}.mart_meta_priority m join {S}.meta_posts p using (post_key) "
+                  f"where m.last_captured_at >= %s and m.last_captured_at < %s "
+                  f"order by (m.route = 'alert_digest') desc, m.last_captured_at desc limit 50", (start, end))
         rows = c.fetchall()
     conn.commit()
     out = []

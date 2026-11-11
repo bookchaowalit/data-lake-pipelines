@@ -42,6 +42,16 @@ class IssueTests(unittest.TestCase):
             "digest: error OperationalError",  # the type only, never the library text
         ])
 
+    def test_meta_step_problems_are_reported(self):
+        events = [{"event": "meta", "mode": "write", "status": "error", "error": "OperationalError"},
+                  {"event": "meta", "mode": "write", "labelling": "error ConfigError", "ocr_done": 0,
+                   "retention": {"stale_landing": 2}},
+                  {"event": "meta", "mode": "write", "labelling": "gateway_error", "retention": {"stale_landing": 0}},
+                  {"event": "meta", "mode": "write", "labelling": "ok", "retention": {"stale_landing": 0}}]
+        self.assertEqual(scheduled._issues(events), ["meta: error OperationalError", "meta labelling: error ConfigError",
+                                                     "meta retention: stale landing left",
+                                                     "meta labelling: gateway_error"])
+
     def test_a_clean_run_has_no_issues(self):
         events = [{"event": "digest", "reports": [{"digest_id": "m", "status": "sent", "ai": True}]},
                   {"event": "weekly", "week": "W", "analyses": "already_written", "triage": "already_written"},

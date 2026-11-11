@@ -107,6 +107,14 @@ tags and notes are joined). Re-running the cron on the same landing files writes
 - The Worker accepts only requests with Telegram's `X-Telegram-Bot-Api-Secret-Token` and messages from the
   allowlisted owner chat id (`META_CAPTURE_CHAT_IDS`). Anything else gets `200` with no reply and no write.
 - Worker and cron logs carry counts, ids and exception types only, never text, URLs or images.
+- The Worker refuses every update while `META_CAPTURE_WEBHOOK_SECRET` is unset or shorter than 24 characters,
+  and every request without the header (never fails open).
+- A raw file alone does not count as done: `x_intel.meta_parts` records each part in the same transaction as
+  its post, so a crash between the raw write and the curated commit is picked up from the landing part again.
+- A change to any screened field (`#author`, `#note`, tags, group, link) or a new album photo on OCR text
+  clears the label, so the post is screened and labelled again; the digest also screens the full
+  `meta_posts` row, not only the columns it shows.
+- OCR or labelling failures never stop `#del` or retention; they show in the cron's hook alert.
 - **Images never leave R2 and the cron container.** OCR runs locally (Tesseract with `tha+eng` in the
   x-lakehouse image), so the denylist can be checked before anything is sent out. The gateway only ever gets
   text, and only after the screen. Checked 2026-11-12 on a rendered Thai sample: Thai and English words come

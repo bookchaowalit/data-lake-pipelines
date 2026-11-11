@@ -41,10 +41,14 @@ class UrlTests(unittest.TestCase):
         self.assertEqual(n("https://m.facebook.com/groups/123/posts/456/?mibextid=abc&rdid=x&__cft__[0]=y#z"),
                          "https://facebook.com/groups/123/posts/456")
         self.assertEqual(n("https://web.facebook.com/permalink.php?story_fbid=9&id=7&fbclid=q"),
-                         "https://facebook.com/permalink.php?story_fbid=9&id=7")
+                         "https://facebook.com/permalink.php?id=7&story_fbid=9")
         self.assertEqual(n("https://www.instagram.com/p/AbC/?igsh=1&utm_source=ig"), "https://instagram.com/p/AbC")
         self.assertEqual(n("https://instagr.am/p/AbC/"), "https://instagram.com/p/AbC")
-        self.assertEqual(n("https://fb.com/story.php?story_fbid=1&id=2"), "https://facebook.com/story.php?story_fbid=1&id=2")
+        self.assertEqual(n("https://fb.com/story.php?story_fbid=1&id=2"), "https://facebook.com/story.php?id=2&story_fbid=1")
+
+    def test_identifying_params_are_sorted(self):
+        self.assertEqual(meta.normalize_url("https://facebook.com/permalink.php?story_fbid=9&id=7"),
+                         meta.normalize_url("https://facebook.com/permalink.php?id=7&story_fbid=9"))
 
     def test_m3_threads_net_and_threads_com_are_one_post(self):
         a = meta.normalize_url("https://www.threads.net/@someone/post/XyZ?xmt=AQ&igshid=1")
@@ -155,13 +159,24 @@ class LandingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = LocalStore(Path(tmp))
             landing(store, "", msg_id=1, text="a https://facebook.com/x/posts/1")
-            first = meta.land(store, "", deleted=set())
-            again = meta.land(store, "", deleted=set())
-            self.assertEqual(len(first), 1)
-            self.assertEqual(again, [])  # M6
+            first = meta.land(store, "", deleted=set(), curated=set())
             raw = [k for k in store.list("meta/raw/meta_capture")]
             self.assertEqual(len(raw), 1)
             self.assertIn("date=2026-11-12", raw[0])
+            # A raw file alone is not done: until curated records it, the part comes back (raw not rewritten).
+            again = meta.land(store, "", deleted=set(), curated=set())
+            self.assertEqual([p["raw_key"] for p in again], raw)
+            self.assertEqual(meta.land(store, "", deleted=set(), curated={first[0]["raw_key"]}), [])  # M6
+
+    def test_batches_fit_the_gateway_budget(self):
+        posts = [{"platform": "facebook", "surface": "group", "text": "ก" * 5000} for _ in range(30)]
+        out = meta.batches(posts, ["agri", "energy"])
+        self.assertEqual(sum(len(b) for b in out), 30)
+        room = meta.MAX_TOKEN_BUDGET - meta.MAX_OUTPUT_TOKENS - 2048 - len(meta._system(["agri", "energy"]).encode())
+        for b in out:
+            size = len(json.dumps([meta._post_json(i, p) for i, p in enumerate(b)], ensure_ascii=False).encode())
+            self.assertLessEqual(size, room)
+            self.assertLessEqual(len(b), meta.BATCH)
 
 
 # ------------------------------------------------------------------------------------------ Postgres
@@ -266,6 +281,69 @@ class PgTests(unittest.TestCase):
         self.assertIsNone(self.rows()[0]["content_label"])
         self.run_meta()
         self.assertEqual(self.rows()[0]["content_label"], "fact_report")
+
+    def test_a_crash_after_the_raw_write_is_recovered(self):
+        landing(self.store, "", msg_id=21, text="after crash")
+        meta.ensure_tables(self.conn)
+        meta.land(self.store, "", deleted=set(), curated=set())  # raw written, then the process died
+        self.assertEqual(self.rows(), [])
+        rep, _, _ = self.run_meta()
+        self.assertEqual(rep["landed"], 1)
+        self.assertEqual([r["text"] for r in self.rows()], ["after crash"])
+        self.assertEqual(len(self.store.list("meta/raw")), 1)
+
+    def test_a_new_author_on_a_labelled_post_is_screened_again(self):
+        url = "https://facebook.com/somepage/posts/5"
+        landing(self.store, "", msg_id=22, text="ข่าว #page", urls=[url])
+        self.run_meta()
+        self.assertEqual(self.rows()[0]["route"], "alert_digest")
+        landing(self.store, "", msg_id=23, text="ข่าว #page #author SecretClientCo", urls=[url],
+                when=NOW + timedelta(minutes=1))
+        _, gw, _ = self.run_meta()
+        [r] = self.rows()
+        self.assertTrue(r["withheld"])
+        self.assertEqual(gw.bodies, [])
+        self.assertEqual(meta.digest_items(self.conn, NOW - timedelta(hours=1), NOW + timedelta(hours=1),
+                                           ("secretclientco",)), [])
+
+    def test_digest_screens_the_full_row(self):
+        landing(self.store, "", msg_id=24, text="ข่าว #page #author SecretClientCo",
+                urls=["https://facebook.com/p/posts/1"])
+        self.run_meta(c=cfg(CLIENT_DENYLIST="อื่น"))  # labelled under an older list
+        self.assertEqual(self.rows()[0]["route"], "alert_digest")
+        self.assertEqual(meta.digest_items(self.conn, NOW - timedelta(hours=1), NOW + timedelta(hours=1),
+                                           ("secretclientco",)), [])
+
+    def test_an_album_photo_arriving_later_is_read_again(self):
+        landing(self.store, "", msg_id=25, group="88", images=[b"one"])
+        self.run_meta(ocr=FakeOcr("ภาพแรก"))
+        self.assertEqual(self.rows()[0]["text"], "ภาพแรก")
+        landing(self.store, "", msg_id=26, group="88", images=[b"two"], when=NOW + timedelta(minutes=1))
+        seen = []
+
+        def ocr(images):
+            seen.append(len(images))
+            return "ภาพแรก ภาพสอง"
+
+        _, gw, _ = self.run_meta(ocr=ocr)
+        [r] = self.rows()
+        self.assertEqual(seen, [2])
+        self.assertEqual((r["text"], r["text_source"], r["content_label"]), ("ภาพแรก ภาพสอง", "ocr", "fact_report"))
+
+    def test_pasted_text_survives_a_later_album_photo(self):
+        landing(self.store, "", msg_id=27, group="89", text="คำบรรยาย", images=[b"one"])
+        self.run_meta()
+        landing(self.store, "", msg_id=28, group="89", images=[b"two"], when=NOW + timedelta(minutes=1))
+        ocr = FakeOcr("x")
+        self.run_meta(ocr=ocr)
+        self.assertEqual((self.rows()[0]["text"], ocr.calls), ("คำบรรยาย", 0))
+
+    def test_retention_runs_when_labelling_fails(self):
+        landing(self.store, "", msg_id=29, text="old", when=NOW - timedelta(days=31))
+        landing(self.store, "", msg_id=30, text="needs a label")
+        rep, _, _ = self.run_meta(c=Config({"CLIENT_DENYLIST": "x"}))  # no AI_GATEWAY_TOKEN
+        self.assertEqual(rep["labelling"], "error ConfigError")
+        self.assertFalse([k for k in self.store.list("meta/landing") if "tg-abcd1234-29" in k])
 
     def test_m6_second_run_writes_nothing(self):
         landing(self.store, "", msg_id=8, text="x")
