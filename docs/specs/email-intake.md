@@ -48,11 +48,13 @@ Gmail API (gmail.readonly, OAuth refresh token of the owner)
           bodies:   s3://mail-lake/bronze/domain=communications/dataset=email_bodies/schema_version=1/ingest_date=D/source=gmail/part-*.parquet
           s3://mail-lake/bronze/_manifests/source=gmail/batch_id=<id>.json
        state: s3://mail-lake/state/gmail/<account_hash8>.json  (historyId, last run, counts)
+  -> body re-check: every stored body against the current body rule (see Guards)
+  -> retention step mail_retention (see Guards), BEFORE anything reads Bronze
   -> dbt (same container, DuckDB)  stg_emails -> int_email_routes -> email_activity_daily
+       (stg_emails also drops any body whose ingest_date is older than 90 days, as a second guard)
   -> route step (text only, after the denylist screen) via ai-gateway subject `mail-intake`
        -> review queue Gold: s3://mail-lake/gold/mail_routes/date=D.parquet
        -> Telegram summary to the owner (counts + up to 5 items, no bodies)
-  -> retention step mail_retention (see Guards)
 ```
 
 A separate bucket `mail-lake` with its own bucket-scoped R2 token, so no other pipeline token can read mail
@@ -118,9 +120,13 @@ Newsletters, social notifications and everything else stay metadata only.
 
 Gold is rebuilt every run, so the owner's decisions are **not** stored in it. They live in an append-only
 decision log `s3://mail-lake/state/route_decisions/date=D/<decision_id>.parquet` (`event_id`, `status`,
-`target_id`, `decided_at`, `decided_by`; no subject, address or body). Whatever records a decision
-(Telegram reply to the summary, or the CLI) appends one file; applying a route appends `applied`. The Gold
-build joins the latest decision per `event_id`. A tombstoned message also removes its decision files.
+`route`, `label`, `target_id`, `triage_version`, `decided_at`, `decided_by`; no subject, address or body).
+Whatever records a decision (Telegram reply to the summary, or the CLI) appends one file with the route and
+target the owner saw; applying a route appends `applied` with the same route and target. The Gold build
+joins the latest decision per `event_id`, and **for a decided message the route, label and target come from
+the decision, not from a new gateway call**: the route step skips messages that have a decision, so a later
+body or label change never turns an approval into approval of a different route. Only the owner can reopen
+one (a `reopen` decision returns it to `suggested`). A tombstoned message also removes its decision files.
 
 ## Guards
 
@@ -143,6 +149,14 @@ build joins the latest decision per `event_id`. A tombstoned message also remove
   removed from Bronze at the next run (parts are small per batch; a batch with a deleted message is
   rewritten without it and its manifest replaced), and the id goes to `state/deleted.parquet` so a replay
   is refused.
+- **Body re-check every run.** The body rule depends on the CRM export, `MAIL_FINANCE_SENDERS`,
+  `MAIL_PUBLIC_DOMAINS` and Gmail labels, which change without a Gmail history event. So each run, after
+  intake and before retention and dbt, checks every stored body against the current rule: a body whose
+  message no longer passes (contact removed from the CRM, sender off the finance list, `lake` label gone)
+  is removed from `email_bodies` (part rewritten, manifest replaced, original `ingest_date` kept). Messages
+  that newly pass, within the body retention window, get their body fetched (max 200 per run, the rest
+  next run). If the CRM export fails, the run keeps no body that needs `crm_contact` / `crm_org_domain`
+  (fails closed: those bodies are not fetched and new ones are not written until the export works).
 - **History gaps.** When Gmail rejects the stored `historyId` (expired, 404) or the state file is missing
   after a first run, the run does a full reconciliation before it moves the checkpoint: read the new
   `historyId` from `users.getProfile` first, list every message id in scope for the whole retained window
@@ -213,6 +227,13 @@ heartbeat, Telegram summary.
 - M11 `email_activity_daily` builds from schema_version 2 and its existing quality test passes.
 - M12 a message from a stranger at `gmail.com`, while a CRM contact also uses `gmail.com`, is metadata only;
   a message from an unknown sender at a verified client domain keeps its body.
+- M16 with no Gmail history event, removing a contact from the CRM export removes that sender's stored
+  bodies at the next run, before dbt or the gateway read them; adding a contact fetches bodies of its
+  messages still inside the 90-day window.
+- M17 a body whose `ingest_date` is 91 days old but whose object is fresh (rewritten) is deleted by the
+  retention step before dbt runs, and the gateway client receives no call with it.
+- M18 after an `accepted` decision for `crm_activity`, a changed body or label in a later run does not change
+  the item's route or target, and no gateway call is made for it; a `reopen` decision makes it `suggested`.
 - M14 an `accepted` decision survives two more runs and a full Gold rebuild; the item is not suggested again.
 - M15 a message read and labelled `lake` during a `historyId` gap has `is_read = true`, the new label and its
   body after the reconciliation run.
