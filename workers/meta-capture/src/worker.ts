@@ -180,9 +180,9 @@ async function handleCapture(env: Env, msg: TelegramMessage, hash: string): Prom
     media_group_id: msg.media_group_id ?? null, text, urls: links, image_keys: imageKeys };
   const fresh = await putNew(env, landingKey(env, `landing/meta_capture/date=${day}/${id}/${msg.message_id}.json`), JSON.stringify(rec), 'application/json');
   // One reply per capture: an album arrives as one update per photo, captioned or not, so the first
-  // update to claim the capture's ack marker replies (write-once, like everything else here).
-  const ack = fresh && (!msg.media_group_id
-    || await putNew(env, landingKey(env, `landing/meta_capture/date=${day}/${id}/ack`), '', 'text/plain'));
+  // update to claim the capture's ack marker replies. The marker is claimed after the landing write and
+  // whether or not that write was fresh, so a retry after a crash between the two still replies once.
+  const ack = await putNew(env, landingKey(env, `landing/meta_capture/date=${day}/${id}/ack`), '', 'text/plain');
   if (ack) {
     const d = describe(text, links);
     const lost = fileId && !imageKeys.length ? '\n(โหลดรูปไม่ได้ ส่งใหม่ได้)' : '';

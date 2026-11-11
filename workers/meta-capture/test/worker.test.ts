@@ -132,7 +132,20 @@ describe('webhook', () => {
   it('a resent update is written once and not replied to again', async () => {
     await post(msg({ text: 'hello' }));
     await post(msg({ text: 'hello' }));
-    expect(keys()).toHaveLength(1);
+    expect(keys().filter((k) => k.endsWith('.json'))).toHaveLength(1);
+    expect(replies()).toHaveLength(1);
+  });
+
+  it('a retry after a crash between the landing write and the ack still replies once', async () => {
+    const real = bucket.put.bind(bucket);
+    let failAck = true;
+    bucket.put = async (key: string, body: string | ArrayBuffer, opts?: any) => {
+      if (key.endsWith('/ack') && failAck) { failAck = false; throw new Error('crash'); }
+      return real(key, body, opts);
+    };
+    expect((await post(msg({ text: 'x' }))).status).toBe(500);
+    expect(replies()).toEqual([]);
+    expect((await post(msg({ text: 'x' }))).status).toBe(200);
     expect(replies()).toHaveLength(1);
   });
 

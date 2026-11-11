@@ -78,7 +78,9 @@ def _issues(events: list[dict[str, object]]) -> list[str]:
             out.append(f"{ev}: error {str(e.get('error', '')).split(':', 1)[0][:60]}")
             continue
         if ev == "meta":  # step-level errors inside an ok run (counts and exception types only)
-            for part in ("ocr", "labelling"):
+            if e.get("ocr_errors"):
+                out.append(f"meta ocr: {e.get('ocr_errors')} failed")
+            for part in ("landing", "ocr", "labelling"):
                 if str(e.get(part, "")).startswith("error"):
                     out.append(f"meta {part}: {str(e.get(part))[:60]}")
             if e.get("labelling") == "gateway_error":

@@ -327,6 +327,30 @@ def _merge_capture(parts: list[dict[str, Any]]) -> dict[str, Any]:
             "owner_note": " / ".join(dict.fromkeys(x.owner_note for x in parsed if x.owner_note)) or None}
 
 
+def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[str, Any]:
+    """Merge row ``drop`` into row ``keep`` (same post) and delete ``drop``. The label is cleared."""
+    pasted = keep if keep["text_source"] == "pasted" else drop if drop["text_source"] == "pasted" else keep
+    surface = keep["surface"] if keep["surface"] != "unknown" else drop["surface"]
+    upd = {"capture_ids": _union(keep["capture_ids"], drop["capture_ids"]),
+           "first_captured_at": min(keep["first_captured_at"], drop["first_captured_at"]),
+           "last_captured_at": max(keep["last_captured_at"], drop["last_captured_at"]),
+           "platform": keep["platform"] if keep["platform"] != "unknown" else drop["platform"], "surface": surface,
+           "group_label": keep["group_label"] or drop["group_label"],
+           "author_name": None if surface == "group" else (keep["author_name"] or drop["author_name"]),
+           "text": pasted["text"], "text_source": pasted["text_source"],
+           "image_keys": _union(keep["image_keys"], drop["image_keys"]), "tags": _union(keep["tags"], drop["tags"]),
+           "owner_note": " / ".join(dict.fromkeys(x for x in (keep["owner_note"], drop["owner_note"]) if x)) or None,
+           "content_label": None, "route": None, "domain": None, "topic": None, "withheld": False, "label_tries": 0,
+           "ocr_tries": 0}
+    if pasted["text_source"] != "pasted" and set(upd["image_keys"]) != set(keep["image_keys"]):
+        upd |= {"text": "", "text_source": "none"}  # OCR again over every image
+    with conn.cursor() as c:
+        c.execute(f"delete from {S}.meta_posts where post_key = %s", (drop["post_key"],))
+        c.execute(f"update {S}.meta_posts set {', '.join(f'{k} = %s' for k in upd)}, updated_at = now() "
+                  f"where post_key = %s", [*upd.values(), keep["post_key"]])
+    return keep | upd
+
+
 def upsert(conn: Any, parts: list[dict[str, Any]]) -> int:
     """Merge newly landed parts into meta_posts. Returns the number of posts written."""
     by_capture: dict[str, list[dict[str, Any]]] = {}
@@ -336,7 +360,13 @@ def upsert(conn: Any, parts: list[dict[str, Any]]) -> int:
     for cid, cparts in sorted(by_capture.items(), key=lambda kv: min(p["captured_at"] for p in kv[1])):
         cap = _merge_capture(cparts)
         uk = url_key(cap["post_url"]) if cap["post_url"] else None
-        rows = _fetch(conn, "%s = any(capture_ids)", (cid,)) or (_fetch(conn, "url_key = %s", (uk,)) if uk else [])
+        rows = _fetch(conn, "%s = any(capture_ids)", (cid,))
+        by_url = _fetch(conn, "url_key = %s", (uk,)) if uk else []
+        if rows and by_url and by_url[0]["post_key"] != rows[0]["post_key"]:
+            # An album's link arrived after its photos, and that link is already a post: fold the capture's
+            # row into the post first, so url_key stays unique and the post is one row.
+            rows = [_absorb(conn, keep=by_url[0], drop=rows[0])]
+        rows = rows or by_url
         if not rows:
             values = {"post_key": uk or cid, "capture_ids": [cid], "first_captured_at": cap["first_at"],
                       "last_captured_at": cap["captured_at"], "platform": cap["platform"], "surface": cap["surface"],
@@ -414,7 +444,7 @@ def tesseract(images: list[bytes]) -> str:
 def run_ocr(conn: Any, store: Any, ocr: Callable[[list[bytes]], str]) -> dict[str, int]:
     rows = _fetch(conn, "text = '' and cardinality(image_keys) > 0 and ocr_tries < %s", (MAX_TRIES,))
     conn.commit()
-    done = failed = 0
+    done = failed = errors = 0
     for r in rows:
         images = []
         for k in r["image_keys"]:
@@ -429,7 +459,7 @@ def run_ocr(conn: Any, store: Any, ocr: Callable[[list[bytes]], str]) -> dict[st
             try:
                 text = ocr(images)[:MAX_TEXT]
             except (OcrError, subprocess.SubprocessError, OSError):
-                text = ""
+                text, errors = "", errors + 1
         with conn.cursor() as c:
             if text:
                 c.execute(f"update {S}.meta_posts set text = %s, text_source = 'ocr', updated_at = now() "
@@ -439,7 +469,7 @@ def run_ocr(conn: Any, store: Any, ocr: Callable[[list[bytes]], str]) -> dict[st
                 c.execute(f"update {S}.meta_posts set ocr_tries = ocr_tries + 1 where post_key = %s", (r["post_key"],))
                 failed += 1
         conn.commit()
-    return {"ocr_done": done, "ocr_failed": failed}
+    return {"ocr_done": done, "ocr_failed": failed, "ocr_errors": errors}
 
 
 # --------------------------------------------------------------------------------------- labels
@@ -654,9 +684,13 @@ def run(conn: Any, cfg: Config, *, mode: str, store: Any, prefix: str, now: date
         c.execute(f"select capture_id from {S}.meta_deleted")
         deleted = {r[0] for r in c.fetchall()}
     conn.commit()
-    parts = land(store, prefix, deleted=deleted, curated=_curated(conn))
-    rep["landed"] = len(parts)
-    rep["posts_written"] = upsert(conn, parts) if parts else 0
+    try:
+        parts = land(store, prefix, deleted=deleted, curated=_curated(conn))
+        rep["landed"] = len(parts)
+        rep["posts_written"] = upsert(conn, parts) if parts else 0
+    except Exception as exc:  # noqa: BLE001 - the parts stay pending (no checkpoint); cleanup still runs
+        conn.rollback()
+        rep["landing"] = f"error {type(exc).__name__}"
     # OCR and labelling may fail (a missing setting, a bad image); deletes and retention must still run.
     try:
         rep |= run_ocr(conn, store, ocr or tesseract)

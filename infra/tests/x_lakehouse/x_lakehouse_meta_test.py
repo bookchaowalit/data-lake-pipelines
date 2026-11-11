@@ -240,6 +240,14 @@ class PgTests(unittest.TestCase):
         self.assertEqual(r["owner_note"], "ดูต่อ")
         self.assertEqual(r["post_url"], "https://threads.com/@x/post/P")
 
+    def test_ocr_errors_are_counted_for_the_alert(self):
+        landing(self.store, "", msg_id=34, images=[b"img"])
+        rep, _, _ = self.run_meta(ocr=FakeOcr(fail=True))
+        self.assertEqual((rep["ocr_errors"], rep["ocr_failed"]), (1, 1))
+        landing(self.store, "", msg_id=35, images=[b"blank"])
+        rep, _, _ = self.run_meta(ocr=FakeOcr(""))
+        self.assertEqual((rep["ocr_errors"], rep["ocr_failed"]), (0, 2))  # empty text is not an OCR error
+
     def test_m4_ocr_is_local_and_a_failure_retries(self):
         landing(self.store, "", msg_id=3, images=[b"img"])
         ocr = FakeOcr(fail=True)
@@ -344,6 +352,21 @@ class PgTests(unittest.TestCase):
         rep, _, _ = self.run_meta(c=Config({"CLIENT_DENYLIST": "x"}))  # no AI_GATEWAY_TOKEN
         self.assertEqual(rep["labelling"], "error ConfigError")
         self.assertFalse([k for k in self.store.list("meta/landing") if "tg-abcd1234-29" in k])
+
+    def test_album_link_arriving_late_folds_into_the_existing_post(self):
+        url = "https://facebook.com/groups/3/posts/4"
+        landing(self.store, "", msg_id=31, text="ส่งก่อน", urls=[url])
+        landing(self.store, "", msg_id=32, group="90", images=[b"photo"], when=NOW + timedelta(minutes=1))
+        self.run_meta(ocr=FakeOcr("จากภาพ"))
+        self.assertEqual(len(self.rows()), 2)
+        landing(self.store, "", msg_id=33, group="90", text="ลิงก์ตามมา", urls=[url + "/?mibextid=1"],
+                when=NOW + timedelta(minutes=2))
+        rep, _, _ = self.run_meta()
+        self.assertNotIn("landing", rep)  # no unique-key error
+        [r] = self.rows()
+        self.assertEqual(sorted(r["capture_ids"]), ["tg-abcd1234-31", "tg-abcd1234-g90"])
+        self.assertEqual(r["text"], "ลิงก์ตามมา")
+        self.assertEqual(len(r["image_keys"]), 1)
 
     def test_m6_second_run_writes_nothing(self):
         landing(self.store, "", msg_id=8, text="x")

@@ -47,10 +47,12 @@ class IssueTests(unittest.TestCase):
                   {"event": "meta", "mode": "write", "labelling": "error ConfigError", "ocr_done": 0,
                    "retention": {"stale_landing": 2}},
                   {"event": "meta", "mode": "write", "labelling": "gateway_error", "retention": {"stale_landing": 0}},
-                  {"event": "meta", "mode": "write", "labelling": "ok", "retention": {"stale_landing": 0}}]
+                  {"event": "meta", "mode": "write", "labelling": "ok", "ocr_errors": 0, "retention": {"stale_landing": 0}},
+                  {"event": "meta", "mode": "write", "landing": "error UniqueViolation", "ocr_errors": 3}]
         self.assertEqual(scheduled._issues(events), ["meta: error OperationalError", "meta labelling: error ConfigError",
                                                      "meta retention: stale landing left",
-                                                     "meta labelling: gateway_error"])
+                                                     "meta labelling: gateway_error", "meta ocr: 3 failed",
+                                                     "meta landing: error UniqueViolation"])
 
     def test_a_clean_run_has_no_issues(self):
         events = [{"event": "digest", "reports": [{"digest_id": "m", "status": "sent", "ai": True}]},
