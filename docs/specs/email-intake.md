@@ -113,8 +113,14 @@ Newsletters, social notifications and everything else stay metadata only.
 | `label` | `client` / `lead` / `invoice_receipt` / `job` / `alert` / `newsletter` / `personal` / `other` |
 | `summary_th` | one Thai line from the gateway, max 200 chars |
 | `target_hint` | CRM contact id, task project, or finance cell, when known |
-| `status` | `suggested` / `accepted` / `rejected` / `applied` |
+| `status` | `suggested` / `accepted` / `rejected` / `applied`: taken from the decision log, `suggested` when none |
 | `triage_version` | `mail-v1` |
+
+Gold is rebuilt every run, so the owner's decisions are **not** stored in it. They live in an append-only
+decision log `s3://mail-lake/state/route_decisions/date=D/<decision_id>.parquet` (`event_id`, `status`,
+`target_id`, `decided_at`, `decided_by`; no subject, address or body). Whatever records a decision
+(Telegram reply to the summary, or the CLI) appends one file; applying a route appends `applied`. The Gold
+build joins the latest decision per `event_id`. A tombstoned message also removes its decision files.
 
 ## Guards
 
@@ -141,12 +147,19 @@ Newsletters, social notifications and everything else stay metadata only.
   after a first run, the run does a full reconciliation before it moves the checkpoint: read the new
   `historyId` from `users.getProfile` first, list every message id in scope for the whole retained window
   (365 days) with `messages.list`, add the ones Bronze lacks, tombstone every Bronze id that is no longer
-  listed (deleted, in Trash, or now excluded), and only then store the new `historyId`. If the
+  listed (deleted, in Trash, or now excluded), and **refresh every id that is in both**: fetch its metadata
+  again, write a new metadata version when `labels`, `is_read`, `is_starred` or `is_important` changed
+  (`stg_emails` keeps the newest per `event_id`), re-check the body rule, fetch the body when it is newly
+  allowed and remove the body when it no longer is. Only then store the new `historyId`.
+  The same refresh runs in normal incremental runs for `labelsAdded` / `labelsRemoved` history events. If the
   reconciliation does not finish, the old state stays and the next run starts it again.
 - **Retention** (own step `mail_retention`, never fails the run, logs counts only):
-  - `email_bodies` Bronze parts: deleted when `ingest_date` is more than 90 days old (R2 lifecycle rule
-    `mail-bodies-90d` on the `dataset=email_bodies/` prefix, and the step deletes any older part it finds in
-    case the rule is missing). Their manifests drop the part keys in the same step;
+  - `email_bodies` Bronze parts: deleted when `ingest_date` is more than 90 days old. Two layers: the step
+    deletes by `ingest_date` (primary, since a part rewritten after a delete gets a new upload time), and
+    the R2 lifecycle rule `mail-bodies-90d` on the full key prefix
+    `bronze/domain=communications/dataset=email_bodies/` (object age 90 days) catches parts if the cron stops.
+    A rewritten part keeps its original `ingest_date`, so the step still removes it on time. Manifests drop
+    the part keys in the same step. M8 also checks that the rule exists with that exact prefix;
   - Silver / Gold: rebuilt from Bronze each run, so an expired body disappears from them at the next run;
     the DuckDB file in the container is temporary and not uploaded; no other replayable copy is kept
     (the Kafka / landing paths are not used for mail);
@@ -200,6 +213,9 @@ heartbeat, Telegram summary.
 - M11 `email_activity_daily` builds from schema_version 2 and its existing quality test passes.
 - M12 a message from a stranger at `gmail.com`, while a CRM contact also uses `gmail.com`, is metadata only;
   a message from an unknown sender at a verified client domain keeps its body.
+- M14 an `accepted` decision survives two more runs and a full Gold rebuild; the item is not suggested again.
+- M15 a message read and labelled `lake` during a `historyId` gap has `is_read = true`, the new label and its
+  body after the reconciliation run.
 - M13 with an expired `historyId`, a message deleted during the gap is tombstoned and removed by the
   reconciliation run, and the checkpoint moves only after the reconciliation finishes (a crash halfway
   leaves the old state).
