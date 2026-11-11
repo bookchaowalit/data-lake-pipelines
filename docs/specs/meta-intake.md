@@ -59,7 +59,7 @@ One Telegram message, or one album of photos, is one capture.
 
 | in the message | becomes |
 |---|---|
-| a facebook.com / fb.watch / instagram.com / threads.net link | `post_url` (tracking params such as `mibextid`, `rdid`, `__cft__`, `fbclid` stripped), `platform` |
+| a link on `facebook.com` (incl. `m.`, `web.`, `www.`), `fb.com`, `fb.watch`, `instagram.com`, `instagr.am`, `threads.com` or `threads.net` (the old Threads domain, still shared) | `post_url` (tracking params such as `mibextid`, `rdid`, `__cft__`, `fbclid`, `igsh`, `xmt` stripped; `l.facebook.com/l.php?u=` redirects unwrapped; `threads.net` rewritten to `threads.com` so both forms dedupe), `platform` |
 | text other than the link and tags | `text`, `text_source = pasted` |
 | photos (screenshots) | `image_keys`; OCR later if `text` is empty, `text_source = ocr` |
 | `#g <ชื่อกลุ่ม>` | `surface = group`, `group_label` = the name the owner typed |
@@ -154,7 +154,8 @@ Worker code, cron step, migration, digest section.
 - M1 a message with a Facebook group link, a screenshot and `#g ชื่อกลุ่ม` lands as one capture with
   `surface = group`, `author_name` null, the image in R2, and the bot replies `เก็บแล้ว`.
 - M2 a message from a chat id not on the allowlist, or without the secret header, writes nothing and gets no reply.
-- M3 tracking params are stripped; two captures of the same post merge into one curated row.
+- M3 tracking params are stripped; two captures of the same post merge into one curated row, including the
+  same Threads post sent once as `threads.net` and once as `threads.com`.
 - M4 a capture without text gets local OCR text at the next cron run (no network call for OCR); an OCR error
   leaves `text_source = none` and the next run retries it.
 - M5 a capture whose pasted or OCR text matches the client denylist never reaches the gateway or the digest;
