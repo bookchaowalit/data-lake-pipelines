@@ -168,6 +168,25 @@ class WeeklyPostgresTests(unittest.TestCase):
         self.assertEqual(self.q("select count(*) from x_intel.lh_triage_audit")[0][0], 0)
 
 
+class BatchTests(unittest.TestCase):
+    def test_review8_thai_posts_go_in_batches_that_fit_the_gateway_budget(self):
+        posts = [{"post_text": "ข่าว" * 200, "cred_tier": "T3", "domain": "D1"} for _ in range(30)]
+        groups = weekly.batches(posts)
+        self.assertGreater(len(groups), 1)
+        self.assertEqual(sorted(i for g in groups for i in g), list(range(30)))
+        for g in groups:
+            size = len(json.dumps([weekly._item(i, posts[i]) for i in g], ensure_ascii=False).encode())
+            self.assertLessEqual(len(weekly.SYSTEM.encode()) + size + weekly.AUDIT_OUTPUT + 2048, weekly.MAX_TOKEN_BUDGET)
+
+    def test_review8_every_batch_is_asked_and_answers_map_back(self):
+        posts = [{"post_text": "ข่าว" * 200, "cred_tier": "T3", "domain": "D1"} for _ in range(30)]
+        gw = FakeGateway(label="opinion")
+        with gw.client() as http:
+            answers = weekly.ask_audit(http, "t", "x-digest", posts)
+        self.assertEqual(len(gw.prompts), len(weekly.batches(posts)))
+        self.assertTrue(all(a.get("label") == "opinion" for a in answers))
+
+
 class PriceVerifiedTests(unittest.TestCase):
     def test_w2_only_price_sources_count_as_verified_prices(self):
         import pyarrow as pa

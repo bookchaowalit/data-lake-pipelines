@@ -26,6 +26,12 @@ PRIORITY = """
 """
 
 
+# The marts show a subset of columns; a screen must see the whole base row too (a client term can sit in
+# tags, expanded_link, supporting_links, ...). Use with the mart aliased as m.
+SIGNAL_FULL = f"(to_jsonb(m) || coalesce((select to_jsonb(s) from {S}.x_signals s where s.post_id = m.post_id), '{{}}'))"
+CLAIM_FULL = f"(to_jsonb(m) || coalesce((select to_jsonb(k) from {S}.claims k where k.claim_id = m.claim_id), '{{}}'))"
+
+
 def marts_ddl() -> str:
     return f"""
 create or replace view {S}.mart_x_signal_priority as

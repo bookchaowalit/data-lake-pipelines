@@ -20,6 +20,7 @@ import httpx
 from .coerce import TZ
 from .config import Config
 from .digest import GATEWAY_URL, DigestError, any_term, load_denylist
+from .marts import SIGNAL_FULL
 from .schemas import PG_SCHEMA as S
 
 RULE_VERSION = "lh-v1"
@@ -226,7 +227,7 @@ def _price_verified(w: Week, store: Any, prefix: str) -> list[dict[str, Any]]:
 
 def sample(conn: Any, w: Week, denylist: Sequence[str]) -> list[dict[str, Any]]:
     cols = ("post_id", "post_text", "cred_tier", "domain", "content_label", "route")
-    rows = _q(conn, f"select {', '.join(cols)}, to_jsonb(m) from {S}.mart_x_signal_priority m "
+    rows = _q(conn, f"select {', '.join(cols)}, {SIGNAL_FULL} from {S}.mart_x_signal_priority m "
                     f"where collected_at >= %s and collected_at < %s and coalesce(post_text, '') <> '' "
                     f"order by md5(post_id || %s), post_id", (w.start, w.end, w.label))
     out = []
@@ -239,13 +240,50 @@ def sample(conn: Any, w: Week, denylist: Sequence[str]) -> list[dict[str, Any]]:
     return out
 
 
+# The gateway refuses input bytes + max output above token_budget (max 24,576); Thai text is 3 bytes a
+# character, so the sample goes in batches whose prompt stays under BATCH_BYTES.
+MAX_TOKEN_BUDGET = 24576
+AUDIT_OUTPUT = 1500
+BATCH_BYTES = MAX_TOKEN_BUDGET - AUDIT_OUTPUT - 2048 - len(SYSTEM.encode())
+TEXT_CAP = 400
+
+
+def _item(i: int, p: dict[str, Any]) -> dict[str, Any]:
+    return {"i": i, "text": (p["post_text"] or "")[:TEXT_CAP], "author_tier": p["cred_tier"], "domain": p["domain"]}
+
+
+def batches(posts: Sequence[dict[str, Any]]) -> list[list[int]]:
+    """Indexes of ``posts`` grouped so each batch's JSON prompt fits BATCH_BYTES."""
+    out: list[list[int]] = []
+    cur: list[int] = []
+    size = 2
+    for i, p in enumerate(posts):
+        n = len(json.dumps(_item(i, p), ensure_ascii=False).encode()) + 2
+        if cur and size + n > BATCH_BYTES:
+            out.append(cur)
+            cur, size = [], 2
+        cur.append(i)
+        size += n
+    if cur:
+        out.append(cur)
+    return out
+
+
 def ask_audit(http: httpx.Client, token: str, route: str, posts: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    user = json.dumps([{"i": i, "text": (p["post_text"] or "")[:600], "author_tier": p["cred_tier"],
-                        "domain": p["domain"]} for i, p in enumerate(posts)], ensure_ascii=False)
-    out = 2500
+    answers: list[dict[str, Any]] = [{} for _ in posts]
+    for group in batches(posts):
+        got = _ask_batch(http, token, route, [_item(i, posts[i]) for i in group])
+        for i in group:
+            answers[i] = got.get(i, {})
+    return answers
+
+
+def _ask_batch(http: httpx.Client, token: str, route: str, items: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    user = json.dumps(items, ensure_ascii=False)
+    out = AUDIT_OUTPUT
     body = {"route": route, "prompt_version": PROMPT_VERSION, "profile": "fast", "privacy_class": "internal",
             "response_format": {"type": "json_object"}, "reasoning_effort": "low", "max_output_tokens": out,
-            "token_budget": min(24576, len(SYSTEM.encode()) + len(user.encode()) + out + 2048),
+            "token_budget": min(MAX_TOKEN_BUDGET, len(SYSTEM.encode()) + len(user.encode()) + out + 2048),
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]}
     try:
         r = http.post(f"{GATEWAY_URL}/api/ai/generate", json=body, timeout=180,
@@ -255,13 +293,13 @@ def ask_audit(http: httpx.Client, token: str, route: str, posts: Sequence[dict[s
     if r.status_code != 200:
         raise DigestError(f"gateway http {r.status_code}")
     try:
-        items = json.loads(r.json()["content"])["items"]
-        if not isinstance(items, list):
+        answer = json.loads(r.json()["content"])["items"]
+        if not isinstance(answer, list):
             raise TypeError
     except (ValueError, KeyError, TypeError, AttributeError):
         raise DigestError("gateway answer is not the expected JSON") from None
-    by_i = {it.get("i"): it for it in items if isinstance(it, dict)}
-    return [by_i.get(i, {}) for i in range(len(posts))]
+    wanted = {it["i"] for it in items}
+    return {x["i"]: x for x in answer if isinstance(x, dict) and x.get("i") in wanted}
 
 
 def _confusions(pairs: Sequence[tuple[Any, Any]]) -> str:

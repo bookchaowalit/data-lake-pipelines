@@ -440,6 +440,17 @@ class DigestPostgresTests(unittest.TestCase):
         self.assertTrue(rep["ai"])
         self.assertLessEqual(len(dg.SYSTEM.encode()) + len(svc.prompts[0].encode()), dg.PROMPT_BYTES)
 
+    def test_review8_a_term_only_in_a_base_column_the_mart_omits_withholds_the_row(self):
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.x_signals set tags = 'acme corp' where post_id = '1'")
+            c.execute("insert into x_intel.claims (claim_id, claim, queue_state, supporting_links) "
+                      "values ('CL-7', 'plain', 'open', 'https://acme corp.example')")
+        self.conn.commit()
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        [rep] = self.run_digest(svc)
+        self.assertNotIn("status/1", svc.prompts[0])
+        self.assertNotIn("CL-7", svc.prompts[0])
+
     def test_review7_a_term_only_in_a_column_the_digest_hides_withholds_the_row(self):
         with self.conn.cursor() as c:
             c.execute("update x_intel.x_signals set topic = 'Acme Corp deal' where post_id = '1'")

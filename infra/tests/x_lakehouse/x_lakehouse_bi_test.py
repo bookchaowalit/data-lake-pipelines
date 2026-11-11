@@ -338,6 +338,18 @@ class BiPostgresTests(unittest.TestCase):
         self.assertEqual([r["post_id"] for r in snap.signals], ["1"])
         self.assertTrue(all("_row" not in r for r in snap.signals))
 
+    def test_review8_a_term_in_a_base_column_withholds_signals_and_claims(self):
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.x_signals set tags = 'Acme Corp' where post_id = '2'")
+            c.execute("insert into x_intel.claims (claim_id, claim, queue_state, supporting_links) "
+                      "values ('CL-7', 'plain', 'open', 'acme corp')")
+            c.execute("insert into x_intel.claims (claim_id, claim, queue_state) values ('CL-8', 'fine', 'open')")
+        self.conn.commit()
+        snap = bi_site.load_snapshot(self.conn, DENY)
+        self.assertEqual([r["post_id"] for r in snap.signals], ["1"])
+        self.assertEqual([r["claim_id"] for r in snap.claims], ["CL-8"])
+        self.assertTrue(all("_row" not in r for r in snap.claims))
+
     def test_review7_many_withheld_top_rows_never_empty_the_page(self):
         with self.conn.cursor() as c:
             for i in range(100, 260):  # rank above every clean row, all withheld

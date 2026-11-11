@@ -42,6 +42,7 @@ import httpx  # noqa: E402
 
 from .coerce import TZ  # noqa: E402
 from .config import Config  # noqa: E402
+from .marts import CLAIM_FULL, SIGNAL_FULL  # noqa: E402
 from .schemas import PG_SCHEMA as S  # noqa: E402
 
 GATEWAY_URL = "https://api.bookchaowalit.com"
@@ -205,13 +206,13 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
                      if not contains_term(d, denylist)]  # a domain label can name a client too
         cols = ("post_id", "domain", "signal_type", "cred_tier", "verification_status", "suggested_action",
                 "author_handle", "post_text", "post_url", "opportunity_score", "alert_tier", "priority")
-        # to_jsonb(m) carries every mart column (topic, category, route, ...) for the screen below,
+        # SIGNAL_FULL / CLAIM_FULL carry every mart and base-table column for the screen below,
         # so a client term in a column the digest does not show still withholds the row.
-        c.execute(f"select {', '.join(cols)}, to_jsonb(m) from {S}.mart_x_signal_priority m "
+        c.execute(f"select {', '.join(cols)}, {SIGNAL_FULL} from {S}.mart_x_signal_priority m "
                   f"where collected_at >= %s and collected_at < %s order by priority desc, collected_at desc limit 400",
                   (w.start, w.end))
         ranked = [dict(zip(cols, r[:-1])) | {"_row": r[-1]} for r in c.fetchall()]
-        c.execute(f"select claim_id, claim, verification_status, queue_state, next_check, first_seen_link, to_jsonb(m) "
+        c.execute(f"select claim_id, claim, verification_status, queue_state, next_check, first_seen_link, {CLAIM_FULL} "
                   f"from {S}.mart_claims_queue m limit 50")
         claims = c.fetchall()
     conn.commit()
