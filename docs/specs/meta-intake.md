@@ -1,6 +1,6 @@
 # SPEC: Meta intake (Facebook feed and groups, Instagram, Threads)
 
-Status: APPROVED by the owner 2026-11-11 ("อนุมัติ + merge"). Open questions below still to answer before build. Nothing is built yet.
+Status: APPROVED by the owner 2026-11-11 ("อนุมัติ + merge"); open questions decided the same day (see Decisions). Nothing is built yet.
 Code (planned): `infra/scripts/x_lakehouse/meta.py`, Worker `workers/meta-capture/`.
 Tests (planned): `infra/tests/x_lakehouse/x_lakehouse_meta_test.py`, `workers/meta-capture/test/`.
 
@@ -84,7 +84,7 @@ for members, so for groups the owner should send the screenshot (or paste the te
 | `group_label` | text | owner-typed; never looked up |
 | `post_url` | text | normalised; null when none |
 | `url_key` | text | sha256 of `post_url`, for duplicates |
-| `author_name` | text | only from `#author <name>` in the message; never parsed from text or OCR, so group members stay unnamed by default |
+| `author_name` | text | only from `#author <name>` in the message, and always null for `surface = group` (`#author` ignored there); never parsed from text or OCR |
 | `text` | text | pasted or OCR, max 8,000 chars |
 | `text_source` | text | `pasted` / `ocr` / `none` |
 | `image_keys` | text[] | R2 keys |
@@ -169,9 +169,15 @@ Worker code, cron step, migration, digest section.
   a 364-day-old capture is kept.
 - M11 `#del` removes the curated row, landing files and the raw row; replaying the same landing JSON is refused.
 
-## Open questions for the owner
+## Decisions (2026-11-11, owner delegated: "คุณคิดเลย")
 
-1. Bot: a new bot just for capture (recommended, keeps the digest bot outbound-only) or reuse the digest bot?
-2. Should group captures ever keep the author name, or never (current draft: only with `#author`)?
-3. Digest: a section inside the X digest (draft) or a separate Meta message?
-4. Start v2 (Threads) right after v1, or wait until v1 has two weeks of use?
+1. **Bot: a new bot just for capture.** The digest bot stays outbound-only, the capture token can be revoked
+   alone, and a wrong reply never lands in the digest chat.
+2. **Author names: never for `surface = group`.** `#author` is ignored on group captures (the bot says so in
+   its reply). On feed, page and profile captures `#author` is kept. Group members never agreed to be in the
+   lake, and the post text is what matters for intel.
+3. **Digest: a section inside the X digest.** No extra messages, and the existing screens (denylist, host
+   check, byte budget) apply unchanged. Revisit if Meta items pass 5 a day for a week.
+4. **v2 (Threads) waits for two weeks of v1 use.** Review on or after the 14th day from the first capture: if
+   the owner sends fewer than 3 captures a week, the effort goes to Threads automation; otherwise v2 still
+   follows but v1 stays the main Meta path.
