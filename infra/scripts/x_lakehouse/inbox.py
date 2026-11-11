@@ -188,6 +188,8 @@ create or replace function {S}._c_date(v jsonb) returns date language plpgsql im
 set search_path = pg_catalog, {S} as $f$
 begin
   if v is null or jsonb_typeof(v) <> 'string' then return null; end if;
+  -- Python reads date.fromisoformat(text[:10]); PostgreSQL alone would also take 'today' or '11/13/2026'.
+  if left({S}._strip(v #>> '{{}}'), 10) !~ '^\d{{4}}-?\d{{2}}-?\d{{2}}$' then return null; end if;
   return left({S}._strip(v #>> '{{}}'), 10)::date;
 exception when others then return null;
 end $f$;

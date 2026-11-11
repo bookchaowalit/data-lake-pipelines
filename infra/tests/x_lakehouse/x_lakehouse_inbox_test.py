@@ -259,6 +259,14 @@ class InboxPostgresTests(unittest.TestCase):
         self.assertEqual(self.ingest("claims", [book])["upserted"]["updated"], 1)
         self.assertEqual(read_dataset(self.store, "", DATASETS["claims"]).num_rows, 2)  # raw keeps all versions
 
+    def test_review7_a_config_date_python_cannot_read_is_refused(self):
+        wl = {k: "x" for k in DATASETS["x_watchlist"].key}
+        for bad in ("today", "11/13/2026", "Nov 13 2026"):
+            out = self.ingest("x_watchlist", [wl | {"added_date": bad}], run_id="d" + str(len(bad)))
+            self.assertEqual(out["errors"][0]["columns"], ["added_date"], bad)
+        out = self.ingest("x_watchlist", [wl | {"added_date": "2026-11-13"}], run_id="dok")
+        self.assertEqual(out["errors"], [])
+
     def test_review6_a_config_timestamp_sql_cannot_read_is_refused_not_nulled(self):
         qp = {"query_id": "Q2", "query": "duckdb", "runs": 1}
         for bad in ("20261113T081600+0700", "2026-11-13", "13/11/2026 08:16"):

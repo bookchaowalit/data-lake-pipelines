@@ -330,6 +330,23 @@ class BiPostgresTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.assertIn('data-kpi="urgent">1<', (out / "index.html").read_text())
 
+    def test_review7_a_term_in_a_column_the_page_hides_withholds_the_row(self):
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.x_signals set topic = 'Acme Corp launch' where post_id = '2'")
+        self.conn.commit()
+        snap = bi_site.load_snapshot(self.conn, DENY)
+        self.assertEqual([r["post_id"] for r in snap.signals], ["1"])
+        self.assertTrue(all("_row" not in r for r in snap.signals))
+
+    def test_review7_many_withheld_top_rows_never_empty_the_page(self):
+        with self.conn.cursor() as c:
+            for i in range(100, 260):  # rank above every clean row, all withheld
+                c.execute("insert into x_intel.x_signals (post_id, collected_at, domain, alert_tier, post_text, post_url) "
+                          "values (%s, '2026-11-10 09:30+07', 'D5', 'urgent_candidate', 'acme corp news', %s)",
+                          (str(i), f"https://x.com/a/status/{i}"))
+        self.conn.commit()
+        snap = bi_site.load_snapshot(self.conn, DENY)
+        self.assertEqual([r["post_id"] for r in snap.signals], ["1", "2"])
 
 if __name__ == "__main__":
     unittest.main()

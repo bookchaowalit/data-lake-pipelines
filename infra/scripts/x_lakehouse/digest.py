@@ -204,12 +204,14 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
                      if not contains_term(d, denylist)]  # a domain label can name a client too
         cols = ("post_id", "domain", "signal_type", "cred_tier", "verification_status", "suggested_action",
                 "author_handle", "post_text", "post_url", "opportunity_score", "alert_tier", "priority")
-        c.execute(f"select {', '.join(cols)} from {S}.mart_x_signal_priority "
-                  f"where collected_at >= %s and collected_at < %s order by priority desc, collected_at desc limit 60",
+        # to_jsonb(m) carries every mart column (topic, category, route, ...) for the screen below,
+        # so a client term in a column the digest does not show still withholds the row.
+        c.execute(f"select {', '.join(cols)}, to_jsonb(m) from {S}.mart_x_signal_priority m "
+                  f"where collected_at >= %s and collected_at < %s order by priority desc, collected_at desc limit 400",
                   (w.start, w.end))
-        ranked = [dict(zip(cols, r)) for r in c.fetchall()]
-        c.execute(f"select claim_id, claim, verification_status, queue_state, next_check, first_seen_link "
-                  f"from {S}.mart_claims_queue limit 5")
+        ranked = [dict(zip(cols, r[:-1])) | {"_row": r[-1]} for r in c.fetchall()]
+        c.execute(f"select claim_id, claim, verification_status, queue_state, next_check, first_seen_link, to_jsonb(m) "
+                  f"from {S}.mart_claims_queue m limit 50")
         claims = c.fetchall()
     conn.commit()
     clean = []
@@ -219,15 +221,19 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
             f.withheld += 1
             continue
         clean.append(r)
+    if len(clean) > 60:
+        clean = clean[:60]  # screened first, then cut: withheld rows never shrink the lists
     f.alerts = [_post(r) for r in clean if r["alert_tier"] and r["alert_tier"] != "none"][:12]
     seen = {a["link"] for a in f.alerts}
     f.top = [_post(r) for r in clean if r["post_url"] not in seen][:top_n]
     f.opportunities = [_post(r) for r in clean if r["signal_type"] == "Opportunity"
                        or (r["opportunity_score"] or 0) >= 3][:8]
-    for cid, text, status, state, nxt, link in claims:
-        if any_term([cid, text, status, state, link], denylist):
+    for cid, text, status, state, nxt, link, full in claims:
+        if any_term([cid, text, status, state, link, full], denylist):
             f.withheld += 1
             continue
+        if len(f.claims) >= 5:
+            break
         f.claims.append({"id": cid, "claim": (text or "")[:200], "status": status, "state": state,
                          "next_check": nxt.astimezone(TZ).strftime("%Y-%m-%d") if nxt else None, "link": link})
     return f

@@ -88,11 +88,13 @@ def load_snapshot(conn: Any, denylist: Sequence[str]) -> Snapshot:
                       f"group by 1, 2 order by 1, 2",
                       (as_of - timedelta(days=CHART_DAYS - 1), as_of + timedelta(days=1)))
             daily = _rows(c, ("day", "domain", "signals", "alerts", "urgent", "opportunities"))
-            c.execute(f"select {', '.join(SIGNAL_COLS)} from {S}.mart_x_signal_priority "
+            # The whole window, every mart column (to_jsonb) for screen(): a fixed overfetch could be all
+            # withheld rows, and a client term can sit in a column the page does not show.
+            c.execute(f"select {', '.join(SIGNAL_COLS)}, to_jsonb(m) from {S}.mart_x_signal_priority m "
                       f"where collected_ict >= %s and collected_ict < %s "
-                      f"order by priority desc, collected_at desc, post_id limit %s",
-                      (as_of - timedelta(days=KPI_DAYS - 1), as_of + timedelta(days=1), TOP_SIGNALS * 3))
-            ranked = _rows(c, SIGNAL_COLS)
+                      f"order by priority desc, collected_at desc, post_id",
+                      (as_of - timedelta(days=KPI_DAYS - 1), as_of + timedelta(days=1)))
+            ranked = _rows(c, (*SIGNAL_COLS, "_row"))
         c.execute(f"select {', '.join(CLAIM_COLS)} from {S}.mart_claims_queue")
         claims = _rows(c, CLAIM_COLS)
         c.execute(f"select digest_id, kind, status, signals, cost_usd, coalesce(tokens_out, 0) > 0, updated_at "
@@ -110,7 +112,7 @@ def screen(snap: Snapshot, denylist: Sequence[str]) -> Snapshot:
         if any_term(r, denylist):
             withheld["signals"] += 1
         else:
-            clean.append(r)
+            clean.append({k: v for k, v in r.items() if k != "_row"})
     claims = []
     for r in snap.claims:
         if any_term(r, denylist):

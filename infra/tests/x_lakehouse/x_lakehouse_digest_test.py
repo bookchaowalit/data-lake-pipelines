@@ -424,6 +424,18 @@ class DigestPostgresTests(unittest.TestCase):
         self.assertTrue(rep["ai"])
         self.assertLessEqual(len(dg.SYSTEM.encode()) + len(svc.prompts[0].encode()), dg.PROMPT_BYTES)
 
+    def test_review7_a_term_only_in_a_column_the_digest_hides_withholds_the_row(self):
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.x_signals set topic = 'Acme Corp deal' where post_id = '1'")
+            c.execute("insert into x_intel.claims (claim_id, claim, queue_state, checked_by) "
+                      "values ('CL-8', 'plain', 'open', 'acme corp')")
+        self.conn.commit()
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        [rep] = self.run_digest(svc)
+        self.assertNotIn("status/1", svc.prompts[0])
+        self.assertNotIn("CL-8", svc.prompts[0])
+        self.assertEqual(rep["withheld"], 3)  # post 4 (text), post 1 (topic), claim CL-8 (checked_by)
+
     def test_review4_a_client_term_past_the_text_cut_still_withholds_the_row(self):
         with self.conn.cursor() as c:
             c.execute("update x_intel.x_signals set post_text = %s where post_id = '3'", ("x " * 300 + "acme corp",))
