@@ -1,0 +1,485 @@
+# Batch 3 input for infra/scripts/utils/source_coverage_add_batch.py (kept as the review copy of the batch).
+batch: 3
+checked_at: '2026-11-12'
+sources:
+  - id: openai-usage
+    name: OpenAI usage and costs
+    category: ai-cost
+    popularity_rank: 1
+    method: api
+    api_docs_url: https://developers.openai.com/api/reference/resources/organization/subresources/audit_logs/methods/get_costs
+    mcp_server: none found
+    auth_type: organisation Admin API key (not a project key)
+    rate_limit: not published (unverified)
+    cost: free; an Owner creates the admin key
+    entities: [costs_by_project, costs_by_line_item, usage_tokens, usage_requests]
+    bulk_or_webhook: costs in 1-day buckets with cursor pages; no webhook
+    coverage_pct: 10
+    current_status: partial
+    tos_notes: terms not read (unverified); costs carry no prompt content
+    pii_level: low
+    scores: {value: 5, cost: 1, effort: 1, risk: 1}
+    verdict: later
+    verdict_reason: top-5 next; one key (Infisical /openai) serves every system, and the gateway subjects give per-system calls but not dollars; a daily cost snapshot closes that
+    owner_action: admin key at https://platform.openai.com/settings/organization/admin-keys -> Infisical /openai OPENAI_ADMIN_KEY
+    evidence:
+      - https://developers.openai.com/api/reference/resources/organization/subresources/audit_logs/methods/get_costs
+  - id: anthropic-usage
+    name: Anthropic usage and cost
+    category: ai-cost
+    popularity_rank: 2
+    method: api
+    api_docs_url: https://platform.claude.com/docs/en/manage-claude/usage-cost-analytics-api
+    mcp_server: none found
+    auth_type: Admin API key (sk-ant-admin) + beta header analytics-usage-cost-2026-08-24
+    rate_limit: per organisation (figure not read); 1d buckets up to 31 per call
+    cost: free; needs a Console organisation (not individual or claude.ai Team accounts)
+    entities: [usage_tokens_by_model, cost_usd, workspace, api_key]
+    bulk_or_webhook: cursor pages, 365-day lookback; old usage_report/cost_report are legacy
+    coverage_pct: 10
+    current_status: partial
+    tos_notes: terms not read (unverified); no prompt content in the report
+    pii_level: low
+    scores: {value: 4, cost: 1, effort: 1, risk: 1}
+    verdict: later
+    verdict_reason: top-5 next with OpenAI into one ai_costs dataset; local quota already lands through ai-usage, API spend does not
+    owner_action: create an organisation and admin key at https://platform.claude.com/settings/admin-keys -> Infisical /anthropic ANTHROPIC_ADMIN_KEY
+    evidence:
+      - https://platform.claude.com/docs/en/manage-claude/usage-cost-analytics-api
+  - id: google-ads
+    name: Google Ads API
+    category: marketing
+    popularity_rank: 3
+    method: api
+    api_docs_url: https://developers.google.com/google-ads/api/docs/api-policy/access-levels
+    mcp_server: none found
+    auth_type: OAuth 2.0 or service account on a Cloud project (developer tokens sunset 2026-09-09)
+    rate_limit: Explorer 2,880 production operations/day; Basic 15,000/day
+    cost: free; Explorer access is applied for, Basic needs brand verification
+    entities: [campaigns, ad_groups, keywords, metrics]
+    bulk_or_webhook: GAQL search / searchStream; no webhook
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: API terms not read (unverified)
+    pii_level: low
+    scores: {value: 2, cost: 1, effort: 3, risk: 1}
+    verdict: skip
+    verdict_reason: no ad spend running; revisit with the first paid campaign
+    owner_action: null
+    evidence:
+      - https://developers.google.com/google-ads/api/docs/api-policy/access-levels
+      - https://developers.google.com/google-ads/api/docs/api-policy/developer-token
+  - id: meta-ads
+    name: Meta Marketing API
+    category: marketing
+    popularity_rank: 4
+    method: api
+    api_docs_url: https://developers.facebook.com/docs/marketing-api/insights
+    mcp_server: Meta Ads MCP (official, open beta, mcp.facebook.com/ads)
+    auth_type: OAuth token with ads_read on a Meta app
+    rate_limit: per app and ad account (X-FB-Ads-Insights-Throttle); development tier lowest
+    cost: free
+    entities: [account_insights, campaign_insights, adset_insights, ad_insights]
+    bulk_or_webhook: async report jobs (report_run_id kept 30 days)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: Platform Terms 3.d.i delete data without a business need (see batch 1 meta row)
+    pii_level: low
+    scores: {value: 2, cost: 1, effort: 3, risk: 2}
+    verdict: skip
+    verdict_reason: no ad account spending; same trigger as Google Ads
+    owner_action: null
+    evidence:
+      - https://developers.facebook.com/docs/marketing-api/insights
+      - https://developers.facebook.com/docs/marketing-api/insights/best-practices
+  - id: resend
+    name: Resend
+    category: email-delivery
+    popularity_rank: 5
+    method: api
+    flow: delivery-services
+    api_docs_url: https://resend.com/docs/dashboard/webhooks/introduction
+    mcp_server: none found
+    auth_type: API key (Bearer); webhooks signed with Svix
+    rate_limit: 10 req/s per team
+    cost: free plan with a daily send quota
+    entities: [email_sent, delivered, bounced, complained, opened, clicked]
+    bulk_or_webhook: webhooks are the main path (dedupe on svix-id)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: DPA deletes customer data within 90 days of termination; no AI clause; open/click tracking adds IP and device
+    pii_level: high
+    scores: {value: 3, cost: 1, effort: 2, risk: 2}
+    verdict: later
+    verdict_reason: platform-communication already sends through Resend; delivery events belong in its own cell first (hash recipients before any lake copy)
+    owner_action: create the webhook in https://resend.com/webhooks pointing at platform-communication; secret in Infisical /resend RESEND_WEBHOOK_SECRET
+    evidence:
+      - https://resend.com/docs/webhooks/event-types
+      - https://resend.com/docs/api-reference/rate-limit
+      - https://resend.com/legal/dpa
+  - id: cloudinary
+    name: Cloudinary
+    category: media
+    popularity_rank: 6
+    method: api
+    flow: delivery-services
+    api_docs_url: https://cloudinary.com/documentation/admin_api
+    mcp_server: cloudinary/asset-management-mcp (official repo; transport details conflict)
+    auth_type: Basic (API key + secret)
+    rate_limit: Admin API 500/h on free
+    cost: included in the plan
+    entities: [usage, resources, folders, transformations]
+    bulk_or_webhook: cursor pages; triggers/webhooks
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified)
+    pii_level: low
+    scores: {value: 1, cost: 1, effort: 1, risk: 1}
+    verdict: skip
+    verdict_reason: data-sources rates it low priority; only usage numbers matter and they fit the cloud-cost pipeline later
+    owner_action: null
+    evidence:
+      - https://cloudinary.com/documentation/admin_api_overview
+  - id: grab-merchant
+    name: Grab Merchant (GrabFood TH)
+    category: e-commerce
+    popularity_rank: 7
+    method: manual-export
+    flow: grabfood-merchant
+    api_docs_url: https://developer.grab.com/docs/grabfood/
+    mcp_server: none found
+    auth_type: OAuth client credentials (food.partner_api) for approved POS partners
+    rate_limit: unverified
+    cost: unverified
+    entities: [orders, menu, store_status]
+    bulk_or_webhook: order push for POS partners; no sales-report endpoint confirmed
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified); partner-only; do not scrape the merchant portal
+    pii_level: high
+    scores: {value: 3, cost: 1, effort: 2, risk: 3}
+    verdict: later
+    verdict_reason: no self-serve API for one restaurant; the daily sales summary mail (gmail flow) is the route once email intake runs
+    owner_action: check for a CSV sales export in https://merchant.grab.com/ and confirm the restaurant is still trading
+    evidence:
+      - https://developer.grab.com/docs/grabfood/
+  - id: line-man-wongnai
+    name: LINE MAN Wongnai merchant
+    category: e-commerce
+    popularity_rank: 8
+    method: none
+    api_docs_url: https://www.wongnai.com/pos/
+    mcp_server: none found
+    auth_type: no public developer portal
+    rate_limit: n/a
+    cost: n/a
+    entities: [orders, menu]
+    bulk_or_webhook: none confirmed (a third-party claims a partner order API)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified); do not scrape the Merchant App
+    pii_level: high
+    scores: {value: 2, cost: 1, effort: 3, risk: 3}
+    verdict: skip
+    verdict_reason: no public route and not confirmed in use
+    owner_action: null
+    evidence:
+      - https://www.wongnai.com/pos/
+  - id: fastwork
+    name: Fastwork
+    category: freelance
+    popularity_rank: 9
+    method: manual-export
+    flow: freelance-platforms
+    api_docs_url: https://fastwork.co/robots.txt
+    mcp_server: none found
+    auth_type: no API
+    rate_limit: n/a
+    cost: n/a
+    entities: [own_orders, earnings]
+    bulk_or_webhook: none
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: robots.txt disallows /me/* and /inbox (where own orders live); terms page returned empty (unverified)
+    scraping_allowed: false
+    pii_level: high
+    scores: {value: 2, cost: 1, effort: 2, risk: 4}
+    verdict: blocked-legal
+    verdict_reason: no API and robots.txt blocks the account area; only manual copies of own orders are allowed
+    owner_action: null
+    evidence:
+      - https://fastwork.co/robots.txt
+  - id: readwise
+    name: Readwise + Reader
+    category: knowledge
+    popularity_rank: 10
+    method: api
+    flow: reading-highlights
+    api_docs_url: https://readwise.io/api_deets
+    mcp_server: https://mcp2.readwise.io/mcp (official, in the Claude directory)
+    auth_type: access token (Token header)
+    rate_limit: 240/min; export endpoint pages with a cursor
+    cost: needs a Readwise subscription
+    entities: [books, highlights, tags, reader_documents]
+    bulk_or_webhook: /api/v2/export/ with updatedAfter (full + incremental); highlight webhooks
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified); own-data export is the intended use
+    pii_level: medium
+    scores: {value: 3, cost: 2, effort: 1, risk: 1}
+    verdict: later
+    verdict_reason: data-sources lists it as a candidate not confirmed in use; cheap to add once the owner confirms a subscription
+    owner_action: confirm the subscription; token at https://readwise.io/access_token -> Infisical /readwise
+    evidence:
+      - https://readwise.io/api_deets
+      - https://readwise.io/reader_api
+  - id: spotify
+    name: Spotify Web API
+    category: life
+    popularity_rank: 11
+    method: api
+    flow: watch-listen-history
+    api_docs_url: https://developer.spotify.com/documentation/web-api/reference/get-recently-played
+    mcp_server: none found
+    auth_type: OAuth authorization code (user-read-recently-played) + refresh token
+    rate_limit: rolling window (unverified)
+    cost: free; development mode needs Premium and allows 5 users (secondary sources)
+    entities: [recently_played_last_50]
+    bulk_or_webhook: none; full history only through the privacy data export
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: developer terms not read (unverified; ML training ban reported)
+    pii_level: high
+    scores: {value: 1, cost: 1, effort: 2, risk: 2}
+    verdict: skip
+    verdict_reason: only the last 50 plays per call; low value for the platform
+    owner_action: null
+    evidence:
+      - https://developer.spotify.com/documentation/web-api/reference/get-recently-played
+  - id: zoom
+    name: Zoom
+    category: productivity
+    popularity_rank: 12
+    method: api
+    flow: media-transcripts
+    api_docs_url: https://developers.zoom.us/docs/api/meetings/
+    mcp_server: https://developers.zoom.us/docs/mcp/servers/ (official, not opened)
+    auth_type: OAuth 2.0 / Server-to-Server OAuth
+    rate_limit: Free light 4/s and 6,000/day; Pro light 30/s
+    cost: API free; cloud recording needs a paid plan
+    entities: [meetings, recordings, transcripts_vtt]
+    bulk_or_webhook: recording and transcript webhooks
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: API terms not read (unverified); recordings hold other people's voices (PDPA consent)
+    pii_level: high
+    scores: {value: 2, cost: 2, effort: 2, risk: 3}
+    verdict: later
+    verdict_reason: the meeting-minutes service already takes uploaded video; a Zoom webhook only helps once meetings run on a paid Zoom plan
+    owner_action: say whether client meetings run on Zoom; if so, a Server-to-Server app at https://marketplace.zoom.us/develop/create -> Infisical /zoom
+    evidence:
+      - https://developers.zoom.us/docs/api/meetings/
+      - https://developers.zoom.us/docs/api/rate-limits/
+  - id: bank-of-thailand-api
+    name: Bank of Thailand API Portal
+    category: open-data
+    popularity_rank: 13
+    method: api
+    api_docs_url: https://portal.api.bot.or.th/
+    mcp_server: none found
+    auth_type: portal account + Authorization header (credential mandatory)
+    rate_limit: unverified (terms 9 allow BOT to limit at any time)
+    cost: free registration (unverified)
+    entities: [exchange_rates, interest_rates, bond_auctions, financial_statistics, bank_holidays]
+    bulk_or_webhook: none found
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms do not address redistribution, storage or AI training; user is responsible for use (2); keep credentials private (6)
+    pii_level: low
+    scores: {value: 4, cost: 1, effort: 1, risk: 1}
+    verdict: later
+    verdict_reason: top-5 next; official THB rates replace the Frankfurter feed (ECB rates) for Thai finance cells; one free key
+    owner_action: register at https://portal.api.bot.or.th/ and create an app key -> Infisical /bank-of-thailand BOT_API_KEY
+    evidence:
+      - https://portal.api.bot.or.th/
+      - https://portal.api.bot.or.th/terms
+  - id: set-market-data
+    name: SET market data
+    category: finance
+    popularity_rank: 14
+    method: api
+    api_docs_url: https://www.set.or.th/en/services/connectivity-and-data/data/smart-marketplace
+    mcp_server: none found
+    auth_type: SMART Marketplace membership or a broker account (Settrade Open API)
+    rate_limit: unverified
+    cost: paid (free trial only)
+    entities: [eod_prices, intraday, company_fundamentals]
+    bulk_or_webhook: unverified
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: SMART Marketplace terms not read; site data marked for personal/internal use (secondary source)
+    scraping_allowed: false
+    pii_level: low
+    scores: {value: 3, cost: 4, effort: 2, risk: 3}
+    verdict: later
+    verdict_reason: no free official API; buying data is the owner's call; never scrape set.or.th
+    owner_action: decide whether a SETSMART / SMART Marketplace plan is worth it (infoproducts@set.or.th)
+    evidence:
+      - https://www.set.or.th/en/services/connectivity-and-data/data/smart-marketplace
+  - id: data-go-th
+    name: data.go.th (CKAN)
+    category: open-data
+    popularity_rank: 15
+    method: api
+    api_docs_url: https://docs.ckan.org/en/latest/api/index.html
+    mcp_server: none found
+    auth_type: none for read actions (package_list answered without a key)
+    rate_limit: unverified
+    cost: free
+    entities: [dataset_metadata, resources]
+    bulk_or_webhook: per resource through CKAN; no dump
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: licence is per dataset (read license_id every time); "Open Data Common" belongs to opendata.tgo.or.th, not this portal
+    pii_level: low
+    scores: {value: 3, cost: 1, effort: 2, risk: 1}
+    verdict: later
+    verdict_reason: top-5 next; a daily catalogue snapshot (package_search metadata + licence) is credential-free; pick datasets after that
+    owner_action: null
+    evidence:
+      - https://docs.ckan.org/en/latest/api/index.html
+      - https://data.go.th/api/3/action/package_list?limit=1
+  - id: coingecko
+    name: CoinGecko API
+    category: finance
+    popularity_rank: 16
+    method: api
+    flow: market-capture
+    api_docs_url: https://docs.coingecko.com/reference/introduction
+    mcp_server: unverified
+    auth_type: Demo plan key (x_cg_demo_api_key); keyless public API for testing
+    rate_limit: Demo 100 calls/min, 10,000 credits/month
+    cost: Demo $0
+    entities: [prices, market_cap, volume, ohlc]
+    bulk_or_webhook: REST only
+    coverage_pct: 40
+    current_status: partial
+    tos_notes: API Terms 6.1 discourage caching (refresh within 24 h, encrypt, delete on termination), 6.2 no copying/storing beyond the terms, 4.1.6 no redistribution, 4.4 attribution "Powered by CoinGecko"
+    pii_level: low
+    scores: {value: 2, cost: 1, effort: 1, risk: 4}
+    verdict: blocked-legal
+    verdict_reason: market-capture already pulls CoinGecko by hand into Bronze, but the terms discourage keeping history; owner must decide before any schedule (and whether existing history stays)
+    owner_action: read https://www.coingecko.com/en/api_terms sections 4 and 6 and decide on keeping crypto price history
+    evidence:
+      - https://www.coingecko.com/en/api_terms
+      - https://www.coingecko.com/en/api/pricing
+      - https://docs.coingecko.com/docs/common-errors-rate-limit
+  - id: jobsdb
+    name: JobsDB Thailand
+    category: jobs
+    popularity_rank: 17
+    method: scrape
+    flow: job-capture
+    api_docs_url: https://developer.seek.com/
+    api_gap: SEEK APIs are partner-only (hirer posting and application export), no job-search read API
+    mcp_gap: no official MCP; the third-party jobspipe MCP is unverified
+    scraping_allowed: true
+    mcp_server: none official
+    auth_type: none for public search pages
+    rate_limit: unverified
+    cost: free
+    entities: [public_job_ads_search_results]
+    bulk_or_webhook: none
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: >-
+      robots.txt allows only keyword search (Allow: *?keywords) and disallows */job/ and /api/jobsearch/ for every
+      crawler; site ToS not readable (unverified). career-job-scraper jobs/jobsdb_scraper.py reads search pages only
+      and is not part of the scheduled hosted capture
+    pii_level: low
+    scores: {value: 3, cost: 1, effort: 2, risk: 4}
+    verdict: later
+    verdict_reason: robots allows search pages only and the ToS is unread; the owner decides before the scraper is ever scheduled (never fetch */job/ detail pages)
+    owner_action: read the JobsDB terms at https://th.jobsdb.com/ (footer Terms of Use) and decide whether search-page capture is acceptable
+    evidence:
+      - https://th.jobsdb.com/robots.txt
+      - https://developer.seek.com/introduction/terms-of-use
+  - id: jobthai
+    name: JobThai
+    category: jobs
+    popularity_rank: 18
+    method: none
+    api_docs_url: https://jobthai.com/en/terms-of-service-jobseeker
+    mcp_server: none found
+    auth_type: no API
+    rate_limit: n/a
+    cost: n/a
+    entities: [public_job_ads]
+    bulk_or_webhook: none
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: robots.txt allows / for all; job-seeker ToS bans reproducing, copying or disseminating its data without prior written consent (Thinknet Co., Ltd.)
+    scraping_allowed: false
+    pii_level: low
+    scores: {value: 3, cost: 1, effort: 2, risk: 5}
+    verdict: blocked-legal
+    verdict_reason: the ToS forbids copying without written consent; only a consent request from the owner can open it
+    owner_action: if wanted, ask Thinknet for written consent (contact on https://www.jobthai.com/)
+    evidence:
+      - https://www.jobthai.com/robots.txt
+      - https://jobthai.com/en/terms-of-service-jobseeker
+  - id: huggingface
+    name: Hugging Face Hub (trending)
+    category: ai-market
+    popularity_rank: 19
+    method: api
+    api_docs_url: https://huggingface.co/docs/hub/api
+    mcp_server: https://huggingface.co/mcp (official; interactive search, nothing extra for batch)
+    auth_type: none for public listing (anonymous tier); a free token raises the limit
+    rate_limit: anonymous 500 calls per 5 min per IP (RateLimit headers); a run makes 3
+    cost: free
+    entities: [trending_models, trending_datasets, trending_spaces]
+    bulk_or_webhook: REST listing with cursor Link headers; repo webhooks
+    coverage_pct: 30
+    current_status: partial
+    tos_notes: 'ToS has no clause on automated access or storing public metadata; robots.txt "Allow: /"; repo content licences are per repo (we keep metadata only)'
+    pii_level: low
+    scores: {value: 3, cost: 1, effort: 1, risk: 1}
+    verdict: ingest-now
+    verdict_reason: credential-free daily snapshot of the top 100 trending models, datasets and spaces into Bronze domain=market-intelligence (AI market signal); full repo metadata and papers are the next 70 %
+    pipeline:
+      workflow: .github/workflows/hf-trending.yml
+      heartbeat: hf-trending
+      jobs_queue: hf-trending
+      datasets: [hf_trending_models, hf_trending_datasets, hf_trending_spaces]
+    owner_action: null
+    evidence:
+      - https://huggingface.co/docs/hub/api
+      - https://huggingface.co/docs/hub/rate-limits
+      - https://huggingface.co/terms-of-service
+      - https://huggingface.co/robots.txt
+  - id: kaggle
+    name: Kaggle API
+    category: ai-market
+    popularity_rank: 20
+    method: api
+    api_docs_url: https://github.com/Kaggle/kaggle-api/blob/main/docs/README.md
+    mcp_server: https://www.kaggle.com/mcp (reported official; not verified)
+    auth_type: Kaggle account token (mandatory)
+    rate_limit: unverified
+    cost: free
+    entities: [datasets, competitions, leaderboards]
+    bulk_or_webhook: none
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms page body unreadable (unverified)
+    pii_level: low
+    scores: {value: 2, cost: 1, effort: 1, risk: 2}
+    verdict: later
+    verdict_reason: Hugging Face covers the AI-market signal for now; Kaggle needs a token and unread terms
+    owner_action: token at https://www.kaggle.com/settings/api -> Infisical /kaggle when wanted
+    evidence:
+      - https://github.com/Kaggle/kaggle-api/blob/main/docs/README.md
+next_batch: [hacker-news, arxiv, openalex, crossref, wikimedia-pageviews, npm-registry, pypi-stats, product-hunt,
+  google-trends, world-bank, imf-data, oecd, air4thai, tmd-weather, egp-procurement, dbd-datawarehouse, open-meteo,
+  gdelt, common-crawl, stack-exchange]
