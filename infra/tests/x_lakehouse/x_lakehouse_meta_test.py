@@ -465,6 +465,29 @@ class PgTests(unittest.TestCase):
         self.assertEqual(gw.bodies, [])
         self.assertFalse([k for k in self.store.list("meta/landing") if "tg-abcd1234-57" in k])
 
+    def test_album_captions_survive_a_merge_with_another_capture(self):
+        url = "https://facebook.com/p/posts/9"
+        landing(self.store, "", msg_id=60, text="อื่น", urls=[url])
+        landing(self.store, "", msg_id=61, group="96", text="คำบรรยาย 1", urls=[url], when=NOW + timedelta(minutes=1))
+        self.run_meta()
+        landing(self.store, "", msg_id=62, group="96", text="คำบรรยาย 2", when=NOW + timedelta(minutes=2))
+        self.run_meta()
+        self.assertEqual(self.rows()[0]["text"], "คำบรรยาย 1\nคำบรรยาย 2")
+
+    def test_a_repeated_text_moves_text_at_forward(self):
+        url = "https://facebook.com/p/posts/10"
+        landing(self.store, "", msg_id=63, text="A", urls=[url])
+        landing(self.store, "", msg_id=64, text="A", urls=[url], when=NOW + timedelta(minutes=10))
+        self.run_meta()
+        landing(self.store, "", msg_id=65, text="B", urls=[url], when=NOW + timedelta(minutes=5))  # late
+        self.run_meta()
+        self.assertEqual(self.rows()[0]["text"], "A")
+
+    def test_invalid_answers_are_reported(self):
+        landing(self.store, "", msg_id=66, text="x")
+        rep, _, _ = self.run_meta(gw=FakeGateway(label="nonsense"))
+        self.assertEqual((rep["labelling"], rep["invalid_answers"]), ("invalid_answers", 1))
+
     def test_m6_second_run_writes_nothing(self):
         landing(self.store, "", msg_id=8, text="x")
         self.run_meta()

@@ -32,6 +32,7 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import httpx
 import pyarrow as pa
+from psycopg.types.json import Jsonb
 import pyarrow.parquet as pq
 
 from .coerce import TZ
@@ -254,7 +255,7 @@ def land(store: Any, prefix: str, *, deleted: set[str], curated: set[str], write
 COLUMNS = ("post_key", "capture_ids", "first_captured_at", "last_captured_at", "platform", "surface", "group_label",
            "post_url", "url_key", "author_name", "text", "text_source", "image_keys", "tags", "owner_note",
            "content_label", "route", "domain", "topic", "withheld", "full_hit", "text_at", "ready_at",
-           "triage_version", "ocr_tries", "label_tries")
+           "capture_texts", "triage_version", "ocr_tries", "label_tries")
 
 
 def ddl() -> str:
@@ -285,6 +286,7 @@ create table if not exists {S}.meta_posts (
     full_hit boolean not null default false,
     text_at timestamptz,
     ready_at timestamptz,
+    capture_texts jsonb not null default '{{}}',
     triage_version text,
     ocr_tries int not null default 0,
     label_tries int not null default 0,
@@ -293,6 +295,7 @@ create table if not exists {S}.meta_posts (
 alter table {S}.meta_posts add column if not exists full_hit boolean not null default false;
 alter table {S}.meta_posts add column if not exists text_at timestamptz;
 alter table {S}.meta_posts add column if not exists ready_at timestamptz;
+alter table {S}.meta_posts add column if not exists capture_texts jsonb not null default '{{}}';
 create index if not exists meta_posts_captures_idx on {S}.meta_posts using gin (capture_ids);
 create table if not exists {S}.meta_parts (
     raw_key text primary key,
@@ -349,16 +352,46 @@ def _merge_capture(parts: list[dict[str, Any]]) -> dict[str, Any]:
             "first_at": min(p["captured_at"] for p in parts),
             "platform": first("platform", "unknown"), "surface": surface, "group_label": first("group_label"),
             "post_url": first("post_url"), "author_name": None if surface == "group" else first("author_name"),
-            "text": "\n".join(dict.fromkeys(texts))[:MAX_TEXT], "text_at": text_at,
+            "text": "\n".join(dict.fromkeys(texts))[:MAX_TEXT], "full_text": "\n".join(dict.fromkeys(texts)),
+            "text_at": text_at,
             "image_keys": _union([], (k for p in parts for k in p["image_keys"])),
             "tags": _union([], (t for x in parsed for t in x.tags)),
             "owner_note": " / ".join(dict.fromkeys(x.owner_note for x in parsed if x.owner_note)) or None}
 
 
+def _add_text(texts: dict[str, Any], cid: str, text: str, at: datetime | None) -> dict[str, Any]:
+    """Per-capture pasted text: an album's captions add up inside its capture, whatever run they land in."""
+    out = dict(texts)
+    if text:
+        old = out.get(cid) or {}
+        lines = (old.get("text") or "").split("\n") + text.split("\n")
+        ats = [x for x in (old.get("at"), at.isoformat() if at else None) if x]
+        out[cid] = {"text": "\n".join(dict.fromkeys(x for x in lines if x)), "at": max(ats) if ats else None}
+    return out
+
+
+def _winner(texts: dict[str, Any]) -> tuple[str, datetime | None]:
+    """The newest capture's text (by when it was sent): identical texts still move text_at forward."""
+    if not texts:
+        return "", None
+    best = max(texts.values(), key=lambda v: v.get("at") or "")
+    return best["text"], datetime.fromisoformat(best["at"]) if best.get("at") else None
+
+
+def _merge_texts(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    out = dict(a)
+    for cid, v in b.items():
+        out = _add_text(out, cid, v.get("text") or "", datetime.fromisoformat(v["at"]) if v.get("at") else None)
+    return out
+
+
 def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[str, Any]:
     """Merge row ``drop`` into row ``keep`` (same post) and delete ``drop``. The label is cleared."""
-    both = [x for x in (keep, drop) if x["text_source"] == "pasted"]
-    pasted = max(both, key=lambda x: x["text_at"] or x["first_captured_at"]) if both else keep  # newest text wins
+    texts = _merge_texts(keep["capture_texts"] or {}, drop["capture_texts"] or {})
+    win_text, win_at = _winner(texts)
+    ocr_row = keep if keep["text_source"] != "pasted" else drop
+    pasted = {"text": win_text[:MAX_TEXT], "text_source": "pasted", "text_at": win_at} if win_text else {
+        "text": ocr_row["text"], "text_source": ocr_row["text_source"], "text_at": None}
     surface = keep["surface"] if keep["surface"] != "unknown" else drop["surface"]
     upd = {"capture_ids": _union(keep["capture_ids"], drop["capture_ids"]),
            "first_captured_at": min(keep["first_captured_at"], drop["first_captured_at"]),
@@ -367,6 +400,7 @@ def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[st
            "group_label": keep["group_label"] or drop["group_label"],
            "author_name": None if surface == "group" else (keep["author_name"] or drop["author_name"]),
            "text": pasted["text"], "text_source": pasted["text_source"], "text_at": pasted["text_at"],
+           "capture_texts": Jsonb(texts),
            "image_keys": _union(keep["image_keys"], drop["image_keys"]), "tags": _union(keep["tags"], drop["tags"]),
            "owner_note": " / ".join(dict.fromkeys(x for x in (keep["owner_note"], drop["owner_note"]) if x)) or None,
            "content_label": None, "route": None, "domain": None, "topic": None, "withheld": False, "label_tries": 0,
@@ -377,7 +411,7 @@ def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[st
         c.execute(f"delete from {S}.meta_posts where post_key = %s", (drop["post_key"],))
         c.execute(f"update {S}.meta_posts set {', '.join(f'{k} = %s' for k in upd)}, updated_at = now() "
                   f"where post_key = %s", [*upd.values(), keep["post_key"]])
-    return keep | upd
+    return keep | upd | {"capture_texts": texts}
 
 
 def full_hit(texts: Iterable[Any], denylist: Sequence[str] | None) -> bool:
@@ -413,23 +447,19 @@ def upsert(conn: Any, parts: list[dict[str, Any]], denylist: Sequence[str] | Non
                       "group_label": cap["group_label"], "post_url": cap["post_url"], "url_key": uk,
                       "author_name": cap["author_name"], "text": cap["text"],
                       "text_source": "pasted" if cap["text"] else "none", "image_keys": cap["image_keys"],
-                      "tags": cap["tags"], "owner_note": cap["owner_note"], "full_hit": hit, "text_at": cap["text_at"]}
+                      "tags": cap["tags"], "owner_note": cap["owner_note"], "full_hit": hit, "text_at": cap["text_at"],
+                      "capture_texts": Jsonb(_add_text({}, cid, cap["full_text"], cap["text_at"]))}
             cols = list(values)
             with conn.cursor() as c:
                 c.execute(f"insert into {S}.meta_posts ({', '.join(cols)}) values ({', '.join(['%s'] * len(cols))})",
                           [values[k] for k in cols])
         else:
             r = rows[0]
-            same_capture = r["capture_ids"] == [cid]  # the row's text can only be this capture's
-            new_text = cap["text"]
-            if same_capture and r["text_source"] == "pasted" and new_text:
-                # More parts of one album: its captions add up (as when all parts land in one run).
-                joined = "\n".join(dict.fromkeys(r["text"].split("\n") + new_text.split("\n")))
-                hit = hit or full_hit([joined], denylist)  # the combined captions, before the cut
-                new_text = joined[:MAX_TEXT]
-            # Different captures of one post: the newest text wins, by when the text was sent.
-            newer = same_capture or r["text_at"] is None or (cap["text_at"] or cap["captured_at"]) >= r["text_at"]
-            text_changed = bool(new_text) and (newer or r["text_source"] != "pasted") and new_text != r["text"]
+            texts = _add_text(r["capture_texts"] or {}, cid, cap["full_text"], cap["text_at"])
+            hit = hit or any(full_hit([v.get("text")], denylist) for v in texts.values())  # whole captions
+            win_text, win_at = _winner(texts)
+            new_text = win_text[:MAX_TEXT]
+            text_changed = bool(new_text) and new_text != r["text"]
             surface = r["surface"] if r["surface"] != "unknown" else cap["surface"]
             upd = {"capture_ids": _union(r["capture_ids"], [cid]),
                    "first_captured_at": min(r["first_captured_at"], cap["first_at"]),
@@ -443,9 +473,11 @@ def upsert(conn: Any, parts: list[dict[str, Any]], denylist: Sequence[str] | Non
                    "full_hit": r["full_hit"] or hit}
             new_images = bool(set(cap["image_keys"]) - set(r["image_keys"]))
             screened = ("group_label", "post_url", "author_name", "tags", "owner_note")
+            upd["capture_texts"] = Jsonb(texts)
+            if win_text:
+                upd["text_at"] = win_at  # moves forward even when the newest text equals the stored one
             if text_changed:
-                upd |= {"text": new_text, "text_source": "pasted",
-                        "text_at": max(x for x in (r["text_at"], cap["text_at"]) if x) if same_capture else cap["text_at"]}
+                upd |= {"text": new_text, "text_source": "pasted"}
             elif new_images and r["text_source"] != "pasted":
                 upd |= {"text": "", "text_source": "none", "ocr_tries": 0}  # OCR again over every image
             if text_changed or "text_source" in upd or any(upd[k] != r[k] for k in screened):
@@ -630,7 +662,7 @@ def label(conn: Any, cfg: Config, http: httpx.Client, now: datetime | None = Non
     token = cfg.require("AI_GATEWAY_TOKEN")
     route = cfg.get("X_META_ROUTE", cfg.get("X_WEEKLY_ROUTE", "x-digest"))
     domains = [d for d in _domains(conn) if not any_term(d, denylist)]
-    labelled, errors = 0, 0
+    labelled, errors, invalid = 0, 0, 0
     for batch in batches(todo, domains):
         try:
             answers = ask_labels(http, token, route, batch, domains)
@@ -651,11 +683,13 @@ def label(conn: Any, cfg: Config, http: httpx.Client, now: datetime | None = Non
                               (lab, rt, dom, top, TRIAGE_VERSION, now or datetime.now(timezone.utc), r["post_key"]))
                     labelled += 1
                 else:
+                    invalid += 1 if a else 0  # an empty answer is the batch's gateway error, counted there
                     c.execute(f"update {S}.meta_posts set label_tries = label_tries + 1 where post_key = %s",
                               (r["post_key"],))
         conn.commit()
-    return {"labelling": "ok" if not errors else "gateway_error", "labelled": labelled, "withheld": withheld,
-            "gateway_errors": errors}
+    status = "gateway_error" if errors else "invalid_answers" if invalid else "ok"
+    return {"labelling": status, "labelled": labelled, "withheld": withheld, "gateway_errors": errors,
+            "invalid_answers": invalid}
 
 
 # --------------------------------------------------------------------------------- delete, retention

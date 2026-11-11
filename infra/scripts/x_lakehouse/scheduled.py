@@ -83,8 +83,8 @@ def _issues(events: list[dict[str, object]]) -> list[str]:
             for part in ("landing", "ocr", "labelling"):
                 if str(e.get(part, "")).startswith("error"):
                     out.append(f"meta {part}: {str(e.get(part))[:60]}")
-            if e.get("labelling") == "gateway_error":
-                out.append("meta labelling: gateway_error")
+            if e.get("labelling") in ("gateway_error", "invalid_answers"):
+                out.append(f"meta labelling: {e.get('labelling')}")
             ret = e.get("retention")
             if isinstance(ret, dict) and ret.get("stale_landing"):
                 out.append("meta retention: stale landing left")
