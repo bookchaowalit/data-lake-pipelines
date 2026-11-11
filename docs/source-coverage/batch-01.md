@@ -43,8 +43,14 @@ registry: ../../repository-catalog/registries/source-coverage.yaml
 - ใช้ `GITHUB_TOKEN` ของ workflow เอง ไม่ต้องมี secret ใหม่
 - ตัด commit message, อีเมล และ body ออกก่อนลง landing
 - heartbeat `github-activity` ถ้าไม่มีรอบไหนเข้ามาภายใน 26 ชม. จะแจ้งเตือนทาง Telegram
-- ลองรันกับ API จริงในเครื่อง 2026-11-12: ได้ 119 repo และ 300 event
-- ผลรอบแรกบน R2 ดูได้จาก run ของ workflow และ manifest ใน `control/manifests/source=github/`
+- รันจริงบน R2 วันที่ 2026-11-12 ผ่านทั้ง capture และ heartbeat ([run 43067986523](https://github.com/bookchaowalit/data-lake-pipelines/actions/runs/43067986523)):
+  ได้ 300 event และ 119 repo ลง Bronze
+  manifest อยู่ที่ `control/manifests/source=github/batch_id=dd85a497…` (events) และ `…d92ae73b…` (repos)
+- รันซ้ำแล้ว events ได้ `new: false` แปลว่าอ่าน batch เดิมกลับจาก R2 ได้ ไม่เขียนซ้ำ
+  ([run 43068222264](https://github.com/bookchaowalit/data-lake-pipelines/actions/runs/43068222264))
+- deploy แล้ว: uptime Worker target `github-activity` (26 ชม.) และ jobs queue job `github-activity` (`10 3 * * *` UTC)
+- ยังไม่มี Silver/Gold ของ GitHub เพราะรอบนี้ทำถึง Bronze ตาม spec
+  Silver (dedupe event ตาม `source_record_id`) จะทำเมื่อมีคนใช้ข้อมูลนี้ (delivery metrics)
 
 ## Top 5 ที่ควร ingest ต่อ
 
@@ -82,11 +88,23 @@ registry: ../../repository-catalog/registries/source-coverage.yaml
 - **Reddit**: เงื่อนไข non-commercial และข้อห้ามใช้ train ML อ่านได้จากแหล่งรองเท่านั้น
   เพราะหน้าทางการบล็อกการ fetch
 
-## จุดที่ยังไม่ได้ยืนยัน
+## ToS ที่ตรวจเพิ่ม และจุดที่ยังไม่ได้ยืนยัน
+
+ยืนยันจากหน้าทางการเพิ่มเติม 2026-11-12:
+- **Microsoft**: APIs Terms §3(b)(4) ห้ามสร้าง database หรือสำเนาข้อมูลเกินกว่าที่ use case ของแอปต้องใช้
+  ใช้ยืนยันเหตุผลที่ skip M365 เพิ่มอีกข้อ นอกจากเหตุที่เป็น tenant บริษัท
+- **LINE**: User Data Policy §3.2.3 ให้เก็บข้อมูล Friend/Group ได้ไม่เกิน 24 ชม.
+  ถ้าจะเก็บข้อมูลผู้ใช้นานกว่านั้นต้องแจ้งผู้ใช้ก่อน และต้องลบเมื่อผู้ใช้ขอ
+  pipeline LINE จึงต้องมีทั้งการแจ้งผู้ใช้และทางลบข้อมูล
+- **Jira** (Developer Terms §9.2) และ **Linear** (AI Addendum §13 ไม่ train บน customer data) ไม่มีข้อห้ามเรื่อง cache
+
+ยังไม่ได้ยืนยัน เพราะหน้าทางการบล็อกการ fetch:
+- Salesforce MSA และ Notion Developer Terms ทั้งสองแถวเป็น skip จึงไม่กระทบรอบนี้
+- **PostHog terms** owner ต้องอ่านพร้อมราคา batch export ก่อนเปิด export
+- **Reddit Data API Terms** owner ต้องอ่านก่อน capture ใดๆ
 
 ตัวเลข rate limit ของ Salesforce, ราคา LINE OA ไทย และราคา batch export ของ PostHog
-มาจาก search snippet หรือแหล่งรอง ส่วน ToS ของ Linear, Jira, Notion, Microsoft และ LINE ยังไม่ได้อ่าน
-ทุกจุดเขียนว่า `unverified` ไว้ในแถวของแหล่งนั้นแล้ว
+มาจาก search snippet หรือแหล่งรอง และเขียนว่า `unverified` ไว้ในแถวของแหล่งนั้นแล้ว
 
 ## Batch 2 (เรียงไว้แล้ว)
 
