@@ -183,6 +183,32 @@ describe('webhook', () => {
     expect(body.reply_parameters).toEqual({ message_id: 10, allow_sending_without_reply: true });
   });
 
+  it('an unknown send outcome is not resent', async () => {
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+      if (String(input).endsWith('/sendMessage')) { calls++; throw new TypeError('network'); }
+      return (realFetch as typeof fetch)(input, init);
+    }));
+    expect((await post(msg({ text: 'x' }))).status).toBe(200);
+    expect((await post(msg({ text: 'x' }))).status).toBe(200);
+    expect(calls).toBe(1);
+  });
+
+  it('a transient getFile error is retried before anything is written', async () => {
+    const realFetch = globalThis.fetch;
+    let fail = true;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+      if (String(input).endsWith('/getFile') && fail) { fail = false; return new Response('', { status: 502 }); }
+      return (realFetch as typeof fetch)(input, init);
+    }));
+    expect((await post(msg({ caption: 'shot', photo: [{ file_id: 'p' }] }))).status).toBe(500);
+    expect(keys()).toEqual([]);
+    expect((await post(msg({ caption: 'shot', photo: [{ file_id: 'p' }] }))).status).toBe(200);
+    const json = keys().find((k) => k.endsWith('.json'))!;
+    expect(bucket.json(json).image_keys).toHaveLength(1);
+  });
+
   it('refuses an empty message', async () => {
     await post(msg({ text: '   ' }));
     expect(keys()).toEqual([]);

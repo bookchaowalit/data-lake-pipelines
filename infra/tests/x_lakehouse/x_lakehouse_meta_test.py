@@ -46,6 +46,12 @@ class UrlTests(unittest.TestCase):
         self.assertEqual(n("https://instagr.am/p/AbC/"), "https://instagram.com/p/AbC")
         self.assertEqual(n("https://fb.com/story.php?story_fbid=1&id=2"), "https://facebook.com/story.php?id=2&story_fbid=1")
 
+    def test_links_without_a_scheme(self):
+        self.assertEqual(meta.normalize_url("facebook.com/groups/123/posts/456/"), "https://facebook.com/groups/123/posts/456")
+        p = meta.parse_message("", ["m.facebook.com/groups/1/posts/2"])
+        self.assertEqual((p.platform, p.surface), ("facebook", "group"))
+        self.assertIsNone(meta._safe_url("https://"))
+
     def test_identifying_params_are_sorted(self):
         self.assertEqual(meta.normalize_url("https://facebook.com/permalink.php?story_fbid=9&id=7"),
                          meta.normalize_url("https://facebook.com/permalink.php?id=7&story_fbid=9"))
@@ -411,6 +417,42 @@ class PgTests(unittest.TestCase):
         self.run_meta()
         [r] = self.rows()
         self.assertEqual(r["text"], "ใหม่กว่า")
+
+    def test_a_post_labelled_late_reaches_the_next_digest(self):
+        landing(self.store, "", msg_id=50, text="ข่าวด่วน", when=NOW - timedelta(hours=10))
+        self.run_meta(gw=FakeGateway(status=502), now=NOW - timedelta(hours=9))
+        self.run_meta(now=NOW)  # labelled now
+        items = meta.digest_items(self.conn, NOW - timedelta(minutes=5), NOW + timedelta(minutes=5), cfg_denylist())
+        self.assertEqual(len(items), 1)
+
+    def test_album_captions_across_runs_add_up(self):
+        landing(self.store, "", msg_id=51, group="93", text="ภาพที่หนึ่ง", images=[b"a"])
+        self.run_meta()
+        landing(self.store, "", msg_id=52, group="93", text="ภาพที่สอง", images=[b"b"], when=NOW + timedelta(minutes=1))
+        self.run_meta()
+        self.assertEqual(self.rows()[0]["text"], "ภาพที่หนึ่ง\nภาพที่สอง")
+
+    def test_newest_text_is_by_when_the_text_was_sent(self):
+        url = "https://facebook.com/p/posts/8"
+        landing(self.store, "", msg_id=53, group="94", text="เก่า 09:00")
+        landing(self.store, "", msg_id=54, text="ใหม่ 09:05", urls=[url], when=NOW + timedelta(minutes=5))
+        self.run_meta()
+        landing(self.store, "", msg_id=55, group="94", images=[b"late"], when=NOW + timedelta(minutes=6))
+        self.run_meta()
+        landing(self.store, "", msg_id=56, group="94", urls=[url], when=NOW + timedelta(minutes=7))
+        self.run_meta()
+        [r] = self.rows()
+        self.assertEqual(r["text"], "ใหม่ 09:05")
+
+    def test_an_unreadable_denylist_file_fails_closed_and_cleanup_runs(self):
+        landing(self.store, "", msg_id=57, text="old", when=NOW - timedelta(days=31))
+        with tempfile.NamedTemporaryFile("wb", suffix=".txt", delete=False) as fh:
+            fh.write(b"\xff\xfe bad utf8")
+        rep, gw, _ = self.run_meta(c=Config({"CLIENT_DENYLIST_PATH": fh.name, "AI_GATEWAY_TOKEN": "t"}))
+        os.unlink(fh.name)
+        self.assertEqual(rep["labelling"], "skipped_no_denylist")
+        self.assertEqual(gw.bodies, [])
+        self.assertFalse([k for k in self.store.list("meta/landing") if "tg-abcd1234-57" in k])
 
     def test_m6_second_run_writes_nothing(self):
         landing(self.store, "", msg_id=8, text="x")

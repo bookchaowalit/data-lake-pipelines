@@ -105,8 +105,9 @@ async function telegram(env: Env, method: string, body: Record<string, unknown>)
   });
 }
 
-/** 'ok', 'retry' (429, 5xx, network or timeout) or 'failed' (any other refusal: retrying cannot help). */
-async function reply(env: Env, msg: TelegramMessage, text: string): Promise<'ok' | 'retry' | 'failed'> {
+/** 'ok'; 'retry' when Telegram definitely did not send it (429 or 5xx); 'failed' for any other refusal
+ *  (retrying cannot help); 'unknown' on a network error or timeout (it may have been sent: never resent). */
+async function reply(env: Env, msg: TelegramMessage, text: string): Promise<'ok' | 'retry' | 'failed' | 'unknown'> {
   try {
     const r = await telegram(env, 'sendMessage', { chat_id: msg.chat.id, text, disable_web_page_preview: true,
       reply_parameters: { message_id: msg.message_id, allow_sending_without_reply: true } });
@@ -115,7 +116,7 @@ async function reply(env: Env, msg: TelegramMessage, text: string): Promise<'ok'
     return r.status === 429 || r.status >= 500 ? 'retry' : 'failed';
   } catch (error) {
     log(env, 'reply_failed', { error: errorName(error) });
-    return 'retry';
+    return 'unknown';
   }
 }
 
@@ -123,14 +124,33 @@ class ReplyFailed extends Error {
   override name = 'ReplyFailed';
 }
 
-/** Download one Telegram file; null when it is too big or Telegram refuses. */
+class TransientTelegram extends Error {
+  override name = 'TransientTelegram';
+}
+
+const transient = (status: number) => status === 429 || status >= 500;
+
+/** Download one Telegram file; null when it is too big or Telegram refuses for good. A 429/5xx or a network
+ *  error throws, so the update is answered 500 and resent before any landing file is written. */
 async function download(env: Env, fileId: string): Promise<ArrayBuffer | null> {
-  const r = await telegram(env, 'getFile', { file_id: fileId });
+  let r: Response;
+  try {
+    r = await telegram(env, 'getFile', { file_id: fileId });
+  } catch {
+    throw new TransientTelegram();
+  }
+  if (transient(r.status)) throw new TransientTelegram();
   if (!r.ok) return null;
   const info = (await r.json()) as { ok?: boolean; result?: { file_path?: string; file_size?: number } };
   const path = info.result?.file_path;
   if (!info.ok || !path || (info.result?.file_size ?? 0) > MAX_IMAGE_BYTES) return null;
-  const f = await fetch(`https://api.telegram.org/file/bot${env.META_CAPTURE_BOT_TOKEN}/${path}`, { signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS) });
+  let f: Response;
+  try {
+    f = await fetch(`https://api.telegram.org/file/bot${env.META_CAPTURE_BOT_TOKEN}/${path}`, { signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS) });
+  } catch {
+    throw new TransientTelegram();
+  }
+  if (transient(f.status)) throw new TransientTelegram();
   if (!f.ok) return null;
   const data = await f.arrayBuffer();
   return data.byteLength > MAX_IMAGE_BYTES ? null : data;

@@ -68,7 +68,10 @@ def _host(netloc: str) -> str:
 
 def normalize_url(url: str) -> str:
     """Canonical form of a shared link: Meta hosts folded, tracking params and fragment dropped."""
-    parts = urlsplit(url.strip())
+    url = url.strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", url, re.I):
+        url = "https://" + url.lstrip("/")  # Telegram url entities may come without a scheme
+    parts = urlsplit(url)
     host = _host(parts.netloc)
     if host in ("l.facebook.com", "lm.facebook.com", "l.instagram.com") or (host == "facebook.com" and parts.path == "/l.php"):
         target = dict(parse_qsl(parts.query)).get("u")
@@ -85,9 +88,10 @@ def _safe_url(url: str) -> str | None:
     """normalize_url, or None for a link urlsplit cannot read (e.g. ``https://[broken``): one bad link
     never fails the capture or the batch."""
     try:
-        return normalize_url(url)
+        out = normalize_url(url)
     except ValueError:
         return None
+    return out if urlsplit(out).hostname else None
 
 
 def platform_of(url: str | None) -> str:
@@ -249,8 +253,8 @@ def land(store: Any, prefix: str, *, deleted: set[str], curated: set[str], write
 
 COLUMNS = ("post_key", "capture_ids", "first_captured_at", "last_captured_at", "platform", "surface", "group_label",
            "post_url", "url_key", "author_name", "text", "text_source", "image_keys", "tags", "owner_note",
-           "content_label", "route", "domain", "topic", "withheld", "full_hit", "triage_version", "ocr_tries",
-           "label_tries")
+           "content_label", "route", "domain", "topic", "withheld", "full_hit", "text_at", "ready_at",
+           "triage_version", "ocr_tries", "label_tries")
 
 
 def ddl() -> str:
@@ -278,12 +282,16 @@ create table if not exists {S}.meta_posts (
     topic text,
     withheld boolean not null default false,
     full_hit boolean not null default false,
+    text_at timestamptz,
+    ready_at timestamptz,
     triage_version text,
     ocr_tries int not null default 0,
     label_tries int not null default 0,
     updated_at timestamptz not null default now()
 );
 alter table {S}.meta_posts add column if not exists full_hit boolean not null default false;
+alter table {S}.meta_posts add column if not exists text_at timestamptz;
+alter table {S}.meta_posts add column if not exists ready_at timestamptz;
 create index if not exists meta_posts_captures_idx on {S}.meta_posts using gin (capture_ids);
 create table if not exists {S}.meta_parts (
     raw_key text primary key,
@@ -295,8 +303,9 @@ create table if not exists {S}.meta_deleted (
     capture_id text primary key,
     deleted_at timestamptz not null default now()
 );
-create or replace view {S}.mart_meta_priority as
-select post_key, last_captured_at, platform, surface, group_label, post_url, text, tags, owner_note,
+drop view if exists {S}.mart_meta_priority;
+create view {S}.mart_meta_priority as
+select post_key, ready_at, last_captured_at, platform, surface, group_label, post_url, text, tags, owner_note,
        content_label, route, domain, topic
   from {S}.meta_posts
  where not withheld and not full_hit and route in ('alert_digest', 'verify')
@@ -334,11 +343,12 @@ def _merge_capture(parts: list[dict[str, Any]]) -> dict[str, Any]:
     first = lambda attr, unknown=None: next((getattr(x, attr) for x in parsed if getattr(x, attr) not in (None, "unknown")), unknown)  # noqa: E731
     surface = first("surface", "unknown")
     texts = [x.text for x in parsed if x.text]
+    text_at = max((p["captured_at"] for p, x in zip(parts, parsed) if x.text), default=None)
     return {"capture_id": parts[0]["capture_id"], "captured_at": max(p["captured_at"] for p in parts),
             "first_at": min(p["captured_at"] for p in parts),
             "platform": first("platform", "unknown"), "surface": surface, "group_label": first("group_label"),
             "post_url": first("post_url"), "author_name": None if surface == "group" else first("author_name"),
-            "text": "\n".join(dict.fromkeys(texts))[:MAX_TEXT],
+            "text": "\n".join(dict.fromkeys(texts))[:MAX_TEXT], "text_at": text_at,
             "image_keys": _union([], (k for p in parts for k in p["image_keys"])),
             "tags": _union([], (t for x in parsed for t in x.tags)),
             "owner_note": " / ".join(dict.fromkeys(x.owner_note for x in parsed if x.owner_note)) or None}
@@ -347,7 +357,7 @@ def _merge_capture(parts: list[dict[str, Any]]) -> dict[str, Any]:
 def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[str, Any]:
     """Merge row ``drop`` into row ``keep`` (same post) and delete ``drop``. The label is cleared."""
     both = [x for x in (keep, drop) if x["text_source"] == "pasted"]
-    pasted = max(both, key=lambda x: x["last_captured_at"]) if both else keep  # the newest pasted text wins
+    pasted = max(both, key=lambda x: x["text_at"] or x["first_captured_at"]) if both else keep  # newest text wins
     surface = keep["surface"] if keep["surface"] != "unknown" else drop["surface"]
     upd = {"capture_ids": _union(keep["capture_ids"], drop["capture_ids"]),
            "first_captured_at": min(keep["first_captured_at"], drop["first_captured_at"]),
@@ -355,7 +365,7 @@ def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[st
            "platform": keep["platform"] if keep["platform"] != "unknown" else drop["platform"], "surface": surface,
            "group_label": keep["group_label"] or drop["group_label"],
            "author_name": None if surface == "group" else (keep["author_name"] or drop["author_name"]),
-           "text": pasted["text"], "text_source": pasted["text_source"],
+           "text": pasted["text"], "text_source": pasted["text_source"], "text_at": pasted["text_at"],
            "image_keys": _union(keep["image_keys"], drop["image_keys"]), "tags": _union(keep["tags"], drop["tags"]),
            "owner_note": " / ".join(dict.fromkeys(x for x in (keep["owner_note"], drop["owner_note"]) if x)) or None,
            "content_label": None, "route": None, "domain": None, "topic": None, "withheld": False, "label_tries": 0,
@@ -402,15 +412,21 @@ def upsert(conn: Any, parts: list[dict[str, Any]], denylist: Sequence[str] | Non
                       "group_label": cap["group_label"], "post_url": cap["post_url"], "url_key": uk,
                       "author_name": cap["author_name"], "text": cap["text"],
                       "text_source": "pasted" if cap["text"] else "none", "image_keys": cap["image_keys"],
-                      "tags": cap["tags"], "owner_note": cap["owner_note"], "full_hit": hit}
+                      "tags": cap["tags"], "owner_note": cap["owner_note"], "full_hit": hit, "text_at": cap["text_at"]}
             cols = list(values)
             with conn.cursor() as c:
                 c.execute(f"insert into {S}.meta_posts ({', '.join(cols)}) values ({', '.join(['%s'] * len(cols))})",
                           [values[k] for k in cols])
         else:
             r = rows[0]
-            newer = cap["captured_at"] >= r["last_captured_at"]
-            text_changed = bool(cap["text"]) and (newer or r["text_source"] != "pasted") and cap["text"] != r["text"]
+            same_capture = r["capture_ids"] == [cid]  # the row's text can only be this capture's
+            new_text = cap["text"]
+            if same_capture and r["text_source"] == "pasted" and new_text:
+                # More parts of one album: its captions add up (as when all parts land in one run).
+                new_text = "\n".join(dict.fromkeys(r["text"].split("\n") + new_text.split("\n")))[:MAX_TEXT]
+            # Different captures of one post: the newest text wins, by when the text was sent.
+            newer = same_capture or r["text_at"] is None or (cap["text_at"] or cap["captured_at"]) >= r["text_at"]
+            text_changed = bool(new_text) and (newer or r["text_source"] != "pasted") and new_text != r["text"]
             surface = r["surface"] if r["surface"] != "unknown" else cap["surface"]
             upd = {"capture_ids": _union(r["capture_ids"], [cid]),
                    "first_captured_at": min(r["first_captured_at"], cap["first_at"]),
@@ -425,7 +441,8 @@ def upsert(conn: Any, parts: list[dict[str, Any]], denylist: Sequence[str] | Non
             new_images = bool(set(cap["image_keys"]) - set(r["image_keys"]))
             screened = ("group_label", "post_url", "author_name", "tags", "owner_note")
             if text_changed:
-                upd |= {"text": cap["text"], "text_source": "pasted"}
+                upd |= {"text": new_text, "text_source": "pasted",
+                        "text_at": max(x for x in (r["text_at"], cap["text_at"]) if x) if same_capture else cap["text_at"]}
             elif new_images and r["text_source"] != "pasted":
                 upd |= {"text": "", "text_source": "none", "ocr_tries": 0}  # OCR again over every image
             if text_changed or "text_source" in upd or any(upd[k] != r[k] for k in screened):
@@ -586,10 +603,10 @@ def batches(posts: Sequence[dict[str, Any]], domains: Sequence[str]) -> list[lis
     return out
 
 
-def label(conn: Any, cfg: Config, http: httpx.Client) -> dict[str, Any]:
+def label(conn: Any, cfg: Config, http: httpx.Client, now: datetime | None = None) -> dict[str, Any]:
     try:
         denylist = load_denylist(cfg)
-    except DigestError:
+    except (DigestError, OSError, ValueError):
         return {"labelling": "skipped_no_denylist", "labelled": 0, "withheld": 0}
     rows = _fetch(conn, "content_label is null and not withheld and text <> '' and label_tries < %s "
                         "order by last_captured_at", (MAX_TRIES,))
@@ -624,9 +641,11 @@ def label(conn: Any, cfg: Config, http: httpx.Client) -> dict[str, Any]:
                     top = str(a.get("topic") or "")[:60] or None
                     if any_term([dom, top], denylist):
                         dom = top = None
+                    # ready_at: when the post became digest-ready, so a post labelled late (OCR or gateway
+                    # retries) still reaches the next digest window.
                     c.execute(f"update {S}.meta_posts set content_label = %s, route = %s, domain = %s, topic = %s, "
-                              f"triage_version = %s, updated_at = now() where post_key = %s",
-                              (lab, rt, dom, top, TRIAGE_VERSION, r["post_key"]))
+                              f"triage_version = %s, ready_at = %s, updated_at = now() where post_key = %s",
+                              (lab, rt, dom, top, TRIAGE_VERSION, now or datetime.now(timezone.utc), r["post_key"]))
                     labelled += 1
                 else:
                     c.execute(f"update {S}.meta_posts set label_tries = label_tries + 1 where post_key = %s",
@@ -718,7 +737,7 @@ def run(conn: Any, cfg: Config, *, mode: str, store: Any, prefix: str, now: date
     conn.commit()
     try:
         denylist: tuple[str, ...] | None = load_denylist(cfg)
-    except DigestError:
+    except (DigestError, OSError, ValueError):  # unreadable or non-UTF-8 file: fail closed, cleanup still runs
         denylist = None
     try:
         parts = land(store, prefix, deleted=deleted, curated=_curated(conn))
@@ -736,7 +755,7 @@ def run(conn: Any, cfg: Config, *, mode: str, store: Any, prefix: str, now: date
     own = http is None
     client = http if http is not None else httpx.Client()
     try:
-        rep |= label(conn, cfg, client)
+        rep |= label(conn, cfg, client, now)
     except Exception as exc:  # noqa: BLE001
         conn.rollback()
         rep["labelling"] = f"error {type(exc).__name__}"
@@ -759,8 +778,8 @@ def digest_items(conn: Any, start: datetime, end: datetime, denylist: Sequence[s
         # The screen reads the full meta_posts row (author, note, tags, ...), not only the mart's columns.
         c.execute(f"select m.platform, m.surface, m.group_label, m.text, m.post_url, m.route, to_jsonb(p) "
                   f"from {S}.mart_meta_priority m join {S}.meta_posts p using (post_key) "
-                  f"where m.last_captured_at >= %s and m.last_captured_at < %s "
-                  f"order by (m.route = 'alert_digest') desc, m.last_captured_at desc limit 50", (start, end))
+                  f"where m.ready_at >= %s and m.ready_at < %s "
+                  f"order by (m.route = 'alert_digest') desc, m.ready_at desc limit 50", (start, end))
         rows = c.fetchall()
     conn.commit()
     out = []
