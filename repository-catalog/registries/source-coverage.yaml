@@ -1868,6 +1868,8 @@ sources:
       - hf_trending_models
       - hf_trending_datasets
       - hf_trending_spaces
+      first_run: {run: 'https://github.com/bookchaowalit/data-lake-pipelines/actions/runs/43074787900', at: '2026-11-11T18:08:55Z', result: 'success; 100 models + 100 datasets + 100 spaces into R2 Bronze, heartbeat ok'}
+      deployed: {uptime_worker_target: c09a5867-7526-4980-8333-afc75d246502, jobs_queue: 4a126fa5-a316-4654-8c48-1706fa4866a5}
     owner_action: null
     evidence:
     - https://huggingface.co/docs/hub/api
