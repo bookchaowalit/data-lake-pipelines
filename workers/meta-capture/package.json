@@ -1,0 +1,19 @@
+{
+  "name": "meta-capture-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261018.1",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5",
+    "wrangler": "4.151.1"
+  },
+  "overrides": {
+    "undici": "7.30.1"
+  }
+}

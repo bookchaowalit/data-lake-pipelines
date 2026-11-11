@@ -1,0 +1,30 @@
+# meta-capture: the owner's private Telegram bot for Meta posts (spec docs/specs/meta-intake.md).
+# POST /telegram is the bot webhook (secret header); GET /health is for the uptime monitor.
+# It only writes landing files to R2; the x-lakehouse cron (X_LAKE_META=write) does the rest.
+name = "meta-capture"
+main = "src/worker.ts"
+compatibility_date = "2026-10-01"
+account_id = "98e152b05e32b75612ee03e955913ee2"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "LAKE"
+bucket_name = "x-intel-lake"
+
+# LAKE_PREFIX = the key prefix of X_LAKE_URI (r2://x-intel-lake/<prefix>), "" when none.
+# Secrets (`wrangler secret put`, values in Infisical /meta-capture):
+# META_CAPTURE_BOT_TOKEN, META_CAPTURE_WEBHOOK_SECRET, META_CAPTURE_CHAT_IDS (comma-separated).
+[vars]
+LAKE_PREFIX = ""
+
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
+[observability]
+enabled = true
+
+# Only the Worker's own console lines: invocation logs can record request headers, and Telegram sends
+# the webhook secret in X-Telegram-Bot-Api-Secret-Token.
+[observability.logs]
+enabled = true
+invocation_logs = false

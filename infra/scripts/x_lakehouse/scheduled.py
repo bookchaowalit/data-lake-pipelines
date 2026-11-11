@@ -20,6 +20,7 @@ Source (``X_LAKE_SOURCE``, default ``sheet``; see inbox.py for the bot side):
             after an ok run delete inbox rows drained more than 3 days ago.
 inbox/both take a Postgres advisory lock: a second drainer exits 0 without writing.
 ``X_LAKE_SERVE=execute`` refreshes the serving tabs after an ok run (default: dry run, counts only).
+``X_LAKE_META=dry|write`` lands owner-shared Meta posts (meta.py, spec docs/specs/meta-intake.md) before the digest.
 ``X_LAKE_DIGEST=dry|send`` builds (and sends) the Telegram digest at the end of every run (digest.py).
 ``X_LAKE_WEEKLY=dry|write`` builds the weekly analyses and triage audit into lh_* tables (weekly.py).
 ``X_LAKE_OPS_ALERT`` (default ``on``) sends one Telegram note when a hook above had a problem.
@@ -156,6 +157,25 @@ def _digest(cfg: Config) -> None:
         _log(event="digest", mode=mode, status="error", error=f"{type(exc).__name__}: {str(exc)[:200]}")
 
 
+def _meta(cfg: Config) -> None:
+    """X_LAKE_META=dry|write: Meta captures -> raw + meta_posts (meta.py). Counts only in the log; never
+    fatal to the lake run."""
+    mode = cfg.get("X_LAKE_META", "off").lower() or "off"
+    if mode == "off":
+        return
+    try:
+        from . import meta
+
+        store, prefix = open_store(cfg)
+        conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
+        try:
+            _log(event="meta", **meta.run(conn, cfg, mode=mode, store=store, prefix=prefix))
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - reported, the lake run's result stands
+        _log(event="meta", mode=mode, status="error", error=type(exc).__name__)
+
+
 def _bi(cfg: Config) -> None:
     """X_LAKE_BI=build|deploy: the x-insights site. Like the digest, a failure is logged (exception type
     only) and never changes the lake run's result."""
@@ -266,6 +286,7 @@ def _finish(ok: bool, started: datetime, cfg: Config) -> int:
         ok = _serve_execute() == 0
     else:
         _log(event="serve_dry_run", rows=_serve_counts(cfg))
+    _meta(cfg)
     _digest(cfg)
     _weekly(cfg)
     _gold(cfg)

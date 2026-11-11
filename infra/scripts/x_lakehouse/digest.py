@@ -162,6 +162,7 @@ class Facts:
     top: list[dict[str, Any]] = field(default_factory=list)
     opportunities: list[dict[str, Any]] = field(default_factory=list)
     claims: list[dict[str, Any]] = field(default_factory=list)
+    meta: list[dict[str, Any]] = field(default_factory=list)  # "จาก Meta" (meta.py); facts-only, never in the prompt
     withheld: int = 0  # rows left out because they match the denylist
 
     @property
@@ -236,6 +237,9 @@ def build_facts(conn: Any, w: Window, denylist: Sequence[str]) -> Facts:
             break
         f.claims.append({"id": cid, "claim": (text or "")[:200], "status": status, "state": state,
                          "next_check": nxt.astimezone(TZ).strftime("%Y-%m-%d") if nxt else None, "link": link})
+    from .meta import digest_items
+
+    f.meta = digest_items(conn, w.start, w.end, denylist)  # [] until X_LAKE_META has created the tables
     return f
 
 
@@ -391,7 +395,7 @@ def render(facts: Facts, answer: dict[str, Any] | None) -> str:
              f"· แหล่ง T1/T2 {t['strong_sources']}"]
     if t["signals"] == 0:
         lines.append("\nช่วงนี้ยังไม่มีสัญญาณใหม่")
-        return "\n".join(lines)
+        return "\n".join(lines + _meta_lines(facts))
     if answer:
         lines += ["", f"<b>{_e(answer['headline_th'])}</b>"] + [f"• {_e(s)}" for s in answer["summary_th"]]
         for part, label in (("alerts", "🔔 แจ้งเตือน"), ("opportunities", "💡 โอกาส")):
@@ -411,9 +415,27 @@ def render(facts: Facts, answer: dict[str, Any] | None) -> str:
         lines += ["", "<b>หมวดที่มากสุด</b>", " · ".join(f"{_e(d['domain'])} {d['signals']}" for d in facts.domains[:5])]
     if facts.claims:
         lines += ["", f"<b>Claims รอตรวจ</b> {len(facts.claims)}+"]
+    lines += _meta_lines(facts)
     if facts.withheld:
         lines.append(f"\n<i>ซ่อน {facts.withheld} รายการที่ตรงรายชื่อลูกค้า</i>")
     return "\n".join(lines)
+
+
+META_PLATFORM = {"facebook": "FB", "instagram": "IG", "threads": "Threads"}
+
+
+def _meta_lines(facts: Facts) -> list[str]:
+    """The "จาก Meta" section (spec docs/specs/meta-intake.md): group items name the group, never the author."""
+    if not facts.meta:
+        return []
+    out = ["", "<b>📘 จาก Meta</b>"]
+    for m in facts.meta[:5]:
+        where = META_PLATFORM.get(m["platform"], "Meta")
+        if m["surface"] == "group" and m.get("group_label"):
+            where += f" · กลุ่ม {m['group_label'][:40]}"
+        mark = "🔔 " if m["route"] == "alert_digest" else "🔎 "
+        out.append(f"• {mark}[{_e(where)}] {_a((m['text'] or 'โพสต์')[:90], m['link'] or '')}")
+    return out
 
 
 def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:

@@ -1,8 +1,8 @@
 # SPEC: Meta intake (Facebook feed and groups, Instagram, Threads)
 
-Status: APPROVED by the owner 2026-11-11 ("อนุมัติ + merge"); open questions decided the same day (see Decisions). Nothing is built yet.
-Code (planned): `infra/scripts/x_lakehouse/meta.py`, Worker `workers/meta-capture/`.
-Tests (planned): `infra/tests/x_lakehouse/x_lakehouse_meta_test.py`, `workers/meta-capture/test/`.
+Status: APPROVED by the owner 2026-11-11 ("อนุมัติ + merge"); open questions decided the same day (see Decisions). v1 built 2026-11-12, off until deployed (`X_LAKE_META`).
+Code: `infra/scripts/x_lakehouse/meta.py` (cron step `X_LAKE_META=off|dry|write`), Worker `workers/meta-capture/`.
+Tests: `infra/tests/x_lakehouse/x_lakehouse_meta_test.py`, `workers/meta-capture/test/`.
 
 ## Why
 
@@ -39,10 +39,13 @@ v3 is not built until the owner asks; it needs a cost cap and a PDPA note first.
 owner (phone) --share/forward--> Telegram bot @<meta-capture>
    -> Cloudflare Worker meta-capture (webhook)
         checks secret header + owner chat id, normalises, writes JSON + images
-   -> R2 x-intel-lake  <prefix>/landing/meta_capture/date=YYYY-MM-DD/<capture_id>.json
-                       <prefix>/landing/meta_capture_media/<capture_id>/<n>.jpg
+   -> R2 x-intel-lake  <prefix>/meta/landing/meta_capture/date=YYYY-MM-DD/<capture_id>/<message_id>.json
+                       <prefix>/meta/landing/meta_capture_media/date=YYYY-MM-DD/<capture_id>/<message_id>-0.jpg
+                       <prefix>/meta/landing/meta_capture_del/date=YYYY-MM-DD/<capture_id>/<message_id>.json
    -> x-lakehouse cron (existing, 3x/day)
-        landing -> raw parquet (dataset meta_capture) -> curated x_intel.meta_posts
+        landing -> raw parquet meta/raw/meta_capture/date=D/<capture_id>--<message_id>.parquet
+                   (one small file per message, so deletes remove files and never rewrite)
+                -> curated x_intel.meta_posts
         local OCR (Tesseract tha+eng, in the cron container) for captures without text
         denylist screen on pasted + OCR text
         label + route (gateway, text only, same LABELS / ROUTES as weekly.py)
@@ -55,7 +58,8 @@ and the cron that already runs does the rest (ADR-0013: one lake).
 
 ### What the owner sends
 
-One Telegram message, or one album of photos, is one capture.
+One Telegram message, or one album of photos, is one capture. Everything Meta lives under its own `meta/`
+root on the lake, so the X raw globs (`raw/*/date=*`) and the X BI never read it.
 
 | in the message | becomes |
 |---|---|
@@ -63,7 +67,8 @@ One Telegram message, or one album of photos, is one capture.
 | text other than the link and tags | `text`, `text_source = pasted` |
 | photos (screenshots) | `image_keys`; OCR later if `text` is empty, `text_source = ocr` |
 | `#g <ชื่อกลุ่ม>` | `surface = group`, `group_label` = the name the owner typed |
-| `#feed`, `#page`, `#ig`, `#threads` | `surface` (default: from the link, else `unknown`) |
+| `#feed`, `#page`, `#profile` | `surface` (default: `group` for a `/groups/` link, else `unknown`) |
+| `#ig`, `#threads` | `platform` when there is no link |
 | other `#tags` | `tags` |
 | `#note <ข้อความ>` | `owner_note` |
 
@@ -77,7 +82,7 @@ for members, so for groups the owner should send the screenshot (or paste the te
 
 | column | type | rule |
 |---|---|---|
-| `capture_id` | text, key | `tg-<chat_hash8>-<message_id>` (album: id of the first message) |
+| `capture_id` | text, key | `tg-<chat_hash8>-<message_id>`; album: `tg-<chat_hash8>-g<media_group_id>` (each photo is its own landing part) |
 | `captured_at` | timestamptz | Telegram message date, stored ICT like the X data |
 | `platform` | text | `facebook` / `instagram` / `threads` / `unknown` |
 | `surface` | text | `feed` / `group` / `page` / `profile` / `unknown` |
@@ -104,21 +109,21 @@ tags and notes are joined). Re-running the cron on the same landing files writes
 - Worker and cron logs carry counts, ids and exception types only, never text, URLs or images.
 - **Images never leave R2 and the cron container.** OCR runs locally (Tesseract with `tha+eng` in the
   x-lakehouse image), so the denylist can be checked before anything is sent out. The gateway only ever gets
-  text, and only after the screen.
+  text, and only after the screen. Checked 2026-11-12 on a rendered Thai sample: Thai and English words come
+  through, some upper vowels drop (standard `tha` data); good enough for labels, the owner's pasted text wins.
 - Pasted text and local OCR text are screened with `CLIENT_DENYLIST` before any gateway call; a matching capture
   is stored but marked `route = store` and never sent to the gateway or the digest. Without the denylist,
   labelling is skipped (fails closed), the capture is still stored. Local OCR itself runs without the denylist,
   since nothing leaves the container.
 - Retention is its own cron step, `meta_retention`, after the curated upsert (the existing `inbox.prune()` only
   clears the drained inbox and `ingest_deliveries`, so it does not cover Meta data):
-  - `landing/meta_capture/` JSON and `landing/meta_capture_media/` images: deleted 30 days after `captured_at`
-    (R2 lifecycle rule on both prefixes, plus the step deletes any it finds older, in case the rule is missing);
-  - `x_intel.meta_posts`: rows with `captured_at` older than 365 days deleted;
-  - raw `meta_capture` parquet: partitions `date=` older than 365 days deleted.
+  - everything under `meta/landing/` (captures, images, delete requests): deleted when its `date=` is more than
+    30 days old (R2 lifecycle rule on the `meta/landing/` prefix, plus the step deletes any it finds older, in case the rule is missing);
+  - `x_intel.meta_posts`: rows whose `last_captured_at` is older than 365 days deleted;
+  - raw `meta/raw/meta_capture/` files whose `date=` is more than 365 days old deleted.
   It logs counts only and never fails the lake run.
 - `#del` (a reply to the bot's confirmation) deletes that capture everywhere at the next cron run: the curated
-  row, its landing JSON and images, and the row in its raw partition (the partition file is rewritten without
-  it). The capture id goes to `x_intel.meta_deleted` (id and time only) so a later landing or replay of the same
+  row, its landing JSON and images, and its raw files (one per message, so nothing is rewritten). The capture id goes to `x_intel.meta_deleted` (id and time only) so a later landing or replay of the same
   capture is refused.
 
 ### Digest
@@ -163,9 +168,9 @@ Worker code, cron step, migration, digest section.
 - M6 the cron is idempotent: a second run over the same landing files writes nothing.
 - M7 the digest shows `จาก Meta` only when there are items, max 5, with `group_label` not the author.
 - M8 logs contain no post text, URL or image data (test greps the captured log output).
-- M9 landing JSON and screenshots older than 30 days are gone (lifecycle rule exists, checked by `validate`;
+- M9 landing JSON and screenshots older than 30 days are gone (lifecycle rule; the step reports `stale_landing`, expected 0;
   the step deletes older ones it finds).
-- M10 with a clock 366 days after `captured_at`, `meta_retention` removes the curated row and the raw partition;
+- M10 with a clock 366 days after `captured_at`, `meta_retention` removes the curated row and its raw files;
   a 364-day-old capture is kept.
 - M11 `#del` removes the curated row, landing files and the raw row; replaying the same landing JSON is refused.
 

@@ -47,6 +47,7 @@ class Store(Protocol):
     def list(self, prefix: str) -> list[str]: ...
     def read(self, key: str) -> bytes: ...
     def put_new(self, key: str, data: bytes) -> None: ...
+    def delete(self, key: str) -> None: ...  # meta.py only (Meta retention); X raw parts are never deleted
 
 
 class LocalStore:
@@ -82,6 +83,9 @@ class LocalStore:
         finally:
             tmp.unlink(missing_ok=True)
 
+    def delete(self, key: str) -> None:
+        (self.root / key).unlink()
+
 
 class R2Store:
     """R2 through its S3 API (pyarrow's S3 filesystem; no extra dependency)."""
@@ -116,6 +120,14 @@ class R2Store:
             raise LakeError(f"refusing to overwrite {key}")
         with self.fs.open_output_stream(path) as fh:
             fh.write(data)
+
+    def delete(self, key: str) -> None:
+        from pyarrow import fs
+
+        path = f"{self.bucket}/{key}"
+        if self.fs.get_file_info(path).type == fs.FileType.NotFound:
+            raise FileNotFoundError(key)
+        self.fs.delete_file(path)
 
 
 def open_store(cfg: Config, uri: str | None = None) -> tuple[Store, str]:
