@@ -42,7 +42,7 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
 .github/workflows/event-sink.yml (jobs queue, "5 * * * *")
   → event_heartbeat.py: ops.heartbeat.emitted → ops.events.v1 (SASL user ops-heartbeat)
   → stream_sink.py sink --until-empty ต่อ topic (SASL user lake-sink, group lake-sink)
-      commerce.events.v1 / platform.events.v1 / data.ingest.v1 / ops.events.v1
+      commerce.events.v1 / platform.events.v1 / data.ingest.v1 / ops.events.v1 / finance.events.v1 (SPEC-005, the ten finance cells)
       → landing/stream/source=aiven-kafka/domain=<d>/dataset=<ds>/…/part-<batch>.avro
         + control/checkpoints/stream + control/manifests/stream (topic/partition/offset ต่อ batch)
       → commit offset หลังเขียน lake ครบเท่านั้น (at-least-once, batch id จาก offset จึงรันซ้ำได้)

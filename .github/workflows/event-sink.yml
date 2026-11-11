@@ -98,6 +98,7 @@ jobs:
           platform.events.v1 platform events
           data.ingest.v1 data ingest
           ops.events.v1 ops events
+          finance.events.v1 finance events
           TOPICS
           echo "failed=${failed[*]}" >> "$GITHUB_OUTPUT"
           echo "heartbeat_landed=$heartbeat_landed" >> "$GITHUB_OUTPUT"
