@@ -22,6 +22,7 @@ inbox/both take a Postgres advisory lock: a second drainer exits 0 without writi
 ``X_LAKE_SERVE=execute`` refreshes the serving tabs after an ok run (default: dry run, counts only).
 ``X_LAKE_DIGEST=dry|send`` builds (and sends) the Telegram digest at the end of every run (digest.py).
 ``X_LAKE_WEEKLY=dry|write`` builds the weekly analyses and triage audit into lh_* tables (weekly.py).
+``X_LAKE_OPS_ALERT`` (default ``on``) sends one Telegram note when a hook above had a problem.
 ``X_LAKE_GOLD=write`` lands the queries/ results as Gold Parquet on the lake (gold.py).
 ``X_LAKE_BI=build|deploy`` then renders the x-insights site (bi_site.py) and, with ``deploy``, uploads it to
 Cloudflare Pages (pages_deploy.py; spec docs/specs/x-insights.md).
@@ -55,8 +56,58 @@ from .validate import reconcile  # noqa: E402
 HEARTBEAT_URL = "https://monitor.bookchaowalit.com/heartbeat/x-lakehouse"
 
 
+_EVENTS: list[dict[str, object]] = []  # this run's log lines, for _ops_alert
+DIGEST_BAD = ("error", "partial", "unknown", "blocked", "superseded")
+
+
 def _log(**fields: object) -> None:
+    _EVENTS.append(fields)
     print(json.dumps(fields, ensure_ascii=False, default=str), flush=True)
+
+
+def _issues(events: list[dict[str, object]]) -> list[str]:
+    """Short, fixed-vocabulary lines for every hook problem of this run (never row text or error text from
+    a library: exception types, our own statuses and fallback reasons only)."""
+    out: list[str] = []
+    for e in events:
+        ev = e.get("event")
+        if ev not in ("digest", "weekly", "gold", "bi"):
+            continue
+        if e.get("status") == "error":
+            out.append(f"{ev}: error {str(e.get('error', '')).split(':', 1)[0][:60]}")
+            continue
+        if ev == "digest":
+            for r in e.get("reports") or []:
+                if not isinstance(r, dict):
+                    continue
+                if r.get("status") in DIGEST_BAD:
+                    out.append(f"digest {r.get('digest_id')}: {r.get('status')}")
+                elif r.get("status") == "sent" and r.get("ai") is False and r.get("fallback_reason"):
+                    out.append(f"digest {r.get('digest_id')}: facts-only ({str(r['fallback_reason'])[:80]})")
+        elif ev == "weekly" and isinstance(e.get("triage"), str) and str(e["triage"]).startswith("error"):
+            out.append(f"weekly {e.get('week')}: triage {str(e['triage'])[:80]}")
+        elif ev == "gold" and e.get("ok") is False:
+            out.append(f"gold: failed {sorted((e.get('errors') or {}).keys())[:5]}")
+    return out
+
+
+def _ops_alert(cfg: Config) -> None:
+    """One Telegram note when a hook had a problem (the lake run itself is watched by the heartbeat).
+    X_LAKE_OPS_ALERT=off disables it; without the Telegram settings it only logs."""
+    issues = _issues(_EVENTS)
+    if not issues or (cfg.get("X_LAKE_OPS_ALERT", "on").lower() == "off"):
+        return
+    token, chat = cfg.get("TELEGRAM_NOTI_BOT_TOKEN"), cfg.get("TELEGRAM_NOTI_CHAT_ID")
+    if not token or not chat:
+        _log(event="ops_alert", status="skipped", issues=len(issues))
+        return
+    text = "⚠️ x-lakehouse\n" + "\n".join(f"• {i}" for i in issues[:15])
+    try:
+        r = httpx.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=30,
+                       json={"chat_id": chat, "text": text, "disable_web_page_preview": True})
+        _log(event="ops_alert", status="sent" if r.status_code == 200 else f"http {r.status_code}", issues=len(issues))
+    except httpx.HTTPError as exc:
+        _log(event="ops_alert", status="error", error=type(exc).__name__, issues=len(issues))  # no URL: it has the token
 
 
 def _backfill() -> tuple[int, dict[str, object]]:
@@ -219,6 +270,7 @@ def _finish(ok: bool, started: datetime, cfg: Config) -> int:
     _weekly(cfg)
     _gold(cfg)
     _bi(cfg)
+    _ops_alert(cfg)
     _log(event="done", ok=ok, seconds=round((datetime.now(timezone.utc) - started).total_seconds()))
     _heartbeat(ok)
     return 0 if ok else 1
