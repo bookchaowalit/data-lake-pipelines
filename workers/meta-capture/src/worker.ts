@@ -105,15 +105,17 @@ async function telegram(env: Env, method: string, body: Record<string, unknown>)
   });
 }
 
-/** True when Telegram accepted the message. */
-async function reply(env: Env, msg: TelegramMessage, text: string): Promise<boolean> {
+/** 'ok', 'retry' (429, 5xx, network or timeout) or 'failed' (any other refusal: retrying cannot help). */
+async function reply(env: Env, msg: TelegramMessage, text: string): Promise<'ok' | 'retry' | 'failed'> {
   try {
-    const r = await telegram(env, 'sendMessage', { chat_id: msg.chat.id, text, reply_to_message_id: msg.message_id, disable_web_page_preview: true });
-    if (!r.ok) log(env, 'reply_failed', { status: r.status });
-    return r.ok;
+    const r = await telegram(env, 'sendMessage', { chat_id: msg.chat.id, text, disable_web_page_preview: true,
+      reply_parameters: { message_id: msg.message_id, allow_sending_without_reply: true } });
+    if (r.ok) return 'ok';
+    log(env, 'reply_failed', { status: r.status });
+    return r.status === 429 || r.status >= 500 ? 'retry' : 'failed';
   } catch (error) {
     log(env, 'reply_failed', { error: errorName(error) });
-    return false;
+    return 'retry';
   }
 }
 
@@ -196,9 +198,10 @@ async function handleCapture(env: Env, msg: TelegramMessage, hash: string): Prom
     const d = describe(text, links);
     const lost = fileId && !imageKeys.length ? '\n(โหลดรูปไม่ได้ ส่งใหม่ได้)' : '';
     const author = d.authorIgnored ? '\n(ไม่เก็บชื่อผู้โพสต์ในกลุ่ม)' : '';
-    if (!(await reply(env, msg, `เก็บแล้ว · ${d.platform}/${d.surface} · ${id}${author}${lost}`))) {
-      // Release the marker and answer 500: Telegram resends the update and the confirmation is tried again
-      // (the landing files are write-once, so the resend stores nothing twice).
+    if ((await reply(env, msg, `เก็บแล้ว · ${d.platform}/${d.surface} · ${id}${author}${lost}`)) === 'retry') {
+      // Transient refusal: release the marker and answer 500, so Telegram resends the update and the
+      // confirmation is tried again (landing files are write-once: the resend stores nothing twice).
+      // A permanent refusal keeps the marker and answers 200, so a bad update never loops.
       await env.LAKE.delete(ackKey);
       throw new ReplyFailed();
     }

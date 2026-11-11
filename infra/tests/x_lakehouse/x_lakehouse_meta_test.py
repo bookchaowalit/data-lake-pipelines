@@ -386,6 +386,15 @@ class PgTests(unittest.TestCase):
             self.assertEqual(c.fetchone()[0], True)
         self.conn.commit()
 
+    def test_without_a_denylist_a_long_album_fails_closed(self):
+        for n in range(3):  # each part under the cut, together over it
+            landing(self.store, "", msg_id=44 + n, group="92", text=f"{n}" + "ก" * (meta.MAX_TEXT // 2))
+        self.run_meta(c=Config({"AI_GATEWAY_TOKEN": "t"}))
+        with self.conn.cursor() as c:
+            c.execute("select full_hit from x_intel.meta_posts")
+            self.assertEqual(c.fetchone()[0], True)
+        self.conn.commit()
+
     def test_a_broken_link_does_not_block_the_batch(self):
         landing(self.store, "", msg_id=39, text="ดู https://[broken และ https://facebook.com/a/posts/1")
         landing(self.store, "", msg_id=40, text="ปกติ")

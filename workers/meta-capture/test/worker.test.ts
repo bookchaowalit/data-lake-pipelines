@@ -166,6 +166,23 @@ describe('webhook', () => {
     expect(logs.join('\n')).toContain('"error":"ReplyFailed"');
   });
 
+  it('a permanent refusal is not retried (no poison loop)', async () => {
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+      if (String(input).endsWith('/sendMessage')) return new Response('', { status: 400 });
+      return (realFetch as typeof fetch)(input, init);
+    }));
+    expect((await post(msg({ text: 'x' }))).status).toBe(200);
+    expect((await post(msg({ text: 'x' }))).status).toBe(200);
+    expect(keys().some((k) => k.endsWith('/ack'))).toBe(true);
+  });
+
+  it('replies quote the message but still send if it was deleted', async () => {
+    await post(msg({ text: 'x' }));
+    const body = sent.find((s) => s.method === 'sendMessage')!.body;
+    expect(body.reply_parameters).toEqual({ message_id: 10, allow_sending_without_reply: true });
+  });
+
   it('refuses an empty message', async () => {
     await post(msg({ text: '   ' }));
     expect(keys()).toEqual([]);

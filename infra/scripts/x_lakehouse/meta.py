@@ -372,9 +372,9 @@ def _absorb(conn: Any, *, keep: dict[str, Any], drop: dict[str, Any]) -> dict[st
 def full_hit(texts: Iterable[Any], denylist: Sequence[str] | None) -> bool:
     """Screen the untruncated text (stored text is cut at MAX_TEXT, so a term past the cut would be lost).
     Without a denylist, a text longer than MAX_TEXT counts as a hit (fails closed)."""
-    items = [t for t in texts if t]
+    items = [str(t) for t in texts if t]
     if denylist is None:
-        return any(len(str(t)) > MAX_TEXT for t in items)
+        return len("\n".join(items)) > MAX_TEXT  # the capture's combined text, as it would be stored
     return any_term(items, denylist)
 
 
