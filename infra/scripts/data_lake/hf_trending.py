@@ -76,7 +76,7 @@ def _row(
         raise HubError("item without id")
     tags = [str(t) for t in (item.get("tags") or [])][:MAX_TAGS]
     return {
-        "id": f"{repo_id}@{snapshot_date}",
+        "id": f"{kind.rstrip('s')}:{repo_id}@{snapshot_date}",
         "repo_id": repo_id,
         "kind": kind.rstrip("s"),
         "author": item.get("author") or repo_id.split("/")[0],
@@ -104,6 +104,9 @@ def collect(fetch: Fetch, snapshot_date: str) -> dict[str, list[dict[str, Any]]]
         if not isinstance(body, list):
             raise HubError("expected a JSON list")
         items = [i for i in body if isinstance(i, dict) and not i.get("private")]
+        if not items:
+            # The top-100 list is never empty; an empty answer is an outage, not a quiet day.
+            raise HubError(f"empty {kind} list")
         out[f"hf_trending_{kind}"] = [
             _row(kind, item, rank, snapshot_date)
             for rank, item in enumerate(items, start=1)

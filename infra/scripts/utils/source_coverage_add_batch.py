@@ -37,11 +37,17 @@ def main(argv: list[str] | None = None) -> int:
         rows.append(stamped)
 
     text = args.registry.read_text(encoding="utf-8")
-    head, sep, _ = text.partition("next_batch:\n")
+    head, sep, rest = text.partition("next_batch:\n")
     if not sep:
         print("ERROR: registry has no next_batch block", file=sys.stderr)
         return 1
-    current = yaml.safe_load(text)["current_batch"]
+    before = yaml.safe_load(text)
+    tail = yaml.safe_load(sep + rest)
+    if set(tail) != {"next_batch"}:
+        # Only the trailing next_batch block may be replaced; anything after it would be lost.
+        print("ERROR: next_batch must be the last root key of the registry", file=sys.stderr)
+        return 1
+    current = before["current_batch"]
     if batch != current + 1:
         print(
             f"ERROR: batch {batch} does not follow current_batch {current}",
@@ -64,7 +70,13 @@ def main(argv: list[str] | None = None) -> int:
         + ", ".join(spec["next_batch"])
         + "]\n"
     )
-    args.registry.write_text(head + block + nxt, encoding="utf-8")
+    result = head + block + nxt
+    after = yaml.safe_load(result)
+    if (len(after["sources"]) != len(before["sources"]) + len(rows)
+            or {k for k in after if k != "next_batch"} != {k for k in before if k != "next_batch"}):
+        print("ERROR: rewrite check failed; registry left unchanged", file=sys.stderr)
+        return 1
+    args.registry.write_text(result, encoding="utf-8")
     print(f"added {len(rows)} rows as batch {batch}")
     return 0
 

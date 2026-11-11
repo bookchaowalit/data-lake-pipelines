@@ -75,7 +75,7 @@ class CollectTests(unittest.TestCase):
         )
         model = rows["hf_trending_models"]
         self.assertEqual(len(model), 1)  # private dropped
-        self.assertEqual(model[0]["id"], "org/model-a@2026-11-12")
+        self.assertEqual(model[0]["id"], "model:org/model-a@2026-11-12")
         self.assertEqual(model[0]["rank"], 1)
         self.assertEqual(model[0]["author"], "org")
         self.assertEqual(len(model[0]["tags"]), 20)
@@ -90,6 +90,18 @@ class CollectTests(unittest.TestCase):
             with self.assertRaises(HubError):
                 fetch(url)
         self.assertTrue(API.startswith("https://huggingface.co/"))
+
+
+class EdgeTests(unittest.TestCase):
+    def test_same_name_across_kinds_gets_distinct_ids(self):
+        same = {"id": "org/same", "trendingScore": 1, "private": False}
+        rows = collect(lambda url: [same], "2026-11-12")
+        ids = {r[0]["id"] for r in rows.values()}
+        self.assertEqual(len(ids), 3)
+
+    def test_empty_list_is_an_error(self):
+        with self.assertRaises(HubError):
+            collect(lambda url: [], "2026-11-12")
 
 
 class CaptureTests(unittest.TestCase):
