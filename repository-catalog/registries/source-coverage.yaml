@@ -39,7 +39,7 @@ sources:
     bulk_or_webhook: Bulk API 2.0, Change Data Capture, Pub/Sub API
     coverage_pct: 0
     current_status: missing
-    tos_notes: customer data stays the customer's; Main Services Agreement not read (unverified). Limits page answered 403, numbers from search snippets
+    tos_notes: 'MSA (Global MSA Online 2026-10-15) PDF could not be read; older MSA: export within 30 days after termination; separate AI Acceptable Use Policy (unverified; row is skip, owner reads only if Salesforce is ever used)'
     pii_level: high
     scores: {value: 1, cost: 4, effort: 3, risk: 2}
     verdict: skip
@@ -176,13 +176,14 @@ sources:
     bulk_or_webhook: change notifications, delta queries, Teams getAllMessages (metered)
     coverage_pct: 0
     current_status: missing
-    tos_notes: Microsoft APIs Terms of Use not read (unverified)
+    tos_notes: 'Microsoft APIs Terms 3(b)(4) no building databases or copies beyond the app use case; 5(b)-(c) keep in sync, have a retention/deletion policy, delete on uninstall; a general data lake conflicts with 3(b)(4) (verified 2026-11-12)'
     pii_level: high
     scores: {value: 1, cost: 2, effort: 3, risk: 4}
     verdict: skip
     verdict_reason: the only M365 tenant is NexaTech (company); company accounts are out of scope for this platform
     owner_action: null
     evidence:
+      - https://learn.microsoft.com/en-us/legal/microsoft-apis/terms-of-use
       - https://learn.microsoft.com/en-us/graph/throttling-limits
       - https://learn.microsoft.com/en-us/graph/change-notifications-overview
     checked_at: '2026-11-12'
@@ -227,13 +228,14 @@ sources:
     bulk_or_webhook: no bulk export API; webhooks exist (details unverified)
     coverage_pct: 0
     current_status: missing
-    tos_notes: API terms page returned 404 (unverified)
+    tos_notes: 'Developer Terms (updated Jan + Apr 2026) reportedly ban using integration data to train non-personalised AI/ML models; page unreadable by fetch (unverified; row is skip)'
     pii_level: medium
     scores: {value: 1, cost: 1, effort: 2, risk: 1}
     verdict: skip
     verdict_reason: Notion is a destination (copies of what our systems wrote), not a source, per data-sources.yaml; register only if outside people start adding data
     owner_action: null
     evidence:
+      - https://developers.notion.com/changelog/updated-developers-terms
       - https://developers.notion.com/reference/request-limits
       - https://developers.notion.com/guides/mcp/get-started-with-mcp
     checked_at: '2026-11-12'
@@ -260,7 +262,14 @@ sources:
     verdict_reason: >-
       live 2026-11-12: workflow github-activity (docs/specs/github-activity.md) lands public repos + events in
       Bronze domain=engineering daily; private repos, Actions runs and Dependabot alerts are the next 60 %
-    pipeline: {workflow: .github/workflows/github-activity.yml, heartbeat: github-activity, jobs_queue: github-activity, datasets: [github_repos, github_events]}
+    pipeline:
+      workflow: .github/workflows/github-activity.yml
+      heartbeat: github-activity
+      jobs_queue: github-activity
+      datasets: [github_repos, github_events]
+      first_run: {run: 'https://github.com/bookchaowalit/data-lake-pipelines/actions/runs/43067986523', at: '2026-11-11T17:26:07Z', result: 'success; 300 events + 119 repos into R2 Bronze, heartbeat ok'}
+      idempotence_check: {run: 'https://github.com/bookchaowalit/data-lake-pipelines/actions/runs/43068222264', result: 'events batch new=false (read back from R2)'}
+      deployed: {uptime_worker_target: 79a60465-4ee6-4687-99c9-252f281be651, jobs_queue: 0b42d9ca-851b-424d-9a9a-c745a0ce4e11}
     owner_action: >-
       optional, for private repos: fine-grained PAT (read-only Metadata, Actions, Dependabot alerts on all repos) at
       https://github.com/settings/personal-access-tokens/new -> Infisical /github GITHUB_ACTIVITY_PAT
@@ -285,13 +294,15 @@ sources:
     bulk_or_webhook: webhooks (admin only), no bulk export API found
     coverage_pct: 0
     current_status: missing
-    tos_notes: API terms not read (unverified)
+    tos_notes: 'ToS 2.3 Linear sets API limits; 5.3 deletes user information within 30 days after termination for breach; AI Addendum 13.2-13.3 no training on customer data (verified 2026-11-12)'
     pii_level: medium
     scores: {value: 1, cost: 1, effort: 2, risk: 1}
     verdict: skip
     verdict_reason: destination (Book Dev tickets our agents write), not a source, per data-sources.yaml; the tasks cell is the source of truth
     owner_action: null
     evidence:
+      - https://linear.app/legal/ai-addendum
+      - https://linear.app/terms
       - https://linear.app/developers/rate-limiting
       - https://linear.app/developers/webhooks
     checked_at: '2026-11-12'
@@ -310,13 +321,14 @@ sources:
     bulk_or_webhook: webhooks (dynamic ones expire after 30 days), JQL pagination
     coverage_pct: 0
     current_status: missing
-    tos_notes: developer terms page 404 (unverified)
+    tos_notes: 'Atlassian Developer Terms 9.2 user consent before storing End User Data, no selling it; 9.5 disclose storage country; no caching or retention period clause, no AI-training clause (verified 2026-11-12)'
     pii_level: high
     scores: {value: 1, cost: 1, effort: 2, risk: 2}
     verdict: skip
     verdict_reason: Atlassian is a destination here; no outside party files tickets in it
     owner_action: null
     evidence:
+      - https://developer.atlassian.com/platform/marketplace/atlassian-developer-terms/
       - https://developer.atlassian.com/cloud/jira/platform/rate-limiting/
       - https://developer.atlassian.com/cloud/jira/platform/webhooks/
     checked_at: '2026-11-12'
@@ -447,7 +459,7 @@ sources:
     bulk_or_webhook: no webhooks; personal data request export
     coverage_pct: 0
     current_status: missing
-    tos_notes: delete content its author deletes, no ML training without permission (secondary sources only; official pages blocked the fetch)
+    tos_notes: 'secondary sources agree: 100 QPM per OAuth client, free only for approved non-commercial use, delete content its author deletes; official pages block automated fetch, ML-training clause unverified - owner must read before any capture'
     pii_level: medium
     scores: {value: 3, cost: 2, effort: 3, risk: 4}
     verdict: later
@@ -501,7 +513,7 @@ sources:
     bulk_or_webhook: batch export to S3-compatible storage incl. Cloudflare R2 (documented)
     coverage_pct: 0
     current_status: missing
-    tos_notes: own data; terms not read (unverified); IP discard already on (W4c)
+    tos_notes: 'own data; posthog.com/terms text not readable by fetch (unverified) - owner reads it with the batch-export price before the export is switched on; IP discard already on (W4c)'
     pii_level: high
     scores: {value: 4, cost: 2, effort: 1, risk: 2}
     verdict: later
@@ -559,13 +571,15 @@ sources:
     bulk_or_webhook: webhook only; no API to read past messages, so capture must start before history is needed
     coverage_pct: 0
     current_status: missing
-    tos_notes: LINE Developers Agreement / User Data Policy not read (unverified); user files are deleted after a while
+    tos_notes: 'LINE User Data Policy 3.2.3 Friend and Group information max 24 h, notify users before keeping user info longer; 3.5 delete on user request or withdrawal (anonymised stats exempt); Agreement 8.1 no derivative works from API data (verified 2026-11-12)'
     pii_level: high
     scores: {value: 4, cost: 1, effort: 3, risk: 3}
     verdict: later
-    verdict_reason: customer chats in Thailand run on LINE, but no history API exists; build a webhook -> intake capture once the owner names the OA
+    verdict_reason: 'customer chats in Thailand run on LINE, but no history API exists and friend/group info may be kept 24 h only; capture = webhook -> intake with user notice and a deletion path, once the owner names the OA'
     owner_action: name the OA and add its Messaging API channel at https://developers.line.biz/console/ -> Infisical /line LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN
     evidence:
+      - https://terms2.line.me/LINE_Developers_Agreement
+      - https://terms2.line.me/LINE_Developers_user_data_policy?lang=en
       - https://developers.line.biz/en/reference/messaging-api/
       - https://developers.line.biz/en/docs/messaging-api/receiving-messages/
       - https://github.com/line/line-bot-mcp-server
