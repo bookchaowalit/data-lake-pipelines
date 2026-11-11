@@ -10,6 +10,8 @@ repo นี้คงโครงสร้าง `infra/...` เดิมไว�
 - `infra/scripts/sync/sheet_summaries.py` — สรุปภาษาไทยรายวันของชีต "Chief Findings Warehouse" ผ่าน AI gateway (Railway cron `sheet-summaries`, 19:00 เวลาไทย) ดู [`docs/sheet-summaries.md`](docs/sheet-summaries.md)
 - `infra/scripts/utils/` — สำเนา vendored ของ utils ที่โค้ดข้างบนต้องใช้ (`_env`, `cell_store`, `task_store`, `secret_resolver`, `job_client`, `data_product_contract_guard`, …)
 - `infra/dbt/` — dbt projection (`dbt_lake_test.py`) รวม metadata models ใน `models/metadata/` (`meta_source_coverage`, `meta_source_lineage`, `meta_lake_datasets`)
+- `repository-catalog/registries/source-coverage.yaml` — Source coverage registry: แต่ละ SaaS/แหล่งข้อมูลเข้า platform ได้ทางไหน (API → MCP → scraping), สถานะวันนี้, verdict และ owner action; รอบละ 20 แหล่ง รายงานใน `docs/source-coverage/`. ตรวจด้วย `python3 infra/scripts/utils/source_coverage_check.py --summary`
+- `infra/scripts/data_lake/github_activity.py` — repo + event public ของ owner บน GitHub เข้า Bronze `domain=engineering` วันละครั้ง (workflow `github-activity`, spec `docs/specs/github-activity.md`)
 - `infra/scripts/data_lake/registry_lake_export.py` — ส่ง registry ของ solo-empire (data-sources, online-systems) และ metadata catalog ของ architecture-docs (catalog, lineage) เข้า lake เป็น Bronze `domain=metadata` ดู [Metadata ใน lake](#metadata-ใน-lake)
 - `infra/tests/` — test ทั้งหมดของโค้ดข้างต้น
 - ผลิตภัณฑ์ข้อมูล `job.v1` (ผู้บริโภคคือ `book-job-data` และ `crm` job-radar) — `book-job-data` ยังเป็น repo ของตัวเอง; ที่นี่มีเฉพาะ adapter/readiness/e2e
