@@ -66,19 +66,20 @@ X Feed / 317 context / 20 trends TH / 174 signals rows, validate ok; Railway one
    `postgres_protected_held`. On 2026-11-08
    all 20 claims had `checked_by = 'rule'`, so the parallel run is unaffected.
 
-**Bot-only datasets, private schema, small curated tables (2026-11-10; spec
-`docs/specs/x-lake-private-datasets.md`; not applied or deployed yet):**
+**Bot-only datasets (raw only), private inbox (2026-11-10, raw-only since the owner's decision of
+2026-11-12; spec `docs/specs/x-lake-private-datasets.md`; not applied or deployed yet):**
 9. **Seven datasets without a Sheet tab**, sent through `ingest()` only: the owner's own account
    data `x_own_account_daily`, `x_own_mentions`, `x_bookmarks`, `x_home_timeline` (**private**:
-   door `x_intel_private.ingest()`, inbox + curated in schema `x_intel_private`, raw under
+   door `x_intel_private.ingest()`, inbox in schema `x_intel_private`, raw under
    `<prefix>/private/`, never served; `x_intel.ingest()` refuses them) and `x_spaces`,
-   `x_communities`, `x_list_sources` (schema `x_intel`, normal raw path, not served). Phone numbers
-   in their text become `[phone]`. Limit: bots on the `postgres` role may still bypass RLS (spec §2).
-10. **Section 8:** small curated tables `x_trends_th`, `x_trends_intl`, `x_topic_counts`,
-    `x_account_snapshots`, `alpha_feed` (90-day retention in the existing cron) so they stay
-    queryable after Phase 2; `x_feed` / `x_post_context` stay R2-only (500 MB free tier).
-    `x_intel.drain_log` records each drain run (counts only). Two optional serve tabs
-    (`Serve · Alpha Feed 7d`, `Serve · X Trends TH 3d`) are off by default.
+   `x_communities`, `x_list_sources` (public inbox, normal raw path, not served). All seven are raw
+   only: no curated table. Phone numbers in their text become `[phone]`. Limit: bots on the
+   `postgres` role may still bypass RLS on the private inbox (spec §2).
+10. **Section 8: dropped (owner 2026-11-12, raw only).** The prompt's small curated tables
+    (`x_trends_th`, `x_trends_intl`, `x_topic_counts`, `x_account_snapshots`, `alpha_feed`) and the
+    two optional serve tabs are not built: these datasets stay in raw on R2 like `x_feed` /
+    `x_post_context`; tables over raw are built later by whoever needs them.
+    `x_intel.drain_log` records each drain run (counts only).
 11. **Digest:** `digest_log.ai_status` / `fallback_reason` / `telegram_message_ids`; `error` is
     delivery only; an alert after 3 `provider_auth` fallbacks in a row.
 
@@ -253,8 +254,7 @@ are equal on all 479 rows. To be safe, read alpha_feed with `hive_partitioning =
 | R2 raw | indefinitely (review at 2 years) | append-only; no lifecycle rule needed at this volume |
 | Postgres x_signals | 180 days of rows (post text is X content; matches intake's 180-day text rule) | follow-up job: `delete from x_intel.x_signals where collected_at < now() - interval '180 days'` — not built yet |
 | Postgres claims, config tables | all (tiny) | — |
-| Postgres section-8 tables (trends, topic counts, account snapshots, alpha_feed) | 90 days | `curated.prune_retention` in the existing cron after an ok run |
-| Postgres bot-only datasets | per dataset (spec `x-lake-private-datasets.md` §1) | same prune; raw is kept |
+| R2 private raw (bot-only private datasets) | per dataset (spec `x-lake-private-datasets.md` §2) | R2 lifecycle rules on `private/raw/<dataset>/` — follow-up after merge |
 | Sheet serving tabs | 7 days / open claims only | rebuilt by serve_sheet.py |
 | Sheet X source tabs | untouched by this work | owner decides after cutover |
 

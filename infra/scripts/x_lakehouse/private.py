@@ -10,12 +10,13 @@ Layers, all separate from the public ones:
   schema owner, EXECUTE for ``postgres`` only): the same row checks, row keys and retry rules as
   ``x_intel.ingest()``, phone numbers masked to "[phone]", rows stored in
   ``x_intel_private.ingest_inbox``. ``x_intel.ingest()`` refuses these four names and stores nothing.
-* curated tables in schema ``x_intel_private`` (RLS on, no policy; nothing granted to any other role);
+* the inbox tables in schema ``x_intel_private`` (RLS on, no policy; nothing granted to any other role);
+  no curated table: the private datasets are raw-only (owner 2026-11-12);
 * raw Parquet under ``<prefix>/private/raw/<dataset>/`` (lake.dataset_root), never under ``raw/``;
 * never served: not in serve_sheet, sheet_summaries, the marts, the digest or the BI site.
 
 The cron (``scheduled.py``, inbox/both modes) drains the private inbox after the public one, checks that
-every drained row reached R2, and after an ok run prunes the private inbox and applies retention.
+every drained row reached R2, and after an ok run prunes the private inbox.
 Logs carry dataset names and counts only.
 
 The schema itself is created by the owner (the lake role has no CREATE on the database):
@@ -43,7 +44,7 @@ if __package__ in (None, ""):
 
 from . import curated as cur  # noqa: E402
 from . import inbox as ib  # noqa: E402
-from .schemas import PG_SCHEMA, PRIVATE_CURATED, PRIVATE_DATASETS, PRIVATE_NAMES, PRIVATE_SCHEMA, table_ddl  # noqa: E402
+from .schemas import PG_SCHEMA, PRIVATE_DATASETS, PRIVATE_NAMES, PRIVATE_SCHEMA  # noqa: E402
 
 P = PRIVATE_SCHEMA
 S = PG_SCHEMA  # the shared, pure SQL helpers (row_key, _raw_text, _mask_row, payload_md5) live in x_intel
@@ -84,9 +85,6 @@ create table if not exists {P_SEEN} (
 create index if not exists ingest_inbox_undrained_idx on {P_INBOX} (id) where drained_at is null;
 create index if not exists ingest_inbox_drained_at_idx on {P_INBOX} (drained_at) where drained_at is not null;
 """]
-    for c in PRIVATE_CURATED.values():
-        out += table_ddl(c)
-    out.append(cur.WATERMARK_DDL.format(table=f"{P}.retention_watermark"))
     return "\n".join(out) + "\n"
 
 
@@ -166,7 +164,7 @@ revoke all on function {P}.ingest(text, jsonb, text) from public;
 
 
 def _grants() -> str:
-    tables = [P_INBOX, P_SEEN, f"{P}.retention_watermark"] + [c.qualified for c in PRIVATE_CURATED.values()]
+    tables = [P_INBOX, P_SEEN]
     rls = "".join(f"alter table {t} enable row level security;\n" for t in tables)
     deny = "\n".join(
         f"  if exists (select 1 from pg_roles where rolname = {_lit(role)}) then\n"
@@ -225,7 +223,7 @@ def ensure_private(conn: Any) -> bool:
 
 
 def drain(conn: Any, *, store: Any, prefix: str, cfg: Any = None, now: datetime | None = None) -> dict[str, Any]:
-    """Private inbox -> append_rows (private raw root + x_intel_private tables) -> mark drained."""
+    """Private inbox -> append_rows (private raw root only; no curated table) -> mark drained."""
     return ib.drain(conn, store=store, prefix=prefix, cfg=cfg, now=now, inbox=P_INBOX, names=list(PRIVATE_DATASETS))
 
 
@@ -234,8 +232,8 @@ def landed(conn: Any, store: Any, prefix: str, since: datetime) -> dict[str, int
 
 
 def prune(conn: Any, now: datetime | None = None) -> dict[str, int]:
-    """After an ok run: inbox rows drained more than 3 days ago (their payload hash kept in ingest_seen)
-    and curated rows past retention. Idempotent; raw files are never deleted here."""
+    """After an ok run: inbox rows drained more than 3 days ago (their payload hash kept in ingest_seen).
+    Idempotent; raw files are never deleted here (raw retention = R2 lifecycle rules, see the spec)."""
     now = now or datetime.now(timezone.utc)
     with conn.cursor() as c:
         c.execute(f"insert into {P_SEEN} (dataset, row_key, payload_md5) "
@@ -244,7 +242,7 @@ def prune(conn: Any, now: datetime | None = None) -> dict[str, int]:
         c.execute(f"delete from {P_INBOX} where drained_at < %s", (now - ib.KEEP_DRAINED,))
         inbox_rows = c.rowcount
     conn.commit()
-    return {"inbox": inbox_rows, **cur.prune_retention(conn, list(PRIVATE_CURATED.values()), now)}
+    return {"inbox": inbox_rows}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -267,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     finally:
         conn.close()
-    print(f"applied: {P_INBOX}, {P}.ingest(), {len(PRIVATE_CURATED)} private tables, RLS, grants")
+    print(f"applied: {P_INBOX}, {P_SEEN}, {P}.ingest(), RLS, grants")
     return 0
 
 

@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from .config import Config
-from .schemas import OPTIONAL_SERVE_TABS, SERVE_TABS, is_protected
+from .schemas import SERVE_TABS, is_protected
 
 API = "https://sheets.googleapis.com/v4/spreadsheets"
 READ_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
@@ -88,12 +88,11 @@ class SheetReader:
         return out
 
 
-WRITABLE_TABS = frozenset(SERVE_TABS.values()) | frozenset(OPTIONAL_SERVE_TABS.values())
+WRITABLE_TABS = frozenset(SERVE_TABS.values())
 
 
 def assert_writable(tab: str) -> None:
-    """The only tabs this package may write are its own serving tabs (the two optional ones are written
-    only when serve_sheet is told to; see serve_sheet.small_tabs_on)."""
+    """The only tabs this package may write are its own serving tabs."""
     if is_protected(tab) or tab not in WRITABLE_TABS:
         raise SheetError(f"refusing to write tab {tab!r}: only {sorted(WRITABLE_TABS)} are writable")
 

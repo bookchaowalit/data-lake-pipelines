@@ -45,7 +45,7 @@ if __package__ in (None, ""):
     __package__ = "x_lakehouse"
 
 from .schemas import (CURATED, DATASETS, PG_SCHEMA, POSTGRES, PRIVATE_NAMES, PUBLIC_DATASETS, SHEET_TZ,  # noqa: E402
-                      SMALL_CURATED, Curated, Dataset, Kind)
+                      Curated, Dataset, Kind)
 from .coerce import PHONE_MASK, PHONE_PATTERN, TZ as TZ_ICT  # noqa: E402
 
 S = PG_SCHEMA
@@ -60,9 +60,7 @@ REPLACEABLE = tuple(n for n, d in PUBLIC_DATASETS.items() if not d.raw)
 # Raw datasets with a curated table: prune keeps each pruned key's payload hash in ingest_seen, so a
 # key resent with other values is still refused once its inbox row is gone (raw keeps the first
 # version and would never take the change; curated alone would diverge from raw).
-# The section-8 datasets stay guarded while X_LAKE_SMALL_CURATED=off, so switching their tables back on
-# cannot take a changed resend that raw refused.
-SEEN_GUARDED = tuple(n for n, d in PUBLIC_DATASETS.items() if d.raw and (n in CURATED or n in SMALL_CURATED))
+SEEN_GUARDED = tuple(n for n, d in PUBLIC_DATASETS.items() if d.raw and n in CURATED)
 CLOSED_STATES = ("closed", "done", "resolved", "archived", "dismissed")  # same list as serve_sheet
 
 # Python's str.strip() whitespace set, so SQL trims exactly what coerce.raw_text trims.
@@ -211,16 +209,6 @@ def _cast(expr: str, kind: Kind, empty_ok: bool = False) -> str:
     return f"coalesce({out}, '')" if empty_ok else out
 
 
-def retention_sql(c: Curated) -> str:
-    """SQL twin of curated.within_retention: rows the retention prune would delete are not upserted."""
-    if not c.retain_col or not c.retain_days:
-        return ""
-    kinds = dict(c.data_columns)
-    cut = (f"(now() at time zone {_lit(SHEET_TZ)})::date - {int(c.retain_days)}" if kinds[c.retain_col] == "date"
-           else f"now() - interval '{int(c.retain_days)} days'")
-    return f"({c.retain_col} is null or {c.retain_col} >= {cut})"
-
-
 def _inbox_table() -> str:
     return f"""
 create table if not exists {INBOX} (
@@ -260,7 +248,6 @@ create index if not exists ingest_inbox_feed_post_idx on {INBOX} ((row ->> 'post
 
 def _upsert_fn(c: Curated) -> str:
     """SQL twin of curated.upsert for one table, fed with the accepted rows of one ingest() call."""
-    assert not c.version_also, f"{c.table}: version_also is drain-only (private tables have no SQL upsert)"
     ds = c.source
     cols = [n for n, _ in c.data_columns]
     joined = {n for n, _, _ in c.joined}
@@ -287,8 +274,6 @@ def _upsert_fn(c: Curated) -> str:
         guard += (f" and not (lower(coalesce(t.{col}, '')) = {_lit(val)}"
                   f" and lower(coalesce(excluded.{col}, '')) <> {_lit(val)})")
     col_list = ", ".join(cols)
-    conflict = ("do nothing" if c.insert_only else
-                f"do update set {', '.join(sets + ['_batch_id = excluded._batch_id', 'updated_at = now()'])}\n    {guard}")
     elig = ""
     if c.protect:
         # Mirrors curated.eligible: once Book checked the claim (stored or in this call), only Book's
@@ -310,12 +295,13 @@ begin
     from jsonb_array_elements(p_rows) with ordinality r(j, ord){feed}
   ){elig}, latest as (
     select distinct on ({', '.join(c.pk)}) * from {'elig' if c.protect else 'src'}
-    where {' and '.join([f'{k} is not null' for k in c.pk] + ([retention_sql(c)] if retention_sql(c) else []))}
+    where {' and '.join(f'{k} is not null' for k in c.pk)}
     order by {order}
   ), up as (
     insert into {S}.{c.table} as t ({col_list}, _batch_id)
     select {col_list}, p_batch from latest
-    on conflict ({', '.join(c.pk)}) {conflict}
+    on conflict ({', '.join(c.pk)}) do update set {', '.join(sets + ['_batch_id = excluded._batch_id', 'updated_at = now()'])}
+    {guard}
     returning (xmax = 0) as ins
   )
   select count(*) filter (where ins), count(*) filter (where not ins), (select count(*) from latest)
@@ -472,10 +458,9 @@ def _views() -> str:
 
 def _grants() -> str:
     """EXECUTE / SELECT for the connector role ``postgres`` only; nothing for anon or authenticated.
-    ``postgres`` may read the read views, the section-8 tables and drain_log (counts only)."""
+    ``postgres`` may read the read views and drain_log (counts only)."""
     fns = [f"{S}.ingest(text, jsonb, text)"]
     readable = [f"{S}.v_query_plan_sheet", f"{S}.v_watchlist_sheet", f"{S}.v_claims_open", f"{S}.drain_log"]
-    readable += [c.qualified for c in SMALL_CURATED.values() if c.table in CURATED]
     others = [c.qualified for c in CURATED.values() if c.qualified not in readable]
     rels = [INBOX, f"{S}.ingest_deliveries", f"{S}.ingest_seen"] + readable + others
     revoke = "\n".join(

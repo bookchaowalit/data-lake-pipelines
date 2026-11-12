@@ -19,8 +19,8 @@ Source (``X_LAKE_SOURCE``, default ``sheet``; see inbox.py for the bot side):
     inbox   lake only: drain the inbox, validate raw vs Postgres, check every drained row reached R2;
             after an ok run delete inbox rows drained more than 3 days ago.
 inbox/both take a Postgres advisory lock: a second drainer exits 0 without writing. They also drain the
-private inbox (private.py; skipped while schema x_intel_private does not exist), write one
-``x_intel.drain_log`` row per run (counts only), and after an ok run apply curated retention.
+private inbox (private.py; skipped while schema x_intel_private does not exist) and write one
+``x_intel.drain_log`` row per run (counts only).
 ``X_LAKE_SERVE=execute`` refreshes the serving tabs after an ok run (default: dry run, counts only).
 ``X_LAKE_DIGEST=dry|send`` builds (and sends) the Telegram digest at the end of every run (digest.py).
 ``X_LAKE_BI=build|deploy`` then renders the x-insights site (bi_site.py) and, with ``deploy``, uploads it to
@@ -49,8 +49,7 @@ from . import curated as cur  # noqa: E402
 from .lake import open_store  # noqa: E402
 from .coerce import TZ  # noqa: E402
 from .config import Config  # noqa: E402
-from .pipeline import seed_from_raw  # noqa: E402
-from .schemas import CURATED, DATASETS, SMALL_CURATED  # noqa: E402
+from .schemas import DATASETS  # noqa: E402
 from .validate import reconcile  # noqa: E402
 
 HEARTBEAT_URL = "https://monitor.bookchaowalit.com/heartbeat/x-lakehouse"
@@ -187,21 +186,6 @@ def _names(private_on: bool) -> list[str]:
     return [n for n, d in DATASETS.items() if not d.private or private_on]
 
 
-def _retention(cfg: Config, started: datetime) -> None:
-    """Curated retention for x_intel (idempotent; raw files are never deleted). Logged, never fatal:
-    a missed prune is caught up by the next run."""
-    if not cfg.db_url:
-        return
-    try:
-        conn = cur.connect(cfg.db_url)
-        try:
-            _log(event="retention", deleted=cur.prune_retention(conn, list(CURATED.values()), started))
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001 - reported, the lake run's result stands
-        _log(event="retention", status="error", error=type(exc).__name__)
-
-
 def _run_sheet(cfg: Config) -> int:
     started = datetime.now(timezone.utc)
     code, summary = _backfill()
@@ -211,10 +195,7 @@ def _run_sheet(cfg: Config) -> int:
     failed = {n: r["reasons"] for n, r in report["datasets"].items() if not r["ok"]}
     _log(event="validate", since=since, ok=report["ok"], failed=failed,
          sheet_rows={n: r["sheet_rows"] for n, r in report["datasets"].items()})
-    ok = code == 0 and report["ok"]
-    if ok:
-        _retention(cfg, started)
-    return _finish(ok, started, cfg)
+    return _finish(code == 0 and report["ok"], started, cfg)
 
 
 def _run_inbox(cfg: Config) -> int:
@@ -247,10 +228,6 @@ def _run_inbox(cfg: Config) -> int:
             ok = ok and pdrained.get("unmarked", 0) == 0
         else:
             _log(event="drain_private", status="schema_missing", note="x_intel_private not created yet; skipped")
-        # Section-8 tables: raw already held their history before they existed (or while switched off).
-        small = [c for n, c in SMALL_CURATED.items() if n in CURATED]
-        if small:
-            _log(event="seed_small_curated", inserted=seed_from_raw(lock, store, prefix, small, started))
         since = (started.astimezone(TZ) - timedelta(days=1)).date()
         if source == "both":
             catchup_at = datetime.now(timezone.utc) - timedelta(minutes=1)  # before the Sheet read
@@ -295,7 +272,6 @@ def _run_inbox(cfg: Config) -> int:
             missing_from_raw=landed, ok=ok)
         if ok:
             _log(event="prune", deleted=inbox.prune(lock, started))
-            _log(event="retention", deleted=cur.prune_retention(lock, list(CURATED.values()), started))
             if private_on:
                 _log(event="prune_private", deleted=private.prune(lock, started))
         # Still holding the lock: the serving refresh rewrites rows and clears the tail in separate

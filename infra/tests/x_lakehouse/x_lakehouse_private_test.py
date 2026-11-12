@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for the seven bot-only datasets, the private schema, the section-8 small curated tables and
-x_intel.drain_log (spec docs/specs/x-lake-private-datasets.md; acceptance P1-P9, I1-I7, R1-R5, S1-S8).
+"""Tests for the seven bot-only datasets (raw only), the private inbox, the section-8 datasets staying
+raw-only and x_intel.drain_log (spec docs/specs/x-lake-private-datasets.md; acceptance P1-P9, I1-I7, R5,
+S1-S5, S8).
 
 Synthetic fixtures only: every text value says "synthetic"; handles are made up or the three public
 account handles; no real post text, bookmark, mention or timeline row. Reports print counts only.
@@ -15,6 +16,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,14 +35,17 @@ from x_lakehouse import curated as cur  # noqa: E402
 from x_lakehouse.coerce import TZ, mask_phones, type_row  # noqa: E402
 from x_lakehouse.config import Config  # noqa: E402
 from x_lakehouse.lake import LocalStore, read_dataset  # noqa: E402
-from x_lakehouse.schemas import (CURATED, DATASETS, NEW_NAMES, NEW_PUBLIC_NAMES, OPTIONAL_SERVE_TABS,  # noqa: E402
-                                 PRIVATE_CURATED, PRIVATE_NAMES, SERVE_DENY, SERVE_TABS, SMALL_CURATED,
-                                 postgres_ddl)
+from x_lakehouse.schemas import (CURATED, DATASETS, NEW_NAMES, NEW_PUBLIC_NAMES, PRIVATE_NAMES,  # noqa: E402
+                                 SERVE_DENY, SERVE_TABS, postgres_ddl)
 from x_lakehouse.sheet import WRITABLE_TABS, SheetError, assert_writable  # noqa: E402
 
 DB = os.environ.get("X_LAKE_TEST_DB_URL", "")
 FIXTURE_CSV = ROOT / "infra/tests/fixtures/x_own_accounts_history_synthetic.csv"
 MARK = "SYNTH-MARKER-ข้อความ"  # must never appear in a log line or drain_log
+# Section 8 of the Chief Data prompt proposed curated tables for these; the owner chose raw only (2026-11-12).
+SECTION8 = ("x_trends_th", "x_trends_intl", "x_topic_counts", "x_account_snapshots", "alpha_feed")
+# The only curated tables in Postgres (unchanged by this work).
+CURATED_TABLES = ["claims", "taxonomy_map", "x_analyses", "x_query_plan", "x_signals", "x_triage_audit", "x_watchlist"]
 PHONE_TEXT = f"synthetic {MARK} โทร 081-234-5678 or +66 2 123 4567, id 2114407239578710300 $json$ $$"
 
 
@@ -109,8 +114,7 @@ class OfflineTests(unittest.TestCase):
     # -- P1 / P2 / S6 -----------------------------------------------------------------------------
     def test_p1_private_names_are_in_no_serving_or_summary_config(self):
         from sync import sheet_summaries as ss  # infra/scripts/sync
-        lists = {"SERVE_TABS keys": set(SERVE_TABS), "OPTIONAL_SERVE_TABS keys": set(OPTIONAL_SERVE_TABS),
-                 "WRITABLE_TABS": set(WRITABLE_TABS), "DATA_TABS": set(ss.DATA_TABS),
+        lists = {"SERVE_TABS keys": set(SERVE_TABS), "WRITABLE_TABS": set(WRITABLE_TABS), "DATA_TABS": set(ss.DATA_TABS),
                  "FINDING_TABS": set(ss.FINDING_TABS)}
         for name in PRIVATE_NAMES:
             for label, items in lists.items():
@@ -118,7 +122,6 @@ class OfflineTests(unittest.TestCase):
         self.assertTrue(set(NEW_NAMES) <= SERVE_DENY)
         for name in NEW_PUBLIC_NAMES:
             self.assertNotIn(name, SERVE_TABS)
-            self.assertNotIn(name, OPTIONAL_SERVE_TABS)
 
     def test_p2_serving_a_private_or_new_dataset_is_refused_before_any_read(self):
         for name in NEW_NAMES:
@@ -145,25 +148,24 @@ class OfflineTests(unittest.TestCase):
                 return []
 
         spy = Spy()
-        views = serve_sheet.fetch(spy, small_tabs=True)
+        views = serve_sheet.fetch(spy)
         joined = " ".join(spy.sql)
         self.assertNotIn("x_intel_private", joined)
         for name in NEW_NAMES:
             self.assertNotIn(name, joined)
-        self.assertEqual(set(views), set(SERVE_TABS.values()) | set(OPTIONAL_SERVE_TABS.values()))
+        self.assertEqual(set(views), set(SERVE_TABS.values()))
 
-    def test_s6_optional_tabs_are_off_by_default_and_only_the_two_names(self):
-        self.assertEqual(set(OPTIONAL_SERVE_TABS.values()), {"Serve · Alpha Feed 7d", "Serve · X Trends TH 3d"})
-        self.assertFalse(serve_sheet.small_tabs_on(Config(env={})))
-        self.assertTrue(serve_sheet.small_tabs_on(Config(env={"X_LAKE_SERVE_SMALL_TABS": "on"})))
-        self.assertEqual(serve_sheet.source_for("alpha_feed"), ("Serve · Alpha Feed 7d", "x_intel.alpha_feed"))
-        self.assertEqual(serve_sheet.source_for("x_trends_th"), ("Serve · X Trends TH 3d", "x_intel.x_trends_th"))
+    def test_s6_only_the_three_serve_tabs_are_writable(self):
+        self.assertEqual(set(WRITABLE_TABS), set(SERVE_TABS.values()))
         for tab in WRITABLE_TABS:
             assert_writable(tab)
-        for tab in ("X Feed", "Alpha Feed", "X Trends TH", "AI Summaries", "Chief Data", "Serve · X Spaces"):
+        for tab in ("X Feed", "Alpha Feed", "X Trends TH", "AI Summaries", "Chief Data", "Serve · X Spaces",
+                    "Serve · Alpha Feed 7d", "Serve · X Trends TH 3d"):
             with self.assertRaises(SheetError):
                 assert_writable(tab)
-        self.assertEqual(len(WRITABLE_TABS), 5)
+        for name in SECTION8:  # no serving tab over a raw-only dataset
+            with self.assertRaises(serve_sheet.ServeError):
+                serve_sheet.source_for(name)
 
     # -- I4 / I6 / P9 -----------------------------------------------------------------------------
     def test_i4_phone_numbers_are_masked_and_ids_dates_kept(self):
@@ -216,64 +218,38 @@ class OfflineTests(unittest.TestCase):
                 own_account_backfill.read_rows(bad)
 
     # -- S1 (DDL) / S3 / S8 -----------------------------------------------------------------------
-    def test_s1_s3_ddl_has_the_five_tables_and_no_feed_or_context_table(self):
-        ddl = postgres_ddl()
-        for t, pk in (("x_trends_th", "snapshot_at, rank, trend_name"),
-                      ("x_trends_intl", "snapshot_at, woeid, rank, trend_name"),
-                      ("x_topic_counts", "snapshot_at, query_id"), ("x_account_snapshots", "snapshot_at, list, handle"),
-                      ("alpha_feed", "pulled_at_ict, source, sub_source, url, title")):
-            self.assertIn(t, SMALL_CURATED)
-            self.assertIn(t, CURATED)
-            block = ddl.split(f"create table if not exists x_intel.{t} (")[1].split(");")[0]
-            self.assertIn(f"primary key ({pk})", block)
-            for lineage in ("created_at timestamptz", "updated_at timestamptz", "_batch_id text"):
-                self.assertIn(lineage, block)
-        self.assertIn("on x_intel.x_topic_counts (spike) where spike", ddl)
-        self.assertIn("x_trends_intl_snapshot_date_woeid_idx", ddl)
-        self.assertIn("x_account_snapshots_handle_snapshot_at_idx", ddl)
-        self.assertIn("alpha_feed_time_bound_date_idx", ddl)
+    def test_s1_s3_no_curated_table_for_the_bot_only_or_section8_datasets(self):
+        self.assertEqual(sorted(CURATED), CURATED_TABLES)
+        ddl, pddl = postgres_ddl(), private.private_ddl()
         self.assertIn("create table if not exists x_intel.drain_log", ddl)
-        self.assertNotIn("x_intel.x_feed ", ddl)
-        self.assertNotIn("x_intel.x_post_context", ddl)
-        self.assertNotIn("x_intel_private", ddl)  # the private schema has its own DDL
-        for name in PRIVATE_NAMES:
-            self.assertNotIn(f"x_intel.{name}", ddl)
+        for name in NEW_NAMES + SECTION8 + ("x_feed", "x_post_context"):
+            self.assertNotIn(f"x_intel.{name} ", ddl, name)
+            self.assertNotIn(f"x_intel.{name} (", ddl, name)
+            self.assertNotIn(f"x_intel_private.{name}", pddl, name)
+        self.assertNotIn("x_intel_private", ddl)  # the private inbox has its own DDL
+        tables = re.findall(r"create table if not exists (\S+)", pddl)
+        self.assertEqual(tables, ["x_intel_private.ingest_inbox", "x_intel_private.ingest_seen"])
+        self.assertNotIn("retention_watermark", pddl)
 
     def test_s8_docs_explain_the_choice(self):
         doc = (ROOT / "docs/specs/x-lake-private-datasets.md").read_text(encoding="utf-8")
-        for phrase in ("500 MB", "x_feed", "x_post_context", "postgres", "X_LAKE_SERVE_SMALL_TABS", "drain_log",
-                       "ai_status", "x_intel_private.ingest"):
+        for phrase in ("raw only", "2026-11-12", "x_feed", "x_post_context", "postgres", "drain_log",
+                       "ai_status", "x_intel_private.ingest", "lifecycle"):
             self.assertIn(phrase, doc)
 
     # -- rollback switches ------------------------------------------------------------------------
-    def test_rollback_switches_remove_the_datasets_and_tables(self):
+    def test_rollback_switch_removes_the_datasets(self):
         code = ("import sys; sys.path.insert(0, %r); from x_lakehouse import schemas as s, inbox, private; "
-                "import json; print(json.dumps([sorted(s.DATASETS), sorted(s.CURATED), sorted(s.PRIVATE_CURATED), "
+                "import json; print(json.dumps([sorted(s.DATASETS), sorted(s.CURATED), "
                 "'x_bookmarks' in inbox.inbox_ddl(), 'x_spaces' in inbox.inbox_ddl(), "
                 "\"when 'x_bookmarks'\" in private.private_ddl()]))") % str(SCRIPTS)
-        env = {**os.environ, "X_LAKE_NEW_DATASETS": "off", "X_LAKE_SMALL_CURATED": "off"}
+        env = {**os.environ, "X_LAKE_NEW_DATASETS": "off"}
         out = json.loads(subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
                                         check=True).stdout)
-        guard = "\n".join([
-            f"import sys; sys.path.insert(0, {str(SCRIPTS)!r})",
-            "from x_lakehouse import inbox, serve_sheet",
-            "print(sorted(set(inbox.SEEN_GUARDED) & {'x_trends_th', 'alpha_feed'}))",
-            "class S:",
-            "    def cursor(self): return self",
-            "    def __enter__(self): return self",
-            "    def __exit__(self, *a): return False",
-            "    def execute(self, *a): pass",
-            "    def fetchall(self): return []",
-            "print(sorted(serve_sheet.fetch(S(), small_tabs=True)))"])
-        lines = subprocess.run([sys.executable, "-c", guard], env={**os.environ, "X_LAKE_SMALL_CURATED": "off"},
-                               capture_output=True, text=True, check=True).stdout.splitlines()
-        self.assertEqual(lines[0], "['alpha_feed', 'x_trends_th']")  # still replay-guarded while off
-        self.assertEqual(eval(lines[1]), sorted(SERVE_TABS.values()))  # optional tabs skipped, no failure
-        names, tables, ptables, priv_in_public, spaces_in_public, priv_door = out
+        names, tables, priv_in_public, spaces_in_public, priv_door = out
         self.assertEqual(len(names), 14)
         self.assertFalse(set(NEW_NAMES) & set(names))
-        self.assertFalse(set(SMALL_CURATED) & set(tables))
-        self.assertEqual(ptables, [])
+        self.assertEqual(tables, CURATED_TABLES)
         self.assertTrue(priv_in_public)  # only in the explicit "private dataset" refusal
         self.assertFalse(spaces_in_public)
         self.assertFalse(priv_door)
@@ -319,9 +295,13 @@ class PrivatePostgresTests(unittest.TestCase):
     def n(self, table):
         return self.q(f"select count(*) from {table}")[0][0]
 
-    def table(self, name):
-        c = CURATED.get(name) or PRIVATE_CURATED[name]
-        return c.qualified
+    def raw(self, name):
+        tbl = read_dataset(self.store, "", DATASETS[name])
+        return [] if tbl is None else tbl.to_pylist()
+
+    def relations(self, names):
+        return self.q("select nspname || '.' || relname from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+                      "where nspname in ('x_intel', 'x_intel_private', 'public') and relname = any(%s)", list(names))
 
     def run_scheduled(self, **extra):
         out, beats = io.StringIO(), []
@@ -334,8 +314,8 @@ class PrivatePostgresTests(unittest.TestCase):
         return code, beats, events, text
 
     # -- I1 / I2 / S2 -----------------------------------------------------------------------------
-    def test_i1_s2_every_new_and_small_dataset_is_retry_safe_end_to_end(self):
-        names = list(NEW_NAMES) + list(SMALL_CURATED)
+    def test_i1_s2_every_new_and_section8_dataset_is_retry_safe_and_raw_only(self):
+        names = list(NEW_NAMES) + list(SECTION8)
         batches = {n: [row(n, i) for i in range(3)] for n in names}
         for n, rows in batches.items():
             first, second = self.ingest(n, rows), self.ingest(n, rows)
@@ -343,12 +323,13 @@ class PrivatePostgresTests(unittest.TestCase):
             self.assertEqual((second["inserted"], second["skipped"]), (0, 3), n)
         code, beats, ev, _ = self.run_scheduled()
         self.assertEqual((code, beats), (0, [True]), ev.get("validate"))
-        counts = {n: self.n(self.table(n)) for n in names}
+        counts = {n: len(self.raw(n)) for n in names}
         self.assertEqual(counts, {n: 3 for n in names})
+        self.assertEqual(self.relations(names), [])  # raw only: no table in Postgres
         for n, rows in batches.items():  # again after the drain: still no new row anywhere
             self.assertEqual(self.ingest(n, rows)["inserted"], 0, n)
         self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual({n: self.n(self.table(n)) for n in names}, counts)
+        self.assertEqual({n: len(self.raw(n)) for n in names}, counts)
 
     def test_i2_composite_keys(self):
         self.ingest("x_bookmarks", [row("x_bookmarks", 1), row("x_bookmarks", 1, folder_id="f1", folder_name="F")])
@@ -360,10 +341,10 @@ class PrivatePostgresTests(unittest.TestCase):
         self.ingest("x_own_account_daily", [row("x_own_account_daily", 0, handle=h) for h in ("ghp273", "eatbeforeboard")])
         self.ingest("x_own_mentions", [row("x_own_mentions", 1, own_handle=h) for h in ("ghp273", "bookchaowalit")])
         self.assertEqual(self.run_scheduled()[0], 0)
-        folders = self.q("select folder_id from x_intel_private.x_bookmarks order by folder_id")
-        self.assertEqual(folders, [("",), ("f1",)])  # '' is a value, never NULL
+        folders = sorted(r["folder_id"] for r in self.raw("x_bookmarks"))
+        self.assertEqual(folders, ["", "f1"])  # '' is a value, never NULL
         for name in ("x_home_timeline", "x_spaces", "x_communities", "x_own_account_daily", "x_own_mentions"):
-            self.assertEqual(self.n(self.table(name)), 2, name)
+            self.assertEqual(len(self.raw(name)), 2, name)
 
     # -- I3 ----------------------------------------------------------------------------------------
     def test_i3_unknown_column_is_reported_and_other_rows_keep_every_column(self):
@@ -377,7 +358,7 @@ class PrivatePostgresTests(unittest.TestCase):
         self.assertEqual(reply["errors"][0]["columns"], ["reply_text"])  # no generated reply is stored
 
     # -- I4 / I6 -----------------------------------------------------------------------------------
-    def test_i4_i6_bot_sql_round_trip_masks_phones_in_inbox_raw_and_curated(self):
+    def test_i4_i6_bot_sql_round_trip_masks_phones_in_inbox_and_raw(self):
         sent = {n: [row(n, 1, **{c: PHONE_TEXT for c in DATASETS[n].mask_phone})] for n in NEW_NAMES}
         with tempfile.TemporaryDirectory() as d:
             for n, rows in sent.items():
@@ -391,12 +372,10 @@ class PrivatePostgresTests(unittest.TestCase):
             ds = DATASETS[n]
             inbox_table = private.P_INBOX if ds.private else inbox.INBOX
             [(stored,)] = self.q(f"select row from {inbox_table} where dataset = %s", n)
-            cols = [c for c, _ in (CURATED.get(n) or PRIVATE_CURATED[n]).data_columns]
-            [cur_row] = self.q(f"select {', '.join(cols)} from {self.table(n)}")
-            raw = read_dataset(self.store, "", ds).to_pylist()[0]
+            [raw] = self.raw(n)
             self.assertEqual(set(stored), set(rows[0]), n)  # every sent column round-trips
             for col in ds.mask_phone:
-                for where, value in (("inbox", stored[col]), ("raw", raw[col]), ("curated", cur_row[cols.index(col)])):
+                for where, value in (("inbox", stored[col]), ("raw", raw[col])):
                     self.assertNotIn("081-234-5678", value, (n, where))
                     self.assertIn("[phone]", value, (n, where))
                     self.assertIn("$json$", value, (n, where))
@@ -411,60 +390,14 @@ class PrivatePostgresTests(unittest.TestCase):
             [(sql,)] = self.q("select x_intel._mask_phones(%s)", t)
             self.assertEqual(sql, mask_phones(t), t)
 
-    def test_bookmark_removal_outranks_a_late_active_row_with_the_same_last_seen(self):
-        seen = ago(hours=3)
-        removed = row("x_bookmarks", 1, last_seen_at=seen, removed_at=ago(hours=1))
-        active = row("x_bookmarks", 1, last_seen_at=seen)
-        self.ingest("x_bookmarks", [removed])
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.ingest("x_bookmarks", [active])  # a delayed observation from before the removal
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.q("select removed_at is not null from x_intel_private.x_bookmarks"), [(True,)])
-        self.ingest("x_bookmarks", [active, removed], run_id="run1110u")  # same pair in one batch, any order
-        again = row("x_bookmarks", 1, last_seen_at=ago(minutes=5))  # bookmarked again later
-        self.ingest("x_bookmarks", [again])
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.q("select removed_at is null from x_intel_private.x_bookmarks"), [(True,)])
-
-    def test_an_expired_removal_still_ends_a_stored_bookmark_and_nothing_older_revives_it(self):
-        now = datetime.now(timezone.utc)
-        seen = ict(now - timedelta(days=200))
-        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=seen)])
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 1)  # still bookmarked: kept
-        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=seen, removed_at=ict(now - timedelta(days=190)))])
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 0)  # removal applied, then pruned
-        self.assertEqual(self.q("select tbl, pk from x_intel_private.retention_watermark"),
-                         [("x_bookmarks", [row("x_bookmarks", 1)["post_id"], ""])])
-        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=210)))])  # late, older
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 0)
-        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=ago(minutes=5))])  # bookmarked again
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.q("select removed_at from x_intel_private.x_bookmarks"), [(None,)])
-
-    def test_validate_does_not_expect_a_pruned_bookmark_from_its_older_active_version(self):
-        from x_lakehouse import validate
-        now = datetime.now(timezone.utc)
-        self.ingest("x_bookmarks", [row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=200))),
-                                    row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=200)),
-                                        removed_at=ict(now - timedelta(days=190)))])
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 0)  # newest version is past retention
-        self.assertEqual(read_dataset(self.store, "", DATASETS["x_bookmarks"]).num_rows, 2)
-        cfg = Config(env={"X_LAKE_DB_URL": DB, "X_LAKE_URI": f"file://{self.tmp.name}"})
-        rep = validate.reconcile(cfg, ["x_bookmarks"], None, None, sheet=False)["datasets"]["x_bookmarks"]
-        self.assertEqual((rep["postgres_missing_keys"], rep["postgres_stale_versions"], rep["ok"]), (0, 0, True), rep)
-
     # -- I7 ----------------------------------------------------------------------------------------
-    def test_i7_list_sources_upsert_by_list_id_newest_verification_wins(self):
+    def test_i7_list_sources_keep_every_verification_in_raw(self):
         v1 = row("x_list_sources", 1, verified_at=ago(hours=5), status="ok")
         v2 = row("x_list_sources", 1, verified_at=ago(hours=1), status="stale")
         self.ingest("x_list_sources", [v2])
         self.ingest("x_list_sources", [v1])  # an older verification arriving late
         self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.q("select status from x_intel.x_list_sources"), [("stale",)])
+        self.assertEqual(sorted(r["status"] for r in self.raw("x_list_sources")), ["ok", "stale"])
 
     # -- P3 / P4 / P5 / P6 ------------------------------------------------------------------------
     def test_p4_public_door_refuses_private_datasets_and_stores_nothing(self):
@@ -520,7 +453,6 @@ class PrivatePostgresTests(unittest.TestCase):
         self.assertTrue(private.ensure_private(self.conn))  # the revokes run on every cron run
         statements = ["select x_intel_private.ingest('x_bookmarks', '[]'::jsonb, 'r1')",
                       "insert into x_intel_private.ingest_inbox (dataset, run_id, row, row_key) values ('a','b','{}','c')"]
-        statements += [f"select count(*) from {c.qualified}" for c in PRIVATE_CURATED.values()]
         statements += [f"select count(*) from {private.P_INBOX}", f"select count(*) from {private.P_SEEN}"]
         for role in ("anon", "authenticated"):
             for sql in statements:
@@ -536,7 +468,7 @@ class PrivatePostgresTests(unittest.TestCase):
             self.assertEqual(privs, [(False, False)], role)
         rls = self.q("select relname, relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace "
                      "where nspname = 'x_intel_private' and relkind = 'r' order by 1")
-        self.assertEqual(len(rls), 3 + len(PRIVATE_CURATED))  # inbox, seen, retention_watermark + curated
+        self.assertEqual([r for r, _ in rls], ["ingest_inbox", "ingest_seen"])  # the inbox only, no curated table
         self.assertTrue(all(on for _, on in rls))
         with self.conn.cursor() as c:
             c.execute("drop owned by anon, authenticated")
@@ -562,56 +494,6 @@ class PrivatePostgresTests(unittest.TestCase):
             for needle in (MARK, "synthetic", "081-234", "[phone]", "x.com/", DB, "postgresql://"):
                 self.assertNotIn(needle, blob)
 
-    # -- R1-R4 / S4 --------------------------------------------------------------------------------
-    def test_r1_r4_s4_retention_is_per_table_idempotent_and_never_touches_raw(self):
-        now = datetime.now(timezone.utc)
-        old_new = {  # name -> (rows past retention, rows kept)
-            "x_home_timeline": ([row("x_home_timeline", 1, collected_at=ict(now - timedelta(days=31)))],
-                                [row("x_home_timeline", 2, collected_at=ict(now - timedelta(days=29)))]),
-            "x_own_mentions": ([row("x_own_mentions", 1, collected_at=ict(now - timedelta(days=366)))],
-                               [row("x_own_mentions", 2, collected_at=ict(now - timedelta(days=360)))]),
-            "x_communities": ([row("x_communities", 1, snapshot_date=today_ict(366))],
-                              [row("x_communities", 2, snapshot_date=today_ict(364))]),
-            "x_spaces": ([row("x_spaces", 1, collected_at=ict(now - timedelta(days=181)))],
-                         [row("x_spaces", 2, collected_at=ict(now - timedelta(days=179)))]),
-            "x_bookmarks": ([row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=200)),
-                                 removed_at=ict(now - timedelta(days=181)))],
-                            [row("x_bookmarks", 2, last_seen_at=ict(now - timedelta(days=900))),  # still bookmarked
-                             row("x_bookmarks", 3, removed_at=ict(now - timedelta(days=10)))]),
-            "x_own_account_daily": ([], [row("x_own_account_daily", 0, snapshot_date=today_ict(800),
-                                             snapshot_at=ict(now - timedelta(days=800)))]),
-            "x_list_sources": ([], [row("x_list_sources", 1, verified_at=ict(now - timedelta(days=800)))]),
-        }
-        for name in SMALL_CURATED:
-            col = SMALL_CURATED[name].retain_col
-            old_new[name] = ([row(name, 1, **{col: ict(now - timedelta(days=91))})],
-                             [row(name, 2, **{col: ict(now - timedelta(days=89))})])
-        # Rows already past retention are written to raw but never upserted (a replay cannot revive them).
-        for name, (old, new) in old_new.items():
-            self.assertEqual(self.ingest(name, old + new)["errors"], [], name)
-        self.assertEqual(self.run_scheduled()[0], 0)
-        expect = {n: len(new) for n, (_, new) in old_new.items()}
-        self.assertEqual({n: self.n(self.table(n)) for n in old_new}, expect)
-        # Rows that aged in place (inserted directly, as if stored months ago) are pruned by the cron.
-        for name, (old, _) in old_new.items():
-            if not old:
-                continue
-            c = CURATED.get(name) or PRIVATE_CURATED[name]
-            typed = type_row(c.source, old[0]).values
-            cols = [k for k, _ in c.data_columns]
-            with self.conn.cursor() as q:
-                q.execute(f"insert into {c.qualified} ({', '.join(cols)}) values ({', '.join(['%s'] * len(cols))}) "
-                          "on conflict do nothing", [typed.get(k) for k in cols])
-            self.conn.commit()
-        raw_before = sorted(self.store.list("raw/") + self.store.list("private/raw/"))
-        for _ in range(2):  # idempotent
-            code, _, ev, _ = self.run_scheduled()
-            self.assertEqual(code, 0)
-            self.assertEqual({n: self.n(self.table(n)) for n in old_new}, expect)
-        self.assertEqual(sorted(self.store.list("raw/") + self.store.list("private/raw/")), raw_before)
-        for name, (old, new) in old_new.items():  # raw keeps every row ever drained
-            self.assertEqual(read_dataset(self.store, "", DATASETS[name]).num_rows, len(old) + len(new), name)
-
     # -- R5 ----------------------------------------------------------------------------------------
     def test_r5_backfill_execute_is_idempotent_and_keeps_the_gap(self):
         out = io.StringIO()
@@ -621,12 +503,12 @@ class PrivatePostgresTests(unittest.TestCase):
         first, second = (json.loads(x) for x in out.getvalue().splitlines())
         self.assertEqual((first["inserted"], second["inserted"], second["skipped"]), (18, 0, 18))
         self.assertEqual(self.run_scheduled()[0], 0)
-        rows = self.q("select snapshot_date, source, snapshot_at, listed, followers_delta, posts_24h, reposts_24h, "
-                      "mentions_24h from x_intel_private.x_own_account_daily")
+        rows = self.raw("x_own_account_daily")
         self.assertEqual(len(rows), 18)
-        days = {r[0].isoformat() for r in rows}
+        days = {r["snapshot_date"].isoformat() for r in rows}
         self.assertFalse(days & {f"2026-11-0{d}" for d in range(2, 10)})
-        self.assertTrue(all(r[1] == "backfill_csv" and all(v is None for v in r[2:]) for r in rows))
+        nulls = ("snapshot_at", "listed", "followers_delta", "posts_24h", "reposts_24h", "mentions_24h")
+        self.assertTrue(all(r["source"] == "backfill_csv" and all(r[k] is None for k in nulls) for r in rows))
 
     # -- S3 / S5 -----------------------------------------------------------------------------------
     def test_s3_feed_and_context_stay_raw_only(self):
@@ -663,19 +545,6 @@ class PrivatePostgresTests(unittest.TestCase):
         out = self.ingest("drain_log", [{"batch_id": "x"}], fn="x_intel.ingest")
         self.assertEqual(out["errors"][0]["error"], "unknown dataset")
 
-    # -- S6 ----------------------------------------------------------------------------------------
-    def test_s6_optional_tabs_read_only_the_new_tables(self):
-        self.ingest("alpha_feed", [row("alpha_feed", i) for i in range(2)])
-        self.ingest("x_trends_th", [row("x_trends_th", i) for i in range(3)])
-        self.ingest("x_trends_th", [row("x_trends_th", 9, snapshot_at=ago(days=4))])  # outside the 3 days
-        self.assertEqual(self.run_scheduled()[0], 0)
-        default = serve_sheet.fetch(self.conn)
-        self.assertEqual(set(default), set(SERVE_TABS.values()))
-        views = serve_sheet.fetch(self.conn, small_tabs=True)
-        self.assertEqual(len(views["Serve · Alpha Feed 7d"][1]), 2)
-        self.assertEqual(len(views["Serve · X Trends TH 3d"][1]), 3)
-        self.assertEqual(views["Serve · X Trends TH 3d"][0], DATASETS["x_trends_th"].names)
-
     def test_rollback_switch_closes_both_doors_and_keeps_stored_rows(self):
         self.ingest("x_bookmarks", [row("x_bookmarks", 1)])
         self.ingest("x_spaces", [row("x_spaces", 1)])
@@ -691,13 +560,13 @@ class PrivatePostgresTests(unittest.TestCase):
                 res = self.ingest(n, [row(n, 2)], fn=fn)
                 self.assertEqual(res["inserted"], 0, n)
                 self.assertIn("unknown", res["errors"][0]["error"], n)
-            self.assertEqual((self.n("x_intel_private.x_bookmarks"), self.n("x_intel.x_spaces")), (1, 1))
+            self.assertEqual((len(self.raw("x_bookmarks")), len(self.raw("x_spaces"))), (1, 1))  # stored rows stay
         finally:
             inbox.ensure_inbox(self.conn)  # switch back on: both doors accept again
             private.ensure_private(self.conn)
         self.assertEqual(self.ingest("x_bookmarks", [row("x_bookmarks", 2)])["inserted"], 1)
 
-    def test_standalone_validate_reports_private_tables_as_not_provisioned(self):
+    def test_standalone_validate_checks_private_raw_without_the_schema(self):
         from x_lakehouse import validate
         with self.conn.cursor() as c:
             c.execute("drop schema x_intel_private cascade")
@@ -710,49 +579,7 @@ class PrivatePostgresTests(unittest.TestCase):
         self.assertEqual(code, 0, out.getvalue())
         rep = validate.reconcile(Config(env=env), list(PRIVATE_NAMES), None, None, sheet=False)
         self.assertTrue(rep["ok"])
-        self.assertEqual({r["postgres_skipped"] for r in rep["datasets"].values()}, {"schema x_intel_private not created yet"})
-
-    def test_small_tables_keep_the_first_version_like_raw(self):
-        first = row("x_trends_th", 1, post_count=100)
-        self.ingest("x_trends_th", [first])
-        self.assertEqual(self.run_scheduled()[0], 0)
-        with self.conn.cursor() as c:  # a key drained and pruned before replay fingerprints existed
-            c.execute("delete from x_intel.ingest_inbox")
-            c.execute("delete from x_intel.ingest_seen")
-        self.conn.commit()
-        out = self.ingest("x_trends_th", [first | {"post_count": 999}])
-        self.assertEqual(out["inserted"], 1)
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.q("select post_count from x_intel.x_trends_th"), [(100,)])  # = raw's first version
-        [raw] = read_dataset(self.store, "", DATASETS["x_trends_th"]).to_pylist()
-        self.assertEqual(raw["post_count"], 100)
-
-    def test_small_tables_are_seeded_from_raw_history_they_never_saw(self):
-        self.ingest("x_trends_th", [row("x_trends_th", i) for i in range(3)])
-        self.ingest("x_trends_th", [row("x_trends_th", 7, snapshot_at=ago(days=100))])  # raw only: past 90 days
-        self.assertEqual(self.run_scheduled()[0], 0)
-        with self.conn.cursor() as c:  # as if the table was created (or switched on) after this history landed
-            c.execute("delete from x_intel.x_trends_th")
-        self.conn.commit()
-        code, _, ev, _ = self.run_scheduled()
-        self.assertEqual(code, 0, ev.get("validate"))
-        self.assertEqual(ev["seed_small_curated"]["inserted"]["x_trends_th"], 3)
-        self.assertEqual(self.n("x_intel.x_trends_th"), 3)
-        self.assertEqual(self.run_scheduled()[2]["seed_small_curated"]["inserted"]["x_trends_th"], 0)  # idempotent
-
-    def test_scoped_validate_sees_a_removal_outside_the_window(self):
-        from x_lakehouse import validate
-        now = datetime.now(timezone.utc)
-        removal = row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=220)),
-                      removed_at=ict(now - timedelta(days=200)))
-        active = row("x_bookmarks", 1, last_seen_at=ict(now - timedelta(days=210)))
-        self.ingest("x_bookmarks", [removal, active])
-        self.assertEqual(self.run_scheduled()[0], 0)
-        self.assertEqual(self.n("x_intel_private.x_bookmarks"), 0)
-        cfg = Config(env={"X_LAKE_DB_URL": DB, "X_LAKE_URI": f"file://{self.tmp.name}"})
-        since = (now - timedelta(days=215)).astimezone(TZ).date()
-        rep = validate.reconcile(cfg, ["x_bookmarks"], since, None, sheet=False)["datasets"]["x_bookmarks"]
-        self.assertEqual((rep["postgres_missing_keys"], rep["ok"]), (0, True), rep)
+        self.assertFalse(any("postgres_rows" in r for r in rep["datasets"].values()))  # raw only, no Postgres check
 
     # -- schema missing ----------------------------------------------------------------------------
     def test_private_steps_are_skipped_while_the_owner_has_not_created_the_schema(self):

@@ -10,7 +10,7 @@ from typing import Any
 from . import curated as cur
 from .coerce import TypedRow, type_row
 from .lake import Store, WriteReport, write_raw
-from .schemas import DATASETS, X_FEED, X_POST_CONTEXT, Dataset, curated_for
+from .schemas import CURATED, DATASETS, X_FEED, X_POST_CONTEXT, Dataset
 
 
 @dataclass
@@ -127,51 +127,16 @@ def run(typed: dict[str, list[TypedRow]], *, store: Store | None, prefix: str, c
                                          prefix=prefix, source=source, execute=execute, run_date=run_date,
                                          batch_id=batch_id, now=now)
     for name, rows in typed.items():
-        c = curated_for(name)
-        if c is None:
+        if name not in CURATED:
             continue
+        c = CURATED[name]
         stored = cur.stored_protected(conn, c) if execute and conn is not None else set()
         latest = cur.dedupe_latest(c, cur.eligible(c, rows, stored))
         records = cur.join_feed(latest, feed, c) if c.joined else [dict(r.values) for r in latest]
-        records = cur.within_retention(c, records, now)
         if execute and conn is not None:
-            records = cur.drop_watermarked(conn, c, records)
             result.curated[name] = cur.upsert(conn, c, records, batch_id)
         else:
             joined_missing = (sum(1 for r in latest if str(r.values.get("post_id")) not in feed)
                               if c.joined else 0)
             result.curated[name] = {"rows": len(records), "join_missing": joined_missing}
     return result
-
-
-def seed_from_raw(conn: Any, store: Store, prefix: str, tables: list[Any], now: datetime | None = None) -> dict[str, int]:
-    """Copy raw rows still inside retention into curated tables that miss them (idempotent).
-
-    For curated tables whose raw history predates them (the section-8 tables on an inbox-mode install, or
-    after X_LAKE_SMALL_CURATED is switched back on): the drain only upserts new inbox rows, so without
-    this the already-drained history would never reach Postgres. Only keys Postgres lacks are written.
-    """
-    from .coerce import TZ as _TZ
-    from .lake import read_dataset
-
-    now = now or datetime.now(timezone.utc)
-    out: dict[str, int] = {}
-    for c in tables:
-        cut = cur.retention_cut(c, now)
-        since = None if cut is None else (cut if isinstance(cut, date) and not isinstance(cut, datetime)
-                                         else cut.astimezone(_TZ).date())
-        tbl = read_dataset(store, prefix, c.source, since)
-        if tbl is None:
-            out[c.table] = 0
-            continue
-        with conn.cursor() as q:
-            q.execute(f"select {', '.join(c.pk)} from {c.qualified}")
-            stored = {tuple(r) for r in q.fetchall()}
-        conn.commit()
-        names = c.source.names
-        rows = [TypedRow({k: rec.get(k) for k in names}, rec["_row_key"], None) for rec in tbl.to_pylist()]
-        rows = [r for r in rows if tuple(r.values.get(k) for k in c.pk) not in stored]
-        records = cur.within_retention(c, [dict(r.values) for r in cur.dedupe_latest(c, rows)], now)
-        records = cur.drop_watermarked(conn, c, records)
-        out[c.table] = cur.upsert(conn, c, records, f"seed-{now:%Y%m%dT%H%M%SZ}")["inserted"] if records else 0
-    return out

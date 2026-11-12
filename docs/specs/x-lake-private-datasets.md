@@ -1,9 +1,16 @@
-# X lakehouse: seven bot-only datasets, the private schema, small curated tables, drain_log, digest_log
+# X lakehouse: seven bot-only datasets (raw only), the private inbox, drain_log, digest_log
 
 Status: code and tests in this PR; **nothing applied or deployed**. The owner applies the migration
 and runs `railway up` (steps in §8). Source: Chief Data `schema_spec.md` (task m1110-src, §8 from
 task lakemodefix) and the `digest_log` proposal, prepared 2026-11-10 ICT. Plan context:
 `docs/plans/2026-11-05-x-lakehouse.md`.
+
+**Owner decision 2026-11-12: raw only.** Every dataset the bots send is stored as raw data in the
+lake (R2 `x-intel-lake`), one dataset each. This PR creates **no new Supabase table** for it: no
+curated table for the seven bot-only datasets and none for the section-8 datasets (trends, topic
+counts, account snapshots, Alpha Feed). Tables, marts or APIs over the raw data are built later by
+whoever needs them (backend or AI coding), reading raw. An earlier revision of this PR had those
+tables; they were removed before merge, so nothing has to be dropped anywhere.
 
 Nothing in this PR is real owner data: every fixture is synthetic
 (`infra/tests/fixtures/x_own_accounts_history_synthetic.csv`, rows built in
@@ -11,19 +18,23 @@ Nothing in this PR is real owner data: every fixture is synthetic
 
 ## 1. Datasets
 
-All seven have **no Sheet tab**: bots send them through `ingest()` only. The Sheet catch-up, the
-Sheet validation and the `X_LAKE_SOURCE=both` inbox-vs-Sheet compare skip them (no `missing_in_sheet`
-failure). `bot_sql.HEADERS` holds their column order (= the contract below).
+All seven have **no Sheet tab** and **no curated table**: bots send them through `ingest()` only, the
+cron drains them into raw Parquet. The Sheet catch-up, the Sheet validation and the
+`X_LAKE_SOURCE=both` inbox-vs-Sheet compare skip them (no `missing_in_sheet` failure); `validate`
+checks them in raw only. `bot_sql.HEADERS` holds their column order (= the contract below).
 
-| dataset | privacy | raw key (`_row_key`) | curated table and primary key | retention (curated) |
+| dataset | privacy | raw key (`_row_key`) | raw path | readers take |
 |---|---|---|---|---|
-| `x_own_account_daily` | private | `snapshot_date, handle` | `x_intel_private.x_own_account_daily` (`snapshot_date, handle`) | never |
-| `x_own_mentions` | private | `post_id, own_handle` | `x_intel_private.x_own_mentions` (`post_id, own_handle`) | 365 days on `collected_at` |
-| `x_bookmarks` | private | `post_id, folder_id, last_seen_at, removed_at` | `x_intel_private.x_bookmarks` (`post_id, folder_id`), newest `last_seen_at` wins | 180 days after `removed_at`; never while `removed_at` is null |
-| `x_home_timeline` | private | `post_id, collected_at` | `x_intel_private.x_home_timeline` (`post_id, collected_at`) | 30 days on `collected_at` |
-| `x_spaces` | public | `space_id, collected_at` | `x_intel.x_spaces` (`space_id, collected_at`) | 180 days on `collected_at` |
-| `x_communities` | public | `community_id, snapshot_date` | `x_intel.x_communities` (`community_id, snapshot_date`) | 365 days on `snapshot_date` (ICT date) |
-| `x_list_sources` | public | `list_id, verified_at` | `x_intel.x_list_sources` (`list_id`), newest `verified_at` wins | never |
+| `x_own_account_daily` | private | `snapshot_date, handle` | `private/raw/` | one row per key |
+| `x_own_mentions` | private | `post_id, own_handle` | `private/raw/` | one row per key |
+| `x_bookmarks` | private | `post_id, folder_id, last_seen_at, removed_at` | `private/raw/` | the newest `last_seen_at` / `removed_at` per `(post_id, folder_id)` |
+| `x_home_timeline` | private | `post_id, collected_at` | `private/raw/` | one row per key |
+| `x_spaces` | public | `space_id, collected_at` | `raw/` | one row per key |
+| `x_communities` | public | `community_id, snapshot_date` | `raw/` | one row per key |
+| `x_list_sources` | public | `list_id, verified_at` | `raw/` | the newest `verified_at` per `list_id` |
+
+The version columns sit in the raw key (`x_bookmarks`, `x_list_sources`), so a re-seen or removed
+bookmark and a new verification are new raw versions instead of a refused "changed values" row.
 
 Column order and kinds: `infra/scripts/x_lakehouse/schemas.py` (`X_OWN_ACCOUNT_DAILY` …
 `X_LIST_SOURCES`). Required at ingest: the key columns, plus `user_id` for `x_own_account_daily`;
@@ -46,26 +57,21 @@ Writer responsibilities (the lake stores what it is sent, it does not compute): 
 are stored with their flags; none of these datasets is served anywhere. No reply text is stored for
 `x_home_timeline` (there is no such column; `reply_text` is refused). Community posts are not a
 dataset: topic posts keep going to `x_feed`. `x_list_sources` has no writer until the owner approves
-X Lists; the table and allowlist are ready.
+X Lists; the allowlist is ready.
 
 Kinds: "numeric" in the spec is `float` (`double precision`) and "int" is `int` (`bigint`), the
 kinds this package already uses. **`x_list_sources` kinds are proposed** from the spec's one-line
 column list (no closer model in the repo): `list_id/name/owner_handle/mapped_qid/members_hash/status`
 text, `member_count/follower_count` bigint, `verified_at` timestamptz.
 
-Lineage: every curated table has `created_at`, `updated_at`, `_batch_id` like the existing ones,
-except `x_communities`, whose contract already has a `created_at` (the community's creation time);
-that table has `updated_at` and `_batch_id` only.
-
 ## 2. Private datasets: how they are kept apart
 
 | layer | public datasets | private datasets |
 |---|---|---|
 | bot door | `x_intel.ingest(dataset, rows, run_id)` | `x_intel_private.ingest(dataset, rows, run_id)` |
-| inbox | `x_intel.ingest_inbox` | `x_intel_private.ingest_inbox` (+ `ingest_seen`) |
-| curated | schema `x_intel` | schema `x_intel_private`, RLS enabled, no policy |
+| inbox | `x_intel.ingest_inbox` | `x_intel_private.ingest_inbox` (+ `ingest_seen`), RLS enabled, no policy |
 | raw (R2 `x-intel-lake`) | `<prefix>/raw/<dataset>/…`, `<prefix>/_manifests/…` | `<prefix>/private/raw/<dataset>/…`, `<prefix>/private/_manifests/…` |
-| Sheet | serve tabs as before | never: not in `SERVE_TABS`, `OPTIONAL_SERVE_TABS`, `sheet_summaries` (`DATA_TABS` / `FINDING_TABS`), no view |
+| Sheet | serve tabs as before | never: not in `SERVE_TABS`, `sheet_summaries` (`DATA_TABS` / `FINDING_TABS`), no view |
 
 Bot call (the SQL file `bot_sql.py` writes picks the right door by dataset name):
 
@@ -78,31 +84,27 @@ under `private/`, and checks every drained private row reached R2 (`private.land
 `raw/` or `_manifests/` (validate, DuckDB queries, the BI site) never sees private files.
 `serve_sheet.source_for()` refuses all seven new names before any query (`schemas.SERVE_DENY`).
 
-Grants (`private._grants`, re-applied on every inbox/both run): `REVOKE ALL` on the schema, its
-tables, sequences and functions from `PUBLIC`, `anon` and `authenticated`; `postgres` (the bots'
-connector role) gets `USAGE` on the schema and `EXECUTE` on `x_intel_private.ingest()` only — no
-`SELECT` on any private table. RLS is enabled on every private table (including `retention_watermark`) as an extra layer. The schema is
-owned by the lake role `x_lake`.
+Schema `x_intel_private` holds the two inbox tables and the door, nothing else. Grants
+(`private._grants`, re-applied on every inbox/both run): `REVOKE ALL` on the schema, its tables,
+sequences and functions from `PUBLIC`, `anon` and `authenticated`; `postgres` (the bots' connector
+role) gets `USAGE` on the schema and `EXECUTE` on `x_intel_private.ingest()` only — no `SELECT` on
+either inbox table. The schema is owned by the lake role `x_lake`. Drained inbox rows are deleted 3
+days after the drain (their payload hash stays in `ingest_seen`), so Postgres holds private rows for
+at most ~3 days; R2 holds them from then on.
 
-Logs: ingest/drain/retention log dataset names and counts only (`event=drain_private`,
-`event=prune_private`); `drain_log` holds counts only. Coercion errors of a masked column keep the
-masked text. Unknown columns of a private row are never kept in raw `_extra` (written as `[dropped]`).
+Logs: ingest/drain log dataset names and counts only (`event=drain_private`, `event=prune_private`);
+`drain_log` holds counts only. Coercion errors of a masked column keep the masked text. Unknown
+columns of a private row are never kept in raw `_extra` (written as `[dropped]`).
 
 ### Limits (read before claiming "other bots cannot read it")
 
 - **`postgres` usually bypasses RLS on Supabase.** The bots connect through the Supabase connector as
   `postgres`. This PR grants `postgres` no table privilege on `x_intel_private`, but if `postgres` is
   a member of `x_lake`, has `BYPASSRLS`, or is otherwise privileged in the project, schema + grants +
-  RLS do **not** hide the data from a bot that uses `postgres`. Until the follow-up below is done,
-  treat the private tables as hidden from the Sheet, the public inbox, the marts and the BI site, and
-  from `anon` / `authenticated` — **not** from every bot.
+  RLS do **not** hide the inbox rows (≤ 3 days) from a bot that uses `postgres`.
 - `serve_sheet`, the digest and the BI site connect with `X_LAKE_DB_URL` (role `x_lake`, the schema
   owner). Grants cannot keep the owner out, so for them the guard is code: deny lists and the tests
   P1–P3. `sheet_summaries` has no database access at all (it reads Sheet tabs).
-- Raw private Parquet is append-only like all raw data: the retention above deletes **curated** rows
-  only; `private/raw/x_home_timeline/` keeps old parts. If the owner wants raw to follow the 30 / 365 /
-  180-day rules, add an R2 lifecycle rule on those `private/raw/<dataset>/` prefixes (free; owner
-  decision, not done here).
 
 Owner follow-up (no new cost; after merge; do **not** put a password in Git or a PR): create a role
 for general bot SQL that has no privilege on `x_intel_private` and is not a member of `x_lake`, and
@@ -111,39 +113,35 @@ the job allowed to write private rows. Check with:
 
     select rolname, rolbypassrls, rolsuper from pg_roles where rolname in ('postgres', 'x_lake');
     select pg_has_role('postgres', 'x_lake', 'usage');
-    select has_table_privilege('postgres', 'x_intel_private.x_bookmarks', 'select');
+    select has_table_privilege('postgres', 'x_intel_private.ingest_inbox', 'select');
 
-## 3. Section 8: small curated tables after Phase 2
+### Retention of private raw: R2 lifecycle rules (follow-up after merge, not done here)
 
-After Phase 2 (2026-11-11 07:00 ICT) the Sheet X tabs stop growing. Raw keeps everything, but trends,
-topic counts, account snapshots and Alpha Feed had no Postgres table. They are low-volume (well under
-~100 rows/day each), so they now get one in `x_intel`:
+Raw Parquet is append-only and the cron never deletes it. Retention for the private datasets is an R2
+lifecycle rule on each prefix (free, set by the owner or by Claude with the owner's OK after merge):
 
-| table | primary key | indexes | retention |
-|---|---|---|---|
-| `x_intel.x_trends_th` | `snapshot_at, rank, trend_name` | `snapshot_date` | 90 days on `snapshot_at` |
-| `x_intel.x_trends_intl` | `snapshot_at, woeid, rank, trend_name` | `(snapshot_date, woeid)` | 90 days on `snapshot_at` |
-| `x_intel.x_topic_counts` | `snapshot_at, query_id` | `snapshot_date`; `spike` where `spike` | 90 days on `snapshot_at` |
-| `x_intel.x_account_snapshots` | `snapshot_at, list, handle` | `(handle, snapshot_at)` | 90 days on `snapshot_at` |
-| `x_intel.alpha_feed` | `pulled_at_ict, source, sub_source, url, title` | `time_bound_date`; `pulled_at_ict` | 90 days on `pulled_at_ict` |
+| prefix | rule |
+|---|---|
+| `<prefix>/private/raw/x_home_timeline/` | delete objects after 30 days |
+| `<prefix>/private/raw/x_own_mentions/` | delete objects after 365 days |
+| `<prefix>/private/raw/x_bookmarks/` | keep (no rule): the intended rule is "180 days after `removed_at`", which depends on row content; an object-age rule cannot express it. A reader or a later job applies it. |
+| `<prefix>/private/raw/x_own_account_daily/` | keep (never deleted) |
 
-Columns are the datasets' columns in `schemas.py` (same kinds) plus `created_at`, `updated_at`,
-`_batch_id`. They are **insert-only** (upsert-or-ignore: an existing key is never updated, first
-version wins exactly like raw, so a changed resend of a key drained before replay fingerprints existed
-cannot make Postgres disagree with raw). They are in `CURATED`, so `append_rows()` writes them like `x_analyses`, `ingest()`
-upserts them at once (it already accepted these names), and the Sheet catch-up (sheet/both mode)
-fills them from the Sheet history on its first run. Rows already past 90 days are not upserted, so a
-catch-up or a replay cannot bring back what the prune removed. `validate` does not expect them.
-In inbox/both mode each run also seeds them from raw (`pipeline.seed_from_raw`): raw rows still inside
-the 90 days whose key Postgres lacks are upserted. That covers history drained before the tables
-existed and any gap while `X_LAKE_SMALL_CURATED` was off; it is idempotent (0 rows once caught up) and
-reads at most 90 days of these five small raw datasets per run.
+The `_manifests` under `private/` are small and stay. Public `x_spaces` / `x_communities` /
+`x_list_sources` raw is kept like every other public raw dataset.
 
-`x_feed` (~1,500–2,000 rows/day) and `x_post_context` (~1,000 rows/day) stay **R2-only**: a curated
-copy would eat the Supabase free tier's 500 MB within months, and the post facts the bots need are
-already in `x_intel.x_signals`. No table or view materialises them.
+## 3. Section 8: dropped (owner 2026-11-12)
 
-**`x_intel.drain_log`**: one row per inbox/both run, written at the end of the run (also when
+The prompt's section 8 asked for small curated tables `x_trends_th`, `x_trends_intl`,
+`x_topic_counts`, `x_account_snapshots` and `alpha_feed` in `x_intel` after Phase 2 (2026-11-11
+07:00 ICT, when the Sheet X tabs stop growing), plus two optional serve tabs. The owner chose raw only:
+those five datasets stay in raw on R2 like `x_feed` and `x_post_context` (which were never curated:
+~1,000–2,000 rows/day would outgrow the Supabase free tier's 500 MB, and the post facts the bots need
+are in `x_intel.x_signals`). No table, view, serve tab or switch exists for them. The existing curated
+tables (`x_signals`, `claims`, `x_watchlist`, `x_query_plan`, `taxonomy_map`, `x_analyses`,
+`x_triage_audit`) and the marts the digest, the BI site and the intake API read are unchanged.
+
+**`x_intel.drain_log`** (kept): one row per inbox/both run, written at the end of the run (also when
 `missing_from_raw` is not zero): `batch_id, started_at, source, rows_by_dataset, raw_written, curated,
 coerce_errors, missing_from_raw, ok`. Values are dataset names and counts only; private datasets
 appear by name with counts. `ok` is the run's lake result (before the optional serve refresh).
@@ -152,15 +150,6 @@ appear by name with counts. `ok` is the run's lake result (before the optional s
 still works:
 
     select dataset, count(*) filter (where drained_at is null) pending, max(drained_at) from x_intel.ingest_inbox group by 1;
-
-**Optional serve tabs, OFF by default**: `Serve · Alpha Feed 7d` (from `x_intel.alpha_feed`,
-`pulled_at_ict` in the last 7 days) and `Serve · X Trends TH 3d` (from `x_intel.x_trends_th`,
-`snapshot_at` in the last 3 days). Only with `X_LAKE_SERVE_SMALL_TABS=on` **and**
-`X_LAKE_SERVE=execute`; serve_sheet then creates them as new tabs (header once) and rewrites rows 2+.
-No existing tab, header row, `AI Summaries*` or `Chief *` tab is touched. **They stay off in this PR.**
-
-Grants: `postgres` may `SELECT` the five tables and `drain_log` (like the read views); `anon` and
-`authenticated` get nothing on any `x_intel` curated table.
 
 ## 4. Section 9: `digest_log`
 
@@ -200,35 +189,23 @@ To read old sent rows the new way:
 - `ingest()` rejects a row with an unknown column as a whole (reported with the column names); other
   rows of the call are stored with all their columns. That is the existing rule, kept.
 - Raw keys of `x_bookmarks` (+ `last_seen_at`, `removed_at`) and `x_list_sources` (+ `verified_at`)
-  carry the version column, like `x_signals` / `claims`, so a re-seen or removed bookmark and a new
-  verification are new raw versions instead of a refused "changed values" row. The curated primary
-  keys are the spec's (`post_id, folder_id` / `list_id`), newest version wins. A bookmark version is
-  ranked by `(greatest(last_seen_at, removed_at), removed_at is not null)`, so a removal outranks a
-  late active row with the same or an earlier `last_seen_at`, and only a later re-bookmark undoes it.
-  `validate` judges retention on each key's newest version (a pruned bookmark's older active versions
-  in raw are not expected in Postgres; with `--since`, the scoped keys are judged on their whole raw
-  history, since a removal can sit in an older partition). Bookmark versions are never filtered by age before the upsert
-  (an expired removal still ends a stored active bookmark, and the prune then deletes it); when the
-  prune deletes a bookmark it records the key's last version in `x_intel_private.retention_watermark`
-  (key + version only, no content), so a late, older observation cannot bring it back.
-- Section 8 cites commit `774f038`; `main` is at `fb8767f` (x-insights BI site). Only `inbox.py` and
-  `scheduled.py` changed in between (the BI step), nothing in the drain/append path.
-- Retention runs inside the existing cron after an ok run (inbox/both: with the inbox prune; sheet mode:
-  after validation), never in a new cron, and never on raw files.
+  carry the version column (§1).
+- Curated tables, curated retention and the section-8 tables of the prompt are not built (raw only,
+  §3); retention of private raw is an R2 lifecycle rule (§2).
 
 ## 6. Configuration (names only; nothing set by this PR)
 
 Existing: `X_LAKE_DB_URL`, `X_LAKE_URI`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
 `X_LAKE_SOURCE` (unchanged by this work), `X_LAKE_SERVE`, `X_LAKE_DIGEST`, `TELEGRAM_NOTI_BOT_TOKEN`,
 `TELEGRAM_NOTI_CHAT_ID`, `AI_GATEWAY_TOKEN`.
-New switches (all optional; defaults shown): `X_LAKE_SERVE_SMALL_TABS=off`, `X_LAKE_NEW_DATASETS=on`,
-`X_LAKE_SMALL_CURATED=on`, `X_DIGEST_AUTH_ALERT=on`.
+New switches (optional; defaults shown): `X_LAKE_NEW_DATASETS=on`, `X_DIGEST_AUTH_ALERT=on`.
 
 ## 7. Tests
 
-`infra/tests/x_lakehouse/x_lakehouse_private_test.py` (P1–P9, I1–I4, I6–I7, R1–R5, S1–S6, S8, rollback
-switches, schema-missing path) and new D1–D5 tests in `x_lakehouse_digest_test.py`; I5 / S7 / D5 are
-the existing suites, unchanged and green. Local Postgres 17 + `file://` lake, as in CI.
+`infra/tests/x_lakehouse/x_lakehouse_private_test.py` (P1–P9, I1–I4, I6–I7, R5, S1–S6, S8, rollback
+switch, schema-missing path; S1/S3 assert that no curated table exists for the seven datasets or the
+five section-8 datasets) and new D1–D5 tests in `x_lakehouse_digest_test.py`; I5 / S7 / D5 are the
+existing suites, unchanged and green. Local Postgres 17 + `file://` lake, as in CI.
 
 ## 8. Owner steps (in order; none done by this PR)
 
@@ -249,17 +226,14 @@ the existing suites, unchanged and green. Local Postgres 17 + `file://` lake, as
    then `--execute` (via `x_intel_private.ingest()`; the cron writes R2). Dates missing from the file
    stay missing; `snapshot_at`, `listed`, `followers_delta`, `posts_24h`, `reposts_24h`, `mentions_24h`
    stay NULL.
-7. Optional, later: `X_LAKE_SERVE_SMALL_TABS=on` to create the two new serve tabs.
-8. Follow-up: the `postgres` role split in §2.
+7. Follow-up: the R2 lifecycle rules in §2 and the `postgres` role split in §2.
 
 ## 9. Rollback
 
 - Code: redeploy the previous image / commit (`railway up`); the owner does it.
 - Switches, no data deleted: `X_LAKE_NEW_DATASETS=off` (the seven datasets become unknown again:
   `ingest()` refuses them, the drain leaves their inbox rows untouched, `x_intel_private.ingest()`
-  refuses everything); `X_LAKE_SMALL_CURATED=off` (no more upserts into the five tables; raw is still
-  written); `X_LAKE_SERVE_SMALL_TABS=off` (stop writing the two tabs; tabs and rows stay);
-  `X_DIGEST_AUTH_ALERT=off`.
+  refuses everything); `X_DIGEST_AUTH_ALERT=off`.
 - Data: no `DROP TABLE`, `DROP SCHEMA`, `DROP COLUMN`, Parquet delete, tab delete or row delete in any
-  rollback path. `drain_log` and `digest_log` rows stay. Dropping `x_intel_private` or any table is a
-  separate, owner-approved task. `X_LAKE_SOURCE` is not touched.
+  rollback path. `drain_log` and `digest_log` rows stay. Dropping `x_intel_private` is a separate,
+  owner-approved task. `X_LAKE_SOURCE` is not touched.
