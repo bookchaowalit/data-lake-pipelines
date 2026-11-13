@@ -551,22 +551,30 @@ def _log_row(conn: Any, w: Window, status: str, owner: str, **kw: Any) -> None:
     conn.commit()
 
 
+AUTH_ALERT_LOCK = 0x786C61616C74  # "xlaalt": one provider_auth alert claim at a time
+
+
+def _streak(c: Any) -> tuple[int, bool]:
+    auth = f"position({digest_lit(AUTH_FAILURE)} in coalesce(fallback_reason, '')) > 0"
+    c.execute(f"with b as (select updated_at, digest_id from {S}.digest_log "
+              f"where ai_status in ('ok', 'fallback') and not ({auth}) "
+              f"order by updated_at desc, digest_id desc limit 1) "
+              f"select count(*), coalesce(bool_or(d.auth_alerted_at is not null), false) "
+              f"from {S}.digest_log d left join b on true where d.ai_status in ('ok', 'fallback') and {auth} "
+              f"and (b.updated_at is null or (d.updated_at, d.digest_id) > (b.updated_at, b.digest_id))")
+    n, alerted = c.fetchone()
+    return int(n), bool(alerted)
+
+
 def auth_failure_streak(conn: Any) -> tuple[int, bool]:
     """(digests in a row, newest first, gateway actually called, whose summary fell back on
     provider_auth; whether this streak was already alerted). The whole streak back to the newest
     gateway call that did not fail on provider_auth is counted, however long. Rows from before
     2026-11-10 (ai_status null) and digests that never called the gateway neither count nor reset."""
-    auth = f"position({digest_lit(AUTH_FAILURE)} in coalesce(fallback_reason, '')) > 0"
     with conn.cursor() as c:
-        c.execute(f"with b as (select updated_at, digest_id from {S}.digest_log "
-                  f"where ai_status in ('ok', 'fallback') and not ({auth}) "
-                  f"order by updated_at desc, digest_id desc limit 1) "
-                  f"select count(*), coalesce(bool_or(d.auth_alerted_at is not null), false) "
-                  f"from {S}.digest_log d left join b on true where d.ai_status in ('ok', 'fallback') and {auth} "
-                  f"and (b.updated_at is null or (d.updated_at, d.digest_id) > (b.updated_at, b.digest_id))")
-        n, alerted = c.fetchone()
+        out = _streak(c)
     conn.commit()
-    return int(n), bool(alerted)
+    return out
 
 
 def digest_lit(text: str) -> str:
@@ -575,26 +583,39 @@ def digest_lit(text: str) -> str:
 
 def _auth_alert(conn: Any, cfg: Config, client: httpx.Client, w: Window, ai: dict[str, Any]) -> dict[str, Any]:
     """One alert per provider_auth streak, sent by the digest that brings it to AUTH_ALERT_AFTER (or the
-    first one after, if that send failed) and recorded in digest_log.auth_alerted_at. Digests that did
-    not fail on provider_auth never alert, so skipped or retried digests cannot repeat it."""
-    streak, alerted = auth_failure_streak(conn)
-    out: dict[str, Any] = {"provider_auth_streak": streak}
+    first one after, if that send was surely rejected). Digests that did not fail on provider_auth never
+    alert, so skipped or retried digests cannot repeat it.
+
+    At most once: the streak is claimed first (digest_log.auth_alerted_at, under AUTH_ALERT_LOCK so two
+    digests cannot both claim it) and committed before Telegram is called. Only a definite rejection
+    (DigestError) gives the claim back; a crash or an unknown outcome keeps it, so no repeat."""
     failed_here = ai.get("ai_status") == "fallback" and AUTH_FAILURE in (ai.get("fallback_reason") or "")
-    if (not failed_here or streak < AUTH_ALERT_AFTER or alerted
-            or cfg.get("X_DIGEST_AUTH_ALERT", "on").lower() == "off"):
+    off = cfg.get("X_DIGEST_AUTH_ALERT", "on").lower() == "off"
+    with conn.cursor() as c:
+        if failed_here and not off:
+            c.execute("select pg_advisory_xact_lock(%s)", (AUTH_ALERT_LOCK,))
+        streak, alerted = _streak(c)
+        claim = failed_here and not off and streak >= AUTH_ALERT_AFTER and not alerted
+        if claim:
+            c.execute(f"update {S}.digest_log set auth_alerted_at = now() where digest_id = %s", (w.digest_id,))
+            claim = c.rowcount == 1
+    conn.commit()  # the claim is durable before anything leaves the host
+    out: dict[str, Any] = {"provider_auth_streak": streak}
+    if not claim:
         return out
     try:
         send_telegram(client, cfg.require("TELEGRAM_NOTI_BOT_TOKEN"), cfg.require("TELEGRAM_NOTI_CHAT_ID"),
                       AUTH_ALERT_TEXT)
     except DigestError as exc:
-        out["auth_alert"] = f"error: {exc}"  # status code only, never the token-bearing URL; retried next digest
+        with conn.cursor() as c:  # surely not delivered: give the claim back, the next digest retries
+            c.execute(f"update {S}.digest_log set auth_alerted_at = null where digest_id = %s", (w.digest_id,))
+        conn.commit()
+        out["auth_alert"] = f"error: {exc}"  # status code only, never the token-bearing URL
         return out
     except DeliveryUnknown as exc:
-        out["auth_alert"] = f"unknown: {exc}"  # may have arrived: recorded as sent, never repeated (at most once)
-    with conn.cursor() as c:
-        c.execute(f"update {S}.digest_log set auth_alerted_at = now() where digest_id = %s", (w.digest_id,))
-    conn.commit()
-    out.setdefault("auth_alert", "sent")
+        out["auth_alert"] = f"unknown: {exc}"  # may have arrived: the claim stays, never repeated
+        return out
+    out["auth_alert"] = "sent"
     return out
 
 

@@ -88,6 +88,9 @@ create index if not exists ingest_inbox_drained_at_idx on {P_INBOX} (drained_at)
     return "\n".join(out) + "\n"
 
 
+PRIVATE_PRUNE_LOCK = 0x786C616B7070  # "xlakpp": private ingest() (shared) vs prune() (exclusive)
+
+
 def _ingest_fn() -> str:
     meta = [f"    when {_lit(n)} then cols := {_arr(d.names)}; keys := {_arr(d.key)}; "
             f"req := {_arr(d.required_columns)}; mask := {_arr(d.mask_phone)};"
@@ -112,6 +115,9 @@ begin
     return jsonb_build_object('inserted', 0, 'skipped', 0, 'errors',
       jsonb_build_array(jsonb_build_object('row', null, 'error', 'rows must be a JSON array of objects')));
   end if;
+  -- Wait out a prune in progress: otherwise a row it is moving to ingest_seen is neither seen nor in
+  -- the inbox yet, and a changed value for that key would be accepted (see prune).
+  perform pg_advisory_xact_lock_shared({PRIVATE_PRUNE_LOCK});
   for r in select value from jsonb_array_elements(p_rows) loop
     i := i + 1;
     if jsonb_typeof(r) <> 'object' then
@@ -236,6 +242,7 @@ def prune(conn: Any, now: datetime | None = None) -> dict[str, int]:
     Idempotent; raw files are never deleted here (raw retention = R2 lifecycle rules, see the spec)."""
     now = now or datetime.now(timezone.utc)
     with conn.cursor() as c:
+        c.execute("select pg_advisory_xact_lock(%s)", (PRIVATE_PRUNE_LOCK,))  # no private ingest() mid-flight
         c.execute(f"insert into {P_SEEN} (dataset, row_key, payload_md5) "
                   f"select dataset, row_key, {S}.payload_md5(row) from {P_INBOX} "
                   "where drained_at < %s on conflict do nothing", (now - ib.KEEP_DRAINED,))

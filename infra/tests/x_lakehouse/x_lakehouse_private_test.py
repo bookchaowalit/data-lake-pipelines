@@ -276,6 +276,27 @@ class PrivatePostgresTests(unittest.TestCase):
         self.conn.close()
         self.tmp.cleanup()
 
+    def test_ingest_waits_out_a_private_prune(self):
+        # prune() holds the exclusive lock while it moves rows to ingest_seen; ingest() must wait for it,
+        # or a changed value for a key being pruned would be accepted (seen in neither table).
+        other = cur.connect(DB)
+        try:
+            with other.cursor() as c:
+                c.execute("select pg_advisory_xact_lock(%s)", (private.PRIVATE_PRUNE_LOCK,))
+            with self.conn.cursor() as c:
+                c.execute("set lock_timeout = '300ms'")
+                with self.assertRaises(Exception) as ctx:
+                    c.execute("select x_intel_private.ingest('x_bookmarks', '[]'::jsonb, 'r1')")
+            self.assertIn("lock", str(ctx.exception).lower())
+            self.conn.rollback()
+        finally:
+            other.rollback()
+            other.close()
+        with self.conn.cursor() as c:
+            c.execute("set lock_timeout = 0")
+        self.conn.commit()
+        self.assertEqual(self.ingest("x_bookmarks", [], fn="x_intel_private.ingest")["errors"], [])
+
     # helpers
     def ingest(self, dataset, rows, run_id="run1110t", fn=None):
         fn = fn or bot_sql.ingest_function(dataset)

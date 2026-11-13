@@ -644,6 +644,46 @@ class DigestPostgresTests(unittest.TestCase):
             self.assertEqual(c.fetchone()[0], 1)
         self.conn.commit()
 
+    def test_d4_alert_claim_is_committed_before_sending_and_only_a_rejection_gives_it_back(self):
+        from types import SimpleNamespace
+        from x_lakehouse.marts import ensure_marts
+        ensure_marts(self.conn)
+        with self.conn.cursor() as c:
+            for i in range(3):
+                c.execute("insert into x_intel.digest_log (digest_id, kind, window_start, window_end, status, "
+                          "ai_status, fallback_reason, updated_at) values (%s, 'midday', now(), now(), 'sent', "
+                          "'fallback', 'gateway http 502 provider_auth', now() - make_interval(mins => %s))",
+                          (f"c:{i}", 30 - i))
+        self.conn.commit()
+        w = SimpleNamespace(digest_id="c:2")
+        ai = {"ai_status": "fallback", "fallback_reason": "gateway http 502 provider_auth"}
+        seen = []
+
+        def claimed():
+            with self.conn.cursor() as c:
+                c.execute("select auth_alerted_at is not null from x_intel.digest_log where digest_id = 'c:2'")
+                v = c.fetchone()[0]
+            self.conn.commit()
+            return v
+
+        def rejected(*_a):
+            seen.append(claimed())  # the claim is already durable when Telegram is called
+            raise digest.DigestError("telegram http 403")
+
+        with patch.object(digest, "send_telegram", rejected):
+            out = digest._auth_alert(self.conn, self.cfg, None, w, ai)
+        self.assertEqual((seen, out["auth_alert"], claimed()), ([True], "error: telegram http 403", False))
+
+        def crash(*_a):
+            raise RuntimeError("worker killed mid-send")
+
+        with patch.object(digest, "send_telegram", crash), self.assertRaises(RuntimeError):
+            digest._auth_alert(self.conn, self.cfg, None, w, ai)
+        self.assertTrue(claimed())  # a crash keeps the claim: the next digest does not resend
+        with patch.object(digest, "send_telegram", rejected):
+            out = digest._auth_alert(self.conn, self.cfg, None, w, ai)
+        self.assertEqual((out.get("auth_alert"), len(seen)), (None, 1))
+
     def test_d4_a_long_streak_is_counted_whole_and_stays_alerted(self):
         from x_lakehouse.marts import ensure_marts
         ensure_marts(self.conn)
