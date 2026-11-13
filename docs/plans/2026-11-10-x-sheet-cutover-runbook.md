@@ -18,7 +18,10 @@ Every step below runs only on the owner's go; earliest day **2026-11-13** (Day 1
 
 ```bash
 cd <scratch dir linked to data-schedules/x-lakehouse>
-for id in $(railway deployment list --json | jq -r '.[].id'); do railway logs --deployment $id | grep 'event="done"'; done | sort -u
+# scheduled._log writes JSON lines ({"event": "done", "ok": true, ...}), not key=value text
+for id in $(railway deployment list --json | jq -r '.[].id'); do railway logs $id --json --lines 5000; done \
+  | jq -r 'select(.event == "done") | "\(.timestamp[0:16]) ok=\(.ok)"' | sort -u
+# expect one line per scheduled run (20 1,9,15 * * * UTC) and no ok=false; an empty list is a failed check
 ```
 
 **Watchlist row numbers** (the blocker in plan §12): `x_query_plan.watchlist_rows` holds 710 references to X
@@ -37,8 +40,13 @@ Read-only dry run 2026-11-10: tab rows 2–1,044 contiguous, 1,043 keys = curate
 2. **Ship the map:** merge `prep/sheet-cutover` to main locally, push, then `railway up` a `git archive` of main
    to `data-schedules/x-lakehouse` (as before). The next cron run creates the table, trigger and view; the trigger
    stays inert until step 3 (empty map).
-3. **Seed:** `python -m x_lakehouse.watchlist_rows --seed --execute` → `written 1043` (+ any entries added since).
+3. **Freeze watchlist edits, then seed.** Ask Chief Data to add no X Watchlist entries from now until step 4, and
+   wait for any bot run in progress to finish: two entries appended in one run reach `x_watchlist` in key order, so
+   the trigger (or the seed's catch-up insert) could number them differently from their tab rows. Then seed: `python -m x_lakehouse.watchlist_rows --seed --execute` → `written 1043` (+ any entries added since).
    Check: `select count(*), min(sheet_row), max(sheet_row) from x_intel.v_watchlist_sheet` = rows, 2, max+.
+   Re-run the dry run (`--seed`) right after the seed and again just before step 4: it must show `moved 0`,
+   `number_conflicts 0`, `to_insert 0`, `curated_unmapped_before 0`. Any `moved` row means a number differs from the
+   tab: stop and fix the map row by hand (the tab is the truth until step 4) before the bot switches.
 4. **Bot change:** the owner gives Chief Data the brief below. From its next run it writes nothing to the X tabs.
 5. **Verify one bot run later:** the cron `event="drain"` shows every dataset, `event="validate"` ok, no
    `config_coerce_errors`; the X tabs have no new rows after the switch time.

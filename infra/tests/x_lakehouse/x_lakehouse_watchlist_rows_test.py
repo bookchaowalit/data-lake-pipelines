@@ -95,6 +95,13 @@ class PlanTests(unittest.TestCase):
                 self.assertEqual(wr.main(["--seed"]), code)
             self.assertTrue(json.loads(out.getvalue()).get(field), out.getvalue())
 
+    def test_a_key_that_failed_to_type_blocks_the_seed(self):
+        from types import SimpleNamespace as NS
+
+        tab = [NS(sheet_row=2, errors={}), NS(sheet_row=3, errors={"value": {"raw": "9007199254740993", "reason": "x"}}),
+               NS(sheet_row=4, errors={"notes": {"raw": "", "reason": "x"}}), NS(sheet_row=None, errors={"type": {}})]
+        self.assertEqual(wr.key_coerce_rows(tab), [3])
+
     def test_duplicate_keys_in_the_tab_are_reported(self):
         self.assertEqual(wr.plan_seed([(2, A), (5, A)], {})["duplicate_keys_in_sheet"], [5])
 

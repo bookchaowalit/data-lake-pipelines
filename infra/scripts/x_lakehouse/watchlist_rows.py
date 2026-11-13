@@ -107,6 +107,13 @@ def header_problems(check: Any) -> dict[str, Any]:
     return out
 
 
+def key_coerce_rows(typed_rows: list[Any]) -> list[int]:
+    """Sheet rows whose key could not be typed (e.g. a number too large for a float). ``sheet_keys`` would skip
+    them, and a skipped number could later go to a new entry, so the seed must refuse them like a blank key."""
+    return sorted(int(r.sheet_row) for r in typed_rows
+                  if r.sheet_row is not None and any(c in (r.errors or {}) for c in KEY))
+
+
 def sheet_keys(typed_rows: list[Any]) -> list[tuple[int, tuple[str, str, str]]]:
     out = []
     for r in typed_rows:
@@ -194,6 +201,9 @@ def main(argv: list[str] | None = None) -> int:
     # load() only checks the header; the row checks (blank keys, duplicates) need validate_rows.
     validate_rows(DATASETS["x_watchlist"], typed["x_watchlist"], checks["x_watchlist"], sample=0)
     bad = header_problems(checks["x_watchlist"])
+    untyped = key_coerce_rows(typed["x_watchlist"])
+    if untyped:
+        bad["key_coerce_error_rows"] = untyped
     if bad:  # a renamed key column would drop rows and renumber their entries by key: refuse
         print(json.dumps({"status": "failed", "error": "X Watchlist header", **bad}))
         return 2
