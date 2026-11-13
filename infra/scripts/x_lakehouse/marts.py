@@ -1,7 +1,10 @@
 """Gold layer for the X digest: plain views over the curated tables (spec: docs/specs/x-digest.md).
 
 The curated tables are small, so views are enough (ADR-0013: one lake, no new engine). ``digest_log``
-records each digest by id (window, status, counts, tokens, cost), never message text.
+records each digest by id (window, status, counts, tokens, cost), never message text. Since 2026-11-10
+it also separates the AI summary from delivery: ``ai_status`` (ok / fallback / skipped),
+``fallback_reason`` (why the summary fell back to facts only) and ``telegram_message_ids`` (jsonb list of
+the delivered Telegram message ids); ``error`` is kept for delivery failures only.
 """
 
 from __future__ import annotations
@@ -77,6 +80,12 @@ create table if not exists {S}.digest_log (
     updated_at timestamptz not null default now()
 );
 alter table {S}.digest_log add column if not exists owner text;  -- the current sender's claim token
+-- 2026-11-10: nullable, so older code can still write rows (rollback keeps the columns).
+alter table {S}.digest_log add column if not exists ai_status text;
+alter table {S}.digest_log add column if not exists fallback_reason text;
+alter table {S}.digest_log add column if not exists telegram_message_ids jsonb;
+-- When the provider_auth alert went out for the streak ending at this digest (once per streak).
+alter table {S}.digest_log add column if not exists auth_alerted_at timestamptz;
 
 do $$ begin
   if exists (select 1 from pg_roles where rolname = 'anon') then

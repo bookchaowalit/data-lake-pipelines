@@ -7,6 +7,10 @@ read-only mirror of x_intel.x_query_plan once the plan is edited in Postgres). I
 once, then each refresh clears and rewrites rows 2+ only. It never touches an existing data tab,
 "AI Summaries", "AI Summaries Latest", any "Chief *" tab, or any header row after creation.
 
+Never served, whatever the configuration: the four private datasets (x_own_account_daily,
+x_own_mentions, x_bookmarks, x_home_timeline) and x_spaces / x_communities / x_list_sources
+(``schemas.SERVE_DENY``); :func:`source_for` refuses them before any query.
+
 DRY RUN BY DEFAULT: prints what it would write. ``--execute`` writes.
 """
 
@@ -27,7 +31,7 @@ import httpx  # noqa: E402
 from . import curated as cur  # noqa: E402
 from .coerce import TZ  # noqa: E402
 from .config import Config  # noqa: E402
-from .schemas import CURATED, PG_SCHEMA, SERVE_TABS  # noqa: E402
+from .schemas import CURATED, DATASETS, PG_SCHEMA, SERVE_DENY, SERVE_TABS  # noqa: E402
 from .sheet import SheetWriter, assert_writable  # noqa: E402
 
 DAYS = 7
@@ -38,6 +42,20 @@ SIGNAL_COLUMNS = ["post_id", "collected_at", "author_handle", "post_url", "poste
                   "suggested_action", "tags", "manip_flags", "likes", "views", "post_text"]
 CLAIM_COLUMNS = [c for c, _ in CURATED["claims"].data_columns]
 QUERY_PLAN_COLUMNS = [c for c, _ in CURATED["x_query_plan"].data_columns]
+
+
+class ServeError(RuntimeError):
+    pass
+
+
+def source_for(dataset: str) -> tuple[str, str]:
+    """(tab, table) a dataset may be served from. Refuses private and denied datasets before any read."""
+    ds = DATASETS.get(dataset)
+    if dataset in SERVE_DENY or (ds is not None and ds.private):
+        raise ServeError(f"refusing to serve {dataset!r}: never mirrored to the Sheet")
+    if dataset in SERVE_TABS:
+        return SERVE_TABS[dataset], f"{PG_SCHEMA}.{dataset}"
+    raise ServeError(f"refusing to serve {dataset!r}: no serving tab")
 
 
 def _cell(v: Any) -> Any:
@@ -53,6 +71,9 @@ def _cell(v: Any) -> Any:
 
 
 def fetch(conn: Any) -> dict[str, tuple[list[str], list[list[Any]]]]:
+    for name in ("x_signals", "claims", "x_query_plan"):
+        source_for(name)
+    out: dict[str, tuple[list[str], list[list[Any]]]] = {}
     with conn.cursor() as c:
         c.execute(f"select {', '.join(SIGNAL_COLUMNS)} from {PG_SCHEMA}.x_signals "
                   f"where collected_at >= now() - interval '{DAYS} days' order by collected_at desc, post_id")
@@ -63,8 +84,9 @@ def fetch(conn: Any) -> dict[str, tuple[list[str], list[list[Any]]]]:
         claims = [[_cell(v) for v in row] for row in c.fetchall()]
         c.execute(f"select {', '.join(QUERY_PLAN_COLUMNS)} from {PG_SCHEMA}.x_query_plan order by query_id")
         plan = [[_cell(v) for v in row] for row in c.fetchall()]
-    return {SERVE_TABS["x_signals"]: (SIGNAL_COLUMNS, signals), SERVE_TABS["claims"]: (CLAIM_COLUMNS, claims),
-            SERVE_TABS["x_query_plan"]: (QUERY_PLAN_COLUMNS, plan)}
+        out = {SERVE_TABS["x_signals"]: (SIGNAL_COLUMNS, signals), SERVE_TABS["claims"]: (CLAIM_COLUMNS, claims),
+               SERVE_TABS["x_query_plan"]: (QUERY_PLAN_COLUMNS, plan)}
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:

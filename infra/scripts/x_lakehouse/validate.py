@@ -36,7 +36,8 @@ from .schemas import CURATED, DATASETS, PG_SCHEMA, X_FEED  # noqa: E402
 def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str | None, *,
               sheet: bool = True, preloaded: tuple[Any, Any, list[str]] | None = None) -> dict[str, Any]:
     """``sheet=False``: raw vs Postgres only (after cutover the Sheet no longer grows).
-    ``preloaded``: the ``backfill.load`` result, to reuse one Sheet read."""
+    ``preloaded``: the ``backfill.load`` result, to reuse one Sheet read.
+    Datasets without a Sheet tab (the bot-only ones) are checked in raw only: they have no curated table."""
     if not sheet:
         typed, checks, missing_tabs = {}, {n: DatasetCheck(n, DATASETS[n].tab) for n in names}, []
     elif preloaded is not None:

@@ -67,7 +67,8 @@ def validate_rows(ds: Dataset, rows: list[TypedRow], chk: DatasetCheck, sample: 
     keys = Counter(r.row_key for r in rows)
     chk.duplicate_keys = sum(n - 1 for n in keys.values() if n > 1)
     # Context rows and the weekly analyses legitimately repeat a post_id; feed and signals must not.
-    if "post_id" in ds.kinds and ds.name not in (X_POST_CONTEXT.name, "x_analyses"):
+    # The bot-only datasets key a post with another column (handle, folder, collection time).
+    if "post_id" in ds.kinds and ds.sheet and ds.name not in (X_POST_CONTEXT.name, "x_analyses"):
         ids = Counter(r.values.get("post_id") for r in rows if r.values.get("post_id"))
         chk.duplicate_post_ids = sum(n - 1 for n in ids.values() if n > 1)
     if rows:

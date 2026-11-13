@@ -12,7 +12,7 @@ import os
 import sys
 import unittest
 from unittest.mock import patch
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -551,6 +551,130 @@ class DigestPostgresTests(unittest.TestCase):
         self.assertEqual((rep["status"], rep["signals"]), ("sent", 0))
         self.assertEqual(svc.prompts, [])
         self.assertIn("ยังไม่มีสัญญาณใหม่", svc.messages[0])
+
+    # -- section 9: AI outcome kept apart from delivery (D1-D5) ---------------------------------------
+    def log_row(self, digest_id):
+        with self.conn.cursor() as c:
+            c.execute("select status, error, ai_status, fallback_reason, telegram_message_ids, sent_messages "
+                      "from x_intel.digest_log where digest_id = %s", (digest_id,))
+            row = c.fetchone()
+        self.conn.commit()
+        return row
+
+    def auth_failure(self):
+        svc = FakeServices(gateway_status=502)
+        svc.error_body = b'{"code": "provider_auth", "detail": "upstream login failed"}'
+        return svc
+
+    def test_d1_ai_summary_sent(self):
+        svc = FakeServices({"headline_th": "h", "summary_th": ["a"]})
+        [rep] = self.run_digest(svc)
+        status, error, ai_status, reason, ids, sent = self.log_row(rep["digest_id"])
+        self.assertEqual((status, error, ai_status, reason), ("sent", None, "ok", None))
+        self.assertEqual((ids, sent), ([1], 1))
+        self.assertEqual((rep["ai_status"], rep["fallback_reason"]), ("ok", None))
+
+    def test_d2_provider_auth_fallback_is_sent_with_no_error(self):
+        svc = self.auth_failure()
+        [rep] = self.run_digest(svc)
+        status, error, ai_status, reason, ids, _ = self.log_row(rep["digest_id"])
+        self.assertEqual((status, error, ai_status), ("sent", None, "fallback"))
+        self.assertEqual(reason, "gateway http 502 provider_auth")
+        self.assertEqual(ids, [1])
+        self.assertIn("ข้อมูลดิบ", svc.messages[0])
+
+    def test_d3_delivery_failure_is_the_only_error(self):
+        from x_lakehouse.marts import ensure_marts
+        ensure_marts(self.conn)
+        for svc, ai in ((FakeServices({"headline_th": "h", "summary_th": ["a"]}, telegram_fail={1}), "ok"),
+                        (self.auth_failure(), "fallback")):
+            with self.conn.cursor() as c:
+                c.execute("delete from x_intel.digest_log")
+            self.conn.commit()
+            svc.telegram_fail = {1}
+            [rep] = self.run_digest(svc)
+            status, error, ai_status, _, ids, _ = self.log_row(rep["digest_id"])
+            self.assertEqual((status, error, ai_status, ids), ("error", "telegram http 429", ai, []))
+            self.assertNotEqual(status, "sent")
+
+    def test_d4_three_provider_auth_failures_in_a_row_alert_once_and_a_success_resets(self):
+        days = [at(f"2026-11-{d:02d} 16:20") for d in range(10, 17)]
+        outcomes = ["auth", "auth", "auth", "ok", "auth", "auth", "auth"]
+        alerts, streaks = [], []
+        for now, outcome in zip(days, outcomes):
+            with self.conn.cursor() as c:  # a fresh signal inside each day's window
+                c.execute("insert into x_intel.x_signals (post_id, collected_at, domain, alert_tier, post_url) "
+                          "values (%s, %s, 'D5 Technology', 'digest', %s)",
+                          (f"s{now:%d}", now - timedelta(hours=1), f"https://x.com/a/status/s{now:%d}"))
+            self.conn.commit()
+            svc = self.auth_failure() if outcome == "auth" else FakeServices({"headline_th": "h", "summary_th": ["a"]})
+            [rep] = self.run_digest(svc, now=now)
+            streaks.append(rep["provider_auth_streak"])
+            alerts.append(rep.get("auth_alert"))
+            if rep.get("auth_alert"):
+                self.assertIn("provider_auth", svc.messages[-1])
+        self.assertEqual(streaks, [1, 2, 3, 0, 1, 2, 3])
+        self.assertEqual(alerts, [None, None, "sent", None, None, None, "sent"])
+        self.cfg.env["X_DIGEST_AUTH_ALERT"] = "off"  # the switch stops the alert, the history stays
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.digest_log set ai_status = 'ok', fallback_reason = null "
+                      "where digest_id = 'midday:2026-11-16'")
+            for d in ("17", "18", "19"):
+                c.execute("insert into x_intel.x_signals (post_id, collected_at, alert_tier) values (%s, %s, 'digest')",
+                          (f"z{d}", at(f"2026-11-{d} 15:00")))
+        self.conn.commit()
+        for d in ("17", "18", "19"):
+            [rep] = self.run_digest(self.auth_failure(), now=at(f"2026-11-{d} 16:20"))
+        self.assertEqual((rep["provider_auth_streak"], rep.get("auth_alert")), (3, None))
+
+    def test_d4_skipped_digests_and_a_fourth_failure_do_not_repeat_the_alert(self):
+        alerts = []
+        for d in (10, 11, 12, 13, 14, 15):
+            now = at(f"2026-11-{d} 16:20")
+            if d not in (13, 15):  # 13 and 15 have no signals: the gateway is not called (skipped)
+                with self.conn.cursor() as c:
+                    c.execute("insert into x_intel.x_signals (post_id, collected_at, alert_tier) values (%s, %s, 'digest')",
+                              (f"q{d}", now - timedelta(hours=1)))
+                self.conn.commit()
+            [rep] = self.run_digest(self.auth_failure(), now=now)
+            alerts.append(rep.get("auth_alert"))
+        self.assertEqual(alerts, [None, None, "sent", None, None, None])
+        with self.conn.cursor() as c:
+            c.execute("select count(*) from x_intel.digest_log where auth_alerted_at is not null")
+            self.assertEqual(c.fetchone()[0], 1)
+        self.conn.commit()
+
+    def test_d4_a_long_streak_is_counted_whole_and_stays_alerted(self):
+        from x_lakehouse.marts import ensure_marts
+        ensure_marts(self.conn)
+        with self.conn.cursor() as c:
+            c.execute("insert into x_intel.digest_log (digest_id, kind, window_start, window_end, status, ai_status, "
+                      "fallback_reason, updated_at) values ('ok:0', 'midday', now(), now(), 'sent', 'ok', null, "
+                      "now() - interval '100 hours')")
+            for i in range(60):
+                c.execute("insert into x_intel.digest_log (digest_id, kind, window_start, window_end, status, ai_status, "
+                          "fallback_reason, auth_alerted_at, updated_at) values (%s, 'midday', now(), now(), 'sent', "
+                          "'fallback', 'gateway http 502 provider_auth', %s, now() - make_interval(hours => %s))",
+                          (f"a:{i:02d}", None if i != 57 else at("2026-11-01 08:00"), 60 - i))
+        self.conn.commit()
+        self.assertEqual(digest.auth_failure_streak(self.conn), (60, True))
+        with self.conn.cursor() as c:
+            c.execute("update x_intel.digest_log set auth_alerted_at = null")
+        self.conn.commit()
+        self.assertEqual(digest.auth_failure_streak(self.conn), (60, False))
+
+    def test_d5_no_token_or_message_text_in_the_log_or_reports(self):
+        self.cfg.env |= {"AI_GATEWAY_TOKEN": "GW-TOKEN-SYNTH", "TELEGRAM_NOTI_BOT_TOKEN": "TG-TOKEN-SYNTH"}
+        svc = self.auth_failure()
+        reports = self.run_digest(svc)
+        with self.conn.cursor() as c:
+            c.execute("select to_jsonb(d) from x_intel.digest_log d")
+            log = json.dumps([r[0] for r in c.fetchall()], ensure_ascii=False)
+        self.conn.commit()
+        blob = log + json.dumps(reports, ensure_ascii=False, default=str)
+        for needle in ("GW-TOKEN-SYNTH", "TG-TOKEN-SYNTH", "server outage", "grant open", "upstream login failed",
+                       "ข้อมูลดิบ"):
+            self.assertNotIn(needle, blob)
 
     def test_scheduled_run_logs_digest_and_never_fails_on_it(self):
         import io
