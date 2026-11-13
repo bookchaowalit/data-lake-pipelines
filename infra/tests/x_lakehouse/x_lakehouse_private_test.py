@@ -111,6 +111,17 @@ def row(ds: str, i: int = 0, **kw: object) -> dict[str, object]:
 
 
 class OfflineTests(unittest.TestCase):
+    def test_load_of_bot_only_datasets_never_touches_the_sheet(self):
+        # validate --datasets x_bookmarks --raw-only must work without a Google credential.
+        from x_lakehouse import backfill
+
+        def no_sheet(*_a, **_k):
+            raise AssertionError("SheetReader built for bot-only datasets")
+
+        with patch.object(backfill, "SheetReader", no_sheet):
+            typed, checks, missing = backfill.load(Config({}), ["x_bookmarks", "x_spaces"])
+        self.assertEqual((typed, missing, sorted(checks)), ({}, [], ["x_bookmarks", "x_spaces"]))
+
     # -- P1 / P2 / S6 -----------------------------------------------------------------------------
     def test_p1_private_names_are_in_no_serving_or_summary_config(self):
         from sync import sheet_summaries as ss  # infra/scripts/sync

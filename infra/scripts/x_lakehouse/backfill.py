@@ -42,14 +42,17 @@ from .sheet import SheetReader  # noqa: E402
 
 
 def load(cfg: Config, names: list[str]) -> tuple[dict[str, Any], dict[str, DatasetCheck], list[str]]:
-    with httpx.Client(timeout=120) as http:
-        reader = SheetReader(cfg, http)
-        titles = reader.titles()
-        tabs = [DATASETS[n].tab for n in names if DATASETS[n].sheet]  # bot-only datasets have no tab
-        for t in tabs:
-            assert not is_protected(t), t
-        missing_tabs = [t for t in tabs if t not in titles]
-        data = reader.read([t for t in tabs if t in titles])
+    tabs = [DATASETS[n].tab for n in names if DATASETS[n].sheet]  # bot-only datasets have no tab
+    for t in tabs:
+        assert not is_protected(t), t
+    missing_tabs: list[str] = []
+    data: dict[str, Any] = {}
+    if tabs:  # only bot-only datasets: no Sheet read, so no Google credential is needed
+        with httpx.Client(timeout=120) as http:
+            reader = SheetReader(cfg, http)
+            titles = reader.titles()
+            missing_tabs = [t for t in tabs if t not in titles]
+            data = reader.read([t for t in tabs if t in titles])
     typed: dict[str, Any] = {}
     checks: dict[str, DatasetCheck] = {}
     for n in names:
