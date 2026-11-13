@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render the Solo Empire system landscape as Markdown from the registries and metadata catalog.
 
-Same inputs and loader as registry_lake_export.py (solo-empire online-systems.yaml, data-sources.yaml,
+Same inputs and loader as registry_lake_export.py (bookchaowalit-empire online-systems.yaml, data-sources.yaml,
 business-capabilities.yaml; architecture-docs catalog.yaml and lineage.yaml), and the same rules as the dbt
 models meta_system_landscape and meta_capability_coverage, so the page and the lake agree. Output is
 deterministic (no timestamps): re-render and diff to see what changed. With --check the command exits 1 when
@@ -142,7 +142,7 @@ def render(landscape: dict[str, Any]) -> str:
         "",
         "# Solo Empire — Generated System Landscape",
         "",
-        "Sources: `bookchaowalit/solo-empire:repository-catalog/registries/` (online-systems.yaml, data-sources.yaml,",
+        "Sources: `bookchaowalit/bookchaowalit-empire:repository-catalog/registries/` (online-systems.yaml, data-sources.yaml,",
         "business-capabilities.yaml) and `bookchaowalit/architecture-docs:systems/ai-data/metadata-catalog/`",
         "(catalog.yaml, lineage.yaml). The same rows are in the lake as dbt models `meta_system_landscape`,",
         "`meta_capability_coverage` and `meta_value_stream_coverage`; the `registry-export` cron refreshes the lake",
@@ -226,7 +226,7 @@ def render(landscape: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--registries", type=Path, required=True,
-                        help="solo-empire repository-catalog/registries directory")
+                        help="bookchaowalit-empire repository-catalog/registries directory")
     parser.add_argument("--catalog", type=Path, required=True,
                         help="architecture-docs systems/ai-data/metadata-catalog directory")
     parser.add_argument("--output", type=Path, help="write here instead of stdout")
