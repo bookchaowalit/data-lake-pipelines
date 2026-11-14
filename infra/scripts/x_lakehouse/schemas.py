@@ -261,15 +261,16 @@ X_OWN_MENTIONS = Dataset(
 )
 # A bookmark is observed again on every pull: the raw key carries last_seen_at and removed_at, so each
 # new observation (seen again, or removed) is a new raw version; a reader takes the newest
-# last_seen_at per (post_id, folder_id).
+# last_seen_at per (post_id, own_handle, folder_id). own_handle: the owner pulls the bookmarks of three
+# accounts, and two of them may bookmark the same post.
 X_BOOKMARKS = Dataset(
     "x_bookmarks", "",
-    _cols("post_id:str folder_id:str folder_name:str first_seen_at:ts last_seen_at:ts removed_at:ts "
+    _cols("post_id:str own_handle:str folder_id:str folder_name:str first_seen_at:ts last_seen_at:ts removed_at:ts "
           "author_handle:str author_id:str posted_at:ts text:str lang:str domain:str topic:str tags:str "
           "time_bound_date:date calendar_candidate:bool likes:int reposts:int replies:int views:int url:str "
           "filter_flags:str"),
-    key=("post_id", "folder_id", "last_seen_at", "removed_at"),
-    required=("post_id", "last_seen_at"),
+    key=("post_id", "own_handle", "folder_id", "last_seen_at", "removed_at"),
+    required=("post_id", "own_handle", "last_seen_at"),
     ingest_ts="last_seen_at",
     privacy="private", sheet=False, mask_phone=("text",), empty_ok=("folder_id",),
     notes="folder_id is '' outside a folder (never NULL); removed_at stays null until the bookmark is gone",
