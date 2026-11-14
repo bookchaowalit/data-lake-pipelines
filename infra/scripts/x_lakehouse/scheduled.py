@@ -48,7 +48,7 @@ if __package__ in (None, ""):
 
 import httpx  # noqa: E402
 
-from . import backfill, digest, inbox, private, serve_sheet  # noqa: E402
+from . import backfill, digest, feed, inbox, private, serve_sheet  # noqa: E402
 from . import curated as cur  # noqa: E402
 from .lake import open_store  # noqa: E402
 from .coerce import TZ  # noqa: E402
@@ -141,7 +141,11 @@ def _backfill() -> tuple[int, dict[str, object]]:
 def _serve_counts(cfg: Config) -> dict[str, int]:
     conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
     try:
-        return {tab: len(rows) for tab, (_, rows) in serve_sheet.fetch(conn).items()}
+        try:
+            feed_win = serve_sheet.feed_window(cfg)
+        except Exception:  # noqa: BLE001 - counts only; the execute path reports a lake error itself
+            feed_win = None
+        return {tab: len(rows) for tab, (_, rows) in serve_sheet.fetch(conn, feed_win).items()}
     finally:
         conn.close()
 
@@ -150,7 +154,7 @@ def _serve_execute() -> int:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):  # serve_sheet prints tab names and row counts only
         code = serve_sheet.main(["--execute"])
-    _log(event="serve", exit_code=code, lines=buf.getvalue().splitlines()[-5:])
+    _log(event="serve", exit_code=code, lines=buf.getvalue().splitlines()[-8:])
     return code
 
 
@@ -163,7 +167,7 @@ def _digest(cfg: Config) -> None:
     try:
         conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
         try:
-            _log(event="digest", mode=mode, reports=digest.run(conn, cfg, mode=mode))
+            _log(event="digest", mode=mode, reports=digest.run(conn, cfg, mode=mode, feed_loader=feed.loader(cfg)))
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - reported, the lake run's result stands
@@ -189,6 +193,11 @@ def _meta(cfg: Config) -> None:
         _log(event="meta", mode=mode, status="error", error=type(exc).__name__)
 
 
+def _hour() -> datetime:
+    """The current hour: the site's feed window moves once an hour, so a rebuild within it is byte-stable."""
+    return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
 def _bi(cfg: Config) -> None:
     """X_LAKE_BI=build|deploy: the x-insights site. Like the digest, a failure is logged (exception type
     only) and never changes the lake run's result."""
@@ -206,7 +215,13 @@ def _bi(cfg: Config) -> None:
         conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
         try:
             ensure_marts(conn)  # the site reads the marts; do not rely on X_LAKE_DIGEST having created them
-            snap = bi_site.load_snapshot(conn, denylist)
+            try:
+                feed_win = serve_sheet.feed_window(cfg, _hour())
+            except Exception as exc:  # noqa: BLE001 - the site still builds from the marts
+                feed_win, feed_error = None, type(exc).__name__
+            else:
+                feed_error = None
+            snap = bi_site.load_snapshot(conn, denylist, feed_win)
         finally:
             conn.close()
         with tempfile.TemporaryDirectory(prefix="x-insights-") as tmp:
@@ -216,7 +231,7 @@ def _bi(cfg: Config) -> None:
                 result = pages_deploy.deploy(Path(tmp) / "site", account=cfg.require("CLOUDFLARE_ACCOUNT_ID"),
                                              project=cfg.get("X_LAKE_BI_PROJECT", "x-insights"),
                                              token=cfg.require("CLOUDFLARE_PAGES_TOKEN"), mark=str(built["mark"]))
-        _log(event="bi", mode=mode, **{**built, **result})  # both carry "mark"
+        _log(event="bi", mode=mode, **{**built, **result}, **({"feed_error": feed_error} if feed_error else {}))
     except Exception as exc:  # noqa: BLE001 - reported, the lake run's result stands
         # PagesError text is the API step, HTTP status and error codes only; other errors log their type.
         detail = str(exc)[:200] if type(exc).__name__ == "PagesError" else None

@@ -76,7 +76,7 @@ class RenderTests(unittest.TestCase):
     def test_b1_pages_and_kpis(self):
         tmp, out, info = build(snapshot())
         self.addCleanup(tmp.cleanup)
-        self.assertEqual(info["pages"], 4)
+        self.assertEqual(info["pages"], 5)  # + /feed/ (2026-11-14)
         for rel in ("index.html", "signals/index.html", "claims/index.html", "404.html", "_headers",
                     "assets/site.css"):
             self.assertTrue((out / rel).is_file(), rel)

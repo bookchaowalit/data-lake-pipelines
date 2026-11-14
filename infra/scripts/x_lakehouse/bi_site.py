@@ -35,12 +35,14 @@ from data_lake.jobs_bi_site import (  # noqa: E402
 )
 
 from .digest import any_term, contains_term  # noqa: E402
+from .coerce import TZ as TZ_ICT  # noqa: E402
 from .marts import CLAIM_FULL, SIGNAL_FULL  # noqa: E402
 from .schemas import PG_SCHEMA  # noqa: E402
 
 S = PG_SCHEMA
 SITE_NAME = "X insights"
-NAV = [("/", "Overview"), ("/signals/", "Top signals"), ("/claims/", "Claims")]
+NAV = [("/", "Overview"), ("/feed/", "Top posts"), ("/signals/", "Top signals"), ("/claims/", "Claims")]
+TOP_POSTS = 50
 KPI_DAYS = 7
 CHART_DAYS = 14
 TOP_SIGNALS = 50
@@ -67,13 +69,16 @@ class Snapshot:
     claims: list[dict[str, Any]]  # open queue, already screened
     digests: list[dict[str, Any]]
     withheld: dict[str, int] = field(default_factory=dict)
+    feed: list[dict[str, Any]] = field(default_factory=list)  # raw X Feed top posts (feed.py), screened
+    feed_watches: list[tuple[str, int]] = field(default_factory=list)
+    feed_window: tuple[datetime, datetime] | None = None
 
 
 def _rows(cur: Any, cols: Sequence[str]) -> list[dict[str, Any]]:
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def load_snapshot(conn: Any, denylist: Sequence[str]) -> Snapshot:
+def load_snapshot(conn: Any, denylist: Sequence[str], feed: Any = None) -> Snapshot:
     """Read the marts and screen them. ``denylist`` must be non-empty (digest.load_denylist fails closed)."""
     if not denylist:
         raise ValueError("client denylist is empty; the site is not built (fails closed)")
@@ -102,7 +107,24 @@ def load_snapshot(conn: Any, denylist: Sequence[str]) -> Snapshot:
                   f"from {S}.digest_log order by window_end desc, digest_id limit 10")
         digests = _rows(c, DIGEST_COLS)
     conn.commit()
-    return screen(Snapshot(as_of, newest, daily, ranked, claims, digests), denylist)
+    snap = screen(Snapshot(as_of, newest, daily, ranked, claims, digests), denylist)
+    if feed is not None:
+        add_feed(snap, feed, denylist)
+    return snap
+
+
+def add_feed(snap: Snapshot, feed: Any, denylist: Sequence[str]) -> None:
+    """Raw X Feed window (feed.FeedWindow): every field screened, watch labels naming a client dropped."""
+    posts, held = [], 0
+    for p in feed.posts:
+        if any_term(p, denylist):
+            held += 1
+        else:
+            posts.append(p)
+    snap.feed = posts[:TOP_POSTS]
+    snap.feed_watches = [(w, n) for w, n in feed.watches if not contains_term(w, denylist)][:15]
+    snap.feed_window = (feed.start, feed.end)
+    snap.withheld["posts"] = held
 
 
 def screen(snap: Snapshot, denylist: Sequence[str]) -> Snapshot:
@@ -336,6 +358,42 @@ def render_claims(snap: Snapshot) -> str:
     return _page("Claims", "/claims/", body, snap)
 
 
+def _ict(value: datetime | None) -> datetime | None:
+    return value.astimezone(TZ_ICT).replace(tzinfo=None) if value is not None else None
+
+
+def render_feed(snap: Snapshot) -> str:
+    items = []
+    for r in snap.feed:
+        text = _cut(r["text"])
+        href = _safe_href(r["post_url"])
+        label = escape(text) if text else "(no text)"
+        link = (f'<a href="{escape(href)}" rel="noopener noreferrer"{_lang(text)}>{label}</a>' if href
+                else f"<span{_lang(text)}>{label}</span>")
+        items.append(
+            f"<li><p>{link}</p><p class=\"muted\">@{_e(r['author_handle'])} · {_time(_ict(r['collected_at']))} · "
+            f"engagement {_fmt_int(r['engagement'])} · likes {_fmt_int(r['likes'] or 0)} · "
+            f"reposts {_fmt_int(r['reposts'] or 0)} · views {_fmt_int(r['views'] or 0)} · "
+            f"{_e(r['watch_type'])}:{_e(r['watch_value'])}</p></li>")
+    wrows = [f'<tr><th scope="row"{_lang(w)}>{escape(w)}</th><td class="num">{_fmt_int(n)}</td></tr>'
+             for w, n in snap.feed_watches]
+    watches = _table("watches", "Distinct posts per watch", [("Watch", False), ("Posts", True)], wrows,
+                     "Watches table")
+    held = snap.withheld.get("posts", 0)
+    span = (f"{_time(_ict(snap.feed_window[0]))} to {_time(_ict(snap.feed_window[1]))} Bangkok time"
+            if snap.feed_window else "")
+    body = (
+        "<h1>Top posts</h1>"
+        f'<p class="lede">The {TOP_POSTS} posts with the most engagement (likes + 2 × reposts + replies) the '
+        f"watches collected in the last 7 days ({span}), one entry per post, newest counts. Raw posts: no AI "
+        "triage since 13 November 2026. Links open the post on X.</p>"
+        + (f'<p class="muted">{held} post(s) naming a client are left out.</p>' if held else "")
+        + (f"<ol>{''.join(items)}</ol>" if items else "<p>No posts in this window.</p>")
+        + f"<h2>Watches</h2>{watches if wrows else '<p>No watches in this window.</p>'}"
+    )
+    return _page("Top posts", "/feed/", body, snap)
+
+
 def render_not_found(snap: Snapshot) -> str:
     body = '<h1>Page not found</h1><p>That page does not exist. <a href="/">Back to the overview</a>.</p>'
     return _page("Page not found", "", body, snap)
@@ -344,6 +402,7 @@ def render_not_found(snap: Snapshot) -> str:
 def build_site(snap: Snapshot, out_dir: Path) -> dict[str, Any]:
     pages = {
         "index.html": render_overview(snap),
+        "feed/index.html": render_feed(snap),
         "signals/index.html": render_signals(snap),
         "claims/index.html": render_claims(snap),
         "404.html": render_not_found(snap),
@@ -356,7 +415,7 @@ def build_site(snap: Snapshot, out_dir: Path) -> dict[str, Any]:
         target.write_text(html, encoding="utf-8")
     shutil.copytree(JOBS_ASSETS, out_dir / "assets", ignore=SKIP_ASSETS)
     (out_dir / "_headers").write_text(HEADERS.replace("script-src 'self'", "script-src 'none'"), encoding="utf-8")
-    return {"pages": len(pages), "signals": len(snap.signals), "claims": len(snap.claims),
+    return {"pages": len(pages), "signals": len(snap.signals), "claims": len(snap.claims), "posts": len(snap.feed),
             "withheld": snap.withheld, "mark": deploy_mark(out_dir)}
 
 

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Rebuild the small serving view in the Sheet from the curated Postgres tables.
 
-Writes ONLY three tabs it owns: "Serve · X Signals 7d" (X Signals collected in the last 7 days),
-"Serve · Open Claims" (claims whose queue_state is not closed) and "Serve · X Query Plan" (a
-read-only mirror of x_intel.x_query_plan once the plan is edited in Postgres). It creates a tab with its header
+Writes ONLY the tabs it owns: "Serve · X Signals 7d" (X Signals collected in the last 7 days),
+"Serve · Open Claims" (claims whose queue_state is not closed), "Serve · X Query Plan" (a
+read-only mirror of x_intel.x_query_plan once the plan is edited in Postgres) and, since 2026-11-14,
+"Serve · X Feed 7d" (the top posts of the last 7 days from raw x_feed, one row per post, by engagement;
+feed.py). The bots stopped sending x_signals and claims on 2026-11-13 (raw only), so the feed tab is
+the live one; the other two keep their last state. It creates a tab with its header
 once, then each refresh clears and rewrites rows 2+ only. It never touches an existing data tab,
 "AI Summaries", "AI Summaries Latest", any "Chief *" tab, or any header row after creation.
 
@@ -18,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +32,7 @@ if __package__ in (None, ""):
 import httpx  # noqa: E402
 
 from . import curated as cur  # noqa: E402
+from . import feed as feedlib  # noqa: E402
 from .coerce import TZ  # noqa: E402
 from .config import Config  # noqa: E402
 from .schemas import CURATED, DATASETS, PG_SCHEMA, SERVE_DENY, SERVE_TABS  # noqa: E402
@@ -42,6 +46,10 @@ SIGNAL_COLUMNS = ["post_id", "collected_at", "author_handle", "post_url", "poste
                   "suggested_action", "tags", "manip_flags", "likes", "views", "post_text"]
 CLAIM_COLUMNS = [c for c, _ in CURATED["claims"].data_columns]
 QUERY_PLAN_COLUMNS = [c for c, _ in CURATED["x_query_plan"].data_columns]
+FEED_COLUMNS = ["collected_at", "engagement", "likes", "reposts", "replies", "views", "watches", "author_handle",
+                "posted_at", "post_url", "requesting_chief", "watch_type", "watch_value", "tag", "query_id",
+                "post_id", "text"]
+FEED_ROWS = 2000  # the top of the window; the Sheet is a view, raw keeps everything
 
 
 class ServeError(RuntimeError):
@@ -70,7 +78,20 @@ def _cell(v: Any) -> Any:
     return v
 
 
-def fetch(conn: Any) -> dict[str, tuple[list[str], list[list[Any]]]]:
+def feed_rows(window: "feedlib.FeedWindow") -> list[list[Any]]:
+    source_for("x_feed")
+    return [[_cell(p.get(c)) for c in FEED_COLUMNS] for p in window.posts[:FEED_ROWS]]
+
+
+def feed_window(cfg: Config, now: datetime | None = None) -> "feedlib.FeedWindow":
+    from .lake import open_store
+
+    end = now or datetime.now(timezone.utc)
+    store, prefix = open_store(cfg)
+    return feedlib.load(store, prefix, end - timedelta(days=DAYS), end)
+
+
+def fetch(conn: Any, feed: "feedlib.FeedWindow | None" = None) -> dict[str, tuple[list[str], list[list[Any]]]]:
     for name in ("x_signals", "claims", "x_query_plan"):
         source_for(name)
     out: dict[str, tuple[list[str], list[list[Any]]]] = {}
@@ -86,6 +107,8 @@ def fetch(conn: Any) -> dict[str, tuple[list[str], list[list[Any]]]]:
         plan = [[_cell(v) for v in row] for row in c.fetchall()]
         out = {SERVE_TABS["x_signals"]: (SIGNAL_COLUMNS, signals), SERVE_TABS["claims"]: (CLAIM_COLUMNS, claims),
                SERVE_TABS["x_query_plan"]: (QUERY_PLAN_COLUMNS, plan)}
+    if feed is not None:
+        out[SERVE_TABS["x_feed"]] = (FEED_COLUMNS, feed_rows(feed))
     return out
 
 
@@ -96,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = Config()
     conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
     try:
-        views = fetch(conn)
+        views = fetch(conn, feed_window(cfg))
     finally:
         conn.close()
     for tab, (header, rows) in views.items():

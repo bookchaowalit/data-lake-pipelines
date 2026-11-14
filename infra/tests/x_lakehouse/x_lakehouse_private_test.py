@@ -187,7 +187,7 @@ class OfflineTests(unittest.TestCase):
         self.assertNotIn("x_intel_private", joined)
         for name in NEW_NAMES:
             self.assertNotIn(name, joined)
-        self.assertEqual(set(views), set(SERVE_TABS.values()))
+        self.assertEqual(set(views), set(SERVE_TABS.values()) - {SERVE_TABS["x_feed"]})  # feed: raw, not Postgres
 
     def test_s6_only_the_three_serve_tabs_are_writable(self):
         self.assertEqual(set(WRITABLE_TABS), set(SERVE_TABS.values()))

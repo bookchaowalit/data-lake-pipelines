@@ -391,7 +391,8 @@ PRIVATE_DATASETS = {n: d for n, d in DATASETS.items() if d.private}
 PROTECTED_TABS = frozenset({"AI Summaries", "AI Summaries Latest"})
 PROTECTED_PREFIX = "Chief "
 SERVE_TABS = {"x_signals": "Serve · X Signals 7d", "claims": "Serve · Open Claims",
-              "x_query_plan": "Serve · X Query Plan"}
+              "x_query_plan": "Serve · X Query Plan",
+              "x_feed": "Serve · X Feed 7d"}  # from raw x_feed (feed.py): no curated table behind it
 # Never served, whatever a tab list says: the four private datasets and the three new public ones.
 SERVE_DENY = frozenset(NEW_NAMES)
 
