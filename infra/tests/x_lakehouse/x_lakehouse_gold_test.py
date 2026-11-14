@@ -33,11 +33,11 @@ def build_lake(root: Path) -> None:
                      f" ('2', 'D2 Economy', 'none', 'T3', 'none', {ts})) t(post_id, domain, alert_tier, cred_tier,"
                      " route, collected_at)",
         # Post 1 seen by two watches (counts once, newest counts); post 3 by test_a too.
-        "x_feed": f"select * from (values ('1', 'test_a', 'keyword', 'ai', 3, 0, 100, {ts} - interval 1 hour),"
-                  f" ('1', 'test_a', 'account', 'test_a', 5, 1, 150, {ts}),"
-                  f" ('3', 'test_a', 'keyword', 'ai', 2, 0, 20, {ts}),"
-                  f" ('2', 'test_b', 'keyword', 'ai', 1, 0, 10, {ts}))"
-                  " t(post_id, author_handle, watch_type, watch_value, likes, reposts, views, collected_at)",
+        "x_feed": f"select * from (values ('1', 'test_a', 'keyword', 'ai', 3, 0, 0, 100, {ts} - interval 1 hour),"
+                  f" ('1', 'test_a', 'account', 'test_a', 5, 1, 0, 150, {ts}),"
+                  f" ('3', 'test_a', 'keyword', 'ai', 2, 0, 0, 20, {ts}),"
+                  f" ('2', 'test_b', 'keyword', 'ai', 1, 0, 0, 10, {ts}))"
+                  " t(post_id, author_handle, watch_type, watch_value, likes, reposts, replies, views, collected_at)",
         "x_topic_counts": f"select * from (values ('q1', 'ai', {ts}, 50, 9, 4.0, true, {ts}))"
                           " t(query_id, topic, snapshot_at, total_24h, max_hour_24h, ratio, spike, _ingested_at)",
         "x_account_snapshots": f"select * from (values ('test_a', 'u1', {ts} - interval 2 day, 100, 'ok'),"
@@ -102,6 +102,14 @@ class GoldTests(unittest.TestCase):
         early = gold.run(self.cfg, write=False, now=NOW - timedelta(hours=2, minutes=30))["queries"]
         self.assertEqual(early["02_top_accounts_by_posts"]["rows"], 1)  # only post 1's first observation
 
+    def test_daily_volume_counts_a_post_once_per_watch_and_day(self):
+        self.run_gold(write=True)
+        [part] = (self.root / "gold" / "01_daily_volume_per_watch").rglob("*.parquet")
+        rows = duckdb.connect().execute(f"select watch, posts, engagement from read_parquet('{part}') "
+                                        "order by watch").fetchall()
+        # keyword:ai saw posts 1, 2, 3 (post 1: likes 3); account:test_a saw post 1 (likes 5 + 2 x 1 repost).
+        self.assertEqual(rows, [("account:test_a", 1, 7), ("keyword:ai", 3, 6)])
+
     def test_no_query_reads_duckdb_now(self):
         for f in gold.QUERIES.glob("*.sql"):
             self.assertNotIn("now()", f.read_text().lower(), f.name)
@@ -120,7 +128,7 @@ class GoldTests(unittest.TestCase):
         self.assertFalse(keys[0] & keys[1])  # no manifest claims another run's part
         later = self.run_gold(write=True, now=NOW + timedelta(hours=8))
         self.assertTrue(later["ok"])
-        self.assertTrue((self.root / "gold" / "01_daily_volume_per_domain" / "as_of=2026-11-11").exists())
+        self.assertTrue((self.root / "gold" / "01_daily_volume_per_watch" / "as_of=2026-11-11").exists())
 
     def test_manifest_is_written_before_any_part(self):
         order = []
@@ -162,7 +170,7 @@ class GoldTests(unittest.TestCase):
         report = self.run_gold(write=True)
         self.assertFalse(report["ok"])
         self.assertEqual(report["queries"]["99_broken_test_only"]["status"], "error")
-        self.assertEqual(report["queries"]["01_daily_volume_per_domain"]["status"], "ok")
+        self.assertEqual(report["queries"]["01_daily_volume_per_watch"]["status"], "ok")
 
     def test_scheduled_hook_is_off_by_default_and_never_raises(self):
         buf = io.StringIO()

@@ -42,6 +42,9 @@ from .schemas import PG_SCHEMA  # noqa: E402
 S = PG_SCHEMA
 SITE_NAME = "X insights"
 NAV = [("/", "Overview"), ("/feed/", "Top posts"), ("/signals/", "Top signals"), ("/claims/", "Claims")]
+# With the raw feed (since 2026-11-14) the Signals page only points to Top posts: no Signals link.
+FEED_NAV = [("/", "Overview"), ("/feed/", "Top posts"), ("/claims/", "Claims")]
+RAW_ONLY_SINCE = "13 November 2026"
 TOP_POSTS = 50
 KPI_DAYS = 7
 CHART_DAYS = 14
@@ -72,13 +75,16 @@ class Snapshot:
     feed: list[dict[str, Any]] = field(default_factory=list)  # raw X Feed top posts (feed.py), screened
     feed_watches: list[tuple[str, int]] = field(default_factory=list)
     feed_window: tuple[datetime, datetime] | None = None
+    feed_daily: list[dict[str, Any]] = field(default_factory=list)  # day, watch, posts (feed.daily), screened
+    feed_totals: dict[str, int] = field(default_factory=dict)  # posts, authors, watches of the screened window
 
 
 def _rows(cur: Any, cols: Sequence[str]) -> list[dict[str, Any]]:
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def load_snapshot(conn: Any, denylist: Sequence[str], feed: Any = None) -> Snapshot:
+def load_snapshot(conn: Any, denylist: Sequence[str], feed: Any = None,
+                  feed_daily: Sequence[dict[str, Any]] | None = None) -> Snapshot:
     """Read the marts and screen them. ``denylist`` must be non-empty (digest.load_denylist fails closed)."""
     if not denylist:
         raise ValueError("client denylist is empty; the site is not built (fails closed)")
@@ -109,11 +115,12 @@ def load_snapshot(conn: Any, denylist: Sequence[str], feed: Any = None) -> Snaps
     conn.commit()
     snap = screen(Snapshot(as_of, newest, daily, ranked, claims, digests), denylist)
     if feed is not None:
-        add_feed(snap, feed, denylist)
+        add_feed(snap, feed, denylist, feed_daily)
     return snap
 
 
-def add_feed(snap: Snapshot, feed: Any, denylist: Sequence[str]) -> None:
+def add_feed(snap: Snapshot, feed: Any, denylist: Sequence[str],
+             daily: Sequence[dict[str, Any]] | None = None) -> None:
     """Raw X Feed window (feed.FeedWindow): every field screened, watch labels naming a client dropped."""
     posts, held = [], 0
     for p in feed.posts:
@@ -122,9 +129,19 @@ def add_feed(snap: Snapshot, feed: Any, denylist: Sequence[str]) -> None:
         else:
             posts.append({k: v for k, v in p.items() if k != "_screen"})
     snap.feed = posts[:TOP_POSTS]
+    snap.feed_totals = {"posts": len(posts), "watches": len(feed.watches),
+                        "authors": len({(p["author_handle"] or "").lower() for p in posts if p["author_handle"]})}
     snap.feed_watches = [(w, n) for w, n in feed.watches if not contains_term(w, denylist)][:15]
     snap.feed_window = (feed.start, feed.end)
     snap.withheld["posts"] = held
+    masked = set()
+    snap.feed_daily = []
+    for r in daily or []:
+        if contains_term(str(r["watch"]), denylist):
+            masked.add(r["watch"])
+            r = {**r, "watch": WITHHELD}
+        snap.feed_daily.append(r)
+    snap.withheld["watches"] = len(masked) + sum(1 for w, _ in feed.watches if contains_term(w, denylist))
 
 
 def screen(snap: Snapshot, denylist: Sequence[str]) -> Snapshot:
@@ -180,7 +197,7 @@ def _e(value: Any) -> str:
 def _page(title: str, path: str, body: str, snap: Snapshot) -> str:
     links = "".join(
         f'<li><a href="{href}"{" aria-current=\"page\"" if href == path else ""}>{escape(name)}</a></li>'
-        for href, name in NAV
+        for href, name in (FEED_NAV if snap.feed_window else NAV)
     )
     styles = "".join(f'<link rel="stylesheet" href="{href}">' for href in STYLESHEETS)
     return (
@@ -217,16 +234,26 @@ def _chart(snap: Snapshot) -> str:
     rows = _window(snap, CHART_DAYS)
     if not rows:
         return f"<p>No signals in the last {CHART_DAYS} days.</p>"
-    totals = _domain_totals(rows)
+    return _stacked(snap.as_of, [{"day": r["day"], "series": str(r["domain"]), "n": int(r["signals"] or 0)}
+                                 for r in rows], "Signals per day by domain", "signals", "domain")
+
+
+def _stacked(as_of: date, rows: list[dict[str, Any]], title: str, noun: str, series_noun: str) -> str:
+    """Stacked bars per day over CHART_DAYS ending on ``as_of``; rows: day, series, n."""
+    totals: dict[str, dict[str, int]] = {}
+    for r in rows:
+        totals.setdefault(r["series"], {"signals": 0})["signals"] += r["n"]
     order = sorted(totals, key=lambda d: (-totals[d]["signals"], d))
     named = order[:SERIES]
     series = {d: f"s{i}" for i, d in enumerate(named)}
     has_other = len(order) > SERIES
-    days = [snap.as_of - timedelta(days=o) for o in range(CHART_DAYS - 1, -1, -1)]  # type: ignore[operator]
+    days = [as_of - timedelta(days=o) for o in range(CHART_DAYS - 1, -1, -1)]
     stacks: dict[date, dict[str, int]] = {d: {} for d in days}
     for r in rows:
-        css = series.get(str(r["domain"]), "s6")
-        stacks[r["day"]][css] = stacks[r["day"]].get(css, 0) + int(r["signals"] or 0)
+        if r["day"] not in stacks:
+            continue
+        css = series.get(r["series"], "s6")
+        stacks[r["day"]][css] = stacks[r["day"]].get(css, 0) + r["n"]
     highest = max(sum(s.values()) for s in stacks.values()) or 1
     step_v = _nice_step(highest / 5)
     ticks = max(1, -(-highest // step_v))
@@ -259,15 +286,60 @@ def _chart(snap: Snapshot) -> str:
     total = sum(t["signals"] for t in totals.values())
     return (
         f'<ul class="legend">{legend}</ul>'
-        '<div class="chart-wrap" tabindex="0" role="region" aria-label="Signals per day chart, scrolls sideways">'
+        f'<div class="chart-wrap" tabindex="0" role="region" aria-label="{escape(noun.capitalize())} per day chart, '
+        'scrolls sideways">'
         f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-labelledby="daily-title daily-desc">'
-        f'<title id="daily-title">Signals per day by domain, {_fmt_date(days[0])} to {_fmt_date(snap.as_of)}</title>'
-        f'<desc id="daily-desc">{total} signals over {CHART_DAYS} days; the domain table lists each domain.</desc>'
+        f'<title id="daily-title">{escape(title)}, {_fmt_date(days[0])} to {_fmt_date(as_of)}</title>'
+        f'<desc id="daily-desc">{total} {noun} over {CHART_DAYS} days; the {series_noun} table lists each '
+        f'{series_noun}.</desc>'
         f"{''.join(parts)}</svg></div>"
     )
 
 
+def render_feed_overview(snap: Snapshot) -> str:
+    """Overview from the raw X Feed (bots send raw data only since RAW_ONLY_SINCE)."""
+    assert snap.feed_window is not None
+    start, end = snap.feed_window
+    as_of = _ict(end).date()  # type: ignore[union-attr]
+    t = snap.feed_totals
+    tiles_data = [("posts", "Posts, 7 days", t.get("posts", 0)), ("authors", "Accounts", t.get("authors", 0)),
+                  ("watches", "Active watches", t.get("watches", 0)),
+                  ("claims", "Open claims (frozen)", len(snap.claims))]
+    tiles = "".join(f'<div class="kpi"><dt>{escape(label)}</dt><dd data-kpi="{key}">{_fmt_int(v)}</dd></div>'
+                    for key, label, v in tiles_data)
+    wrows = [f'<tr><th scope="row"{_lang(w)}>{escape(w)}</th><td class="num">{_fmt_int(n)}</td></tr>'
+             for w, n in snap.feed_watches]
+    watches = _table("watches", "Distinct posts per watch, last 7 days", [("Watch", False), ("Posts", True)],
+                     wrows, "Watches table")
+    chart_rows = [{"day": r["day"], "series": str(r["watch"]), "n": int(r["posts"])} for r in snap.feed_daily]
+    chart = (_stacked(as_of, chart_rows, "Posts per day by watch", "posts", "watch") if chart_rows
+             else f"<p>No posts in the last {CHART_DAYS} days.</p>")
+    drows = [f"<tr><th scope=\"row\">{_e(r['digest_id'])}</th><td>{_e(r['status'])}</td>"
+             f"<td>{'AI summary' if r['ai'] else 'Facts only'}</td><td class=\"num\">{_fmt_int(r['signals'] or 0)}</td>"
+             f"<td class=\"num\">{float(r['cost_usd'] or 0):.4f}</td><td>{_time(r['updated_at'])}</td></tr>"
+             for r in snap.digests]
+    digests = _table("digests", "Telegram digests, newest first",
+                     [("Digest", False), ("Status", False), ("Kind", False), ("Signals", True), ("Cost (USD)", True),
+                      ("Sent (UTC)", False)], drows, "Digests table")
+    held = sum(snap.withheld.values())
+    note = (f'<p class="muted">{held} row(s) or label(s) naming a client are left out of this site.</p>'
+            if held else "")
+    body = (
+        "<h1>X overview</h1>"
+        f'<p class="lede">Raw posts the watches collected, {_time(_ict(start))} to {_time(_ict(end))} Bangkok '
+        f"time. Since {RAW_ONLY_SINCE} the bots send raw posts only (no AI signals or claims), so this page "
+        'counts posts and engagement. <a href="/feed/">Top posts</a> lists them.</p>'
+        f'<dl class="kpis">{tiles}</dl>{note}'
+        f"<h2>Watches, last 7 days</h2>{watches if wrows else '<p>No posts in this window.</p>'}"
+        f"<h2>Posts per day, last {CHART_DAYS} days</h2>{chart}"
+        f"<h2>Digests</h2>{digests if drows else '<p>No digests sent yet.</p>'}"
+    )
+    return _page("Overview", "/", body, snap)
+
+
 def render_overview(snap: Snapshot) -> str:
+    if snap.feed_window is not None:
+        return render_feed_overview(snap)
     if snap.as_of is None:
         body = "<h1>X overview</h1><p>No signals yet.</p>"
         return _page("Overview", "/", body, snap)
@@ -307,7 +379,16 @@ def render_overview(snap: Snapshot) -> str:
     return _page("Overview", "/", body, snap)
 
 
+def render_signals_moved(snap: Snapshot) -> str:
+    body = ("<h1>Top signals</h1>"
+            f'<p class="lede">Since {RAW_ONLY_SINCE} the bots send raw posts only, so there are no new AI signals. '
+            'The posts with the most engagement are on <a href="/feed/">Top posts</a>.</p>')
+    return _page("Top signals", "/signals/", body, snap)
+
+
 def render_signals(snap: Snapshot) -> str:
+    if snap.feed_window is not None:
+        return render_signals_moved(snap)
     items = []
     for r in snap.signals:
         text = _cut(r["post_text"])
@@ -351,8 +432,11 @@ def render_claims(snap: Snapshot) -> str:
                    [("Claim", False), ("Verification", False), ("Queue", False), ("Priority", True),
                     ("Next check", False), ("Checked by", False)], rows, "Claims table")
     held = snap.withheld.get("claims", 0)
+    frozen = (f'<p class="muted">No new claims since {RAW_ONLY_SINCE}: the bots send raw posts only. This is the '
+              "open queue as it stood then.</p>" if snap.feed_window is not None else "")
     body = ("<h1>Claims queue</h1>"
             '<p class="lede">Claims still open for verification. Links open where the claim was first seen.</p>'
+            + frozen
             + (f'<p class="muted">{held} claim(s) naming a client are left out.</p>' if held else "")
             + (table if rows else "<p>No open claims.</p>"))
     return _page("Claims", "/claims/", body, snap)

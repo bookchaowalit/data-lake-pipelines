@@ -215,13 +215,18 @@ def _bi(cfg: Config) -> None:
         conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
         try:
             ensure_marts(conn)  # the site reads the marts; do not rely on X_LAKE_DIGEST having created them
+            feed_win, feed_days, feed_error = None, None, None
             try:
-                feed_win = serve_sheet.feed_window(cfg, _hour())
+                from .lake import open_store
+
+                end = _hour()
+                store, prefix = open_store(cfg)
+                rows = feed.load_rows(store, prefix, end - timedelta(days=bi_site.CHART_DAYS))
+                feed_win = feed.summarise(rows, end - timedelta(days=serve_sheet.DAYS), end)
+                feed_days = feed.daily(rows, end - timedelta(days=bi_site.CHART_DAYS), end)
             except Exception as exc:  # noqa: BLE001 - the site still builds from the marts
-                feed_win, feed_error = None, type(exc).__name__
-            else:
-                feed_error = None
-            snap = bi_site.load_snapshot(conn, denylist, feed_win)
+                feed_win, feed_days, feed_error = None, None, type(exc).__name__
+            snap = bi_site.load_snapshot(conn, denylist, feed_win, feed_days)
         finally:
             conn.close()
         with tempfile.TemporaryDirectory(prefix="x-insights-") as tmp:

@@ -36,7 +36,13 @@ would run dry within a week. `x_feed` still arrives on every run.
 | `weekly.py` | adds the raw twins `watch_sustained` (top 10 watches by distinct posts this week, the last 6 weeks, weeks in a row at 20+), `feed_local_discovery` (Thai posts), `feed_community_knowledge` (likes ≥ 20, by reposts/like) and `feed_price_reported` (price-like text), each by engagement. The signal analyses stay and run dry; `life_path`, `debate` and the triage audit need AI labels and have no raw twin (with no signals the audit finds no posts and never calls the gateway). |
 | Gold | `02_top_accounts_by_signals` is replaced by `02_top_accounts_by_posts`: authors by distinct posts in 30 days (newest counts per post), likes, reposts, views, watches, main watch. |
 
-## Not changed
+## Gold 01 and the site pages (2026-11-14, third step)
 
-Gold `01_daily_volume_per_domain` (X Signals domains) and the site's Signals / Claims pages still read
-x_signals / claims and show the last data.
+| Reader | Change |
+|---|---|
+| Gold | `01_daily_volume_per_domain` is replaced by `01_daily_volume_per_watch`: distinct posts and engagement per ICT day and watch, 30 days, bounded by the run's `{now}`. |
+| Site overview | KPIs from the screened 7-day feed (posts, accounts, active watches, open claims marked frozen), posts per watch (7 days) and a stacked chart of posts per day by watch (14 days, `feed.daily`); watch labels naming a client are shown as "(withheld)". |
+| `/signals/` | a short page pointing to Top posts (no stale signal list); the nav drops "Top signals". |
+| `/claims/` | the open queue as it stood, with a note that no new claims arrive since 13 November 2026. Claims need AI extraction, so there is no raw twin. |
+
+Without a feed window (lake read failed) every page falls back to the signal version, as before.

@@ -128,6 +128,16 @@ def summarise(rows: list[dict[str, Any]], start: datetime, end: datetime) -> Fee
 FEED_SOURCE_NOTE = "raw X Feed by engagement (no AI labels)"
 
 
+def daily(rows: list[dict[str, Any]], start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """Distinct posts per (ICT day, watch) collected in [start, end): the site's chart (Gold 01's twin)."""
+    seen: dict[tuple[Any, str], set[str]] = defaultdict(set)
+    for r in rows:
+        pid, at = r.get("post_id"), r.get("collected_at")
+        if pid and isinstance(at, datetime) and start <= at < end:
+            seen[(at.astimezone(TZ).date(), watch_label(r))].add(pid)
+    return [{"day": d, "watch": w, "posts": len(p)} for (d, w), p in sorted(seen.items())]
+
+
 def load_rows(store: Any, prefix: str, start: datetime) -> list[dict[str, Any]]:
     """Every raw x_feed row stored from the day before ``start`` (ICT) on, all columns."""
     since = (start.astimezone(TZ) - timedelta(days=1)).date()

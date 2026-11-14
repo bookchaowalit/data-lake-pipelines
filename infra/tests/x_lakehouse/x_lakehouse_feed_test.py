@@ -300,5 +300,47 @@ class SiteTests(unittest.TestCase):
         self.assertEqual(info["posts"], 1)
 
 
+class SiteFeedPagesTests(unittest.TestCase):
+    """2026-11-14 step 3: the overview, Signals and Claims pages on the raw feed."""
+
+    def snap(self):
+        from x_lakehouse_bi_test import snapshot
+
+        t = START + timedelta(hours=1)
+        rows = [row("1", t, likes=9), row("1", t + timedelta(hours=2), watch=("account", "AcmeCorp")),
+                row("2", t, likes=3, author="b"), row("3", t - timedelta(days=3), likes=1, author="c")]
+        snap = snapshot()
+        bi_site.add_feed(snap, feed.summarise(rows, START, END), ("acme corp",),
+                         feed.daily(rows, START - timedelta(days=13), END))
+        return snap
+
+    def test_daily_counts_distinct_posts_per_watch_and_ict_day(self):
+        t = START + timedelta(hours=1)  # 08:00 ICT on 13 Nov
+        out = feed.daily([row("1", t), row("1", t + timedelta(hours=1)), row("2", t),
+                          row("3", START - timedelta(hours=8))], START - timedelta(days=1), END)  # 12 Nov 23:00 ICT
+        self.assertEqual([(str(r["day"]), r["watch"], r["posts"]) for r in out],
+                         [("2026-11-12", "keyword:duckdb", 1), ("2026-11-13", "keyword:duckdb", 2)])
+
+    def test_overview_counts_posts_and_masks_client_watches(self):
+        snap = self.snap()
+        html = bi_site.render_overview(snap)
+        self.assertIn('data-kpi="posts">1<', html)  # post 1 is withheld (a client watch saw it)
+        self.assertIn('data-kpi="authors">1<', html)
+        self.assertIn("Posts per day by watch", html)
+        self.assertNotIn("Acme", html)
+        self.assertIn('href="/feed/"', html)
+        self.assertNotIn('href="/signals/"', html)  # the nav drops Top signals
+
+    def test_signals_page_points_to_top_posts_and_claims_are_marked_frozen(self):
+        snap = self.snap()
+        sig = bi_site.render_signals(snap)
+        self.assertIn('<a href="/feed/">Top posts</a>', sig)
+        self.assertNotIn("grant open", sig)  # no stale signal rows
+        self.assertIn("No new claims since 13 November 2026", bi_site.render_claims(snap))
+        with tempfile.TemporaryDirectory() as tmp:
+            info = bi_site.build_site(snap, Path(tmp) / "site")
+        self.assertEqual(info["pages"], 5)
+
+
 if __name__ == "__main__":
     unittest.main()
