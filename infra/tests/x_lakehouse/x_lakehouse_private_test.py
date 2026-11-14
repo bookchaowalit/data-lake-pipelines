@@ -73,7 +73,7 @@ def row(ds: str, i: int = 0, **kw: object) -> dict[str, object]:
                            "collected_at": ago(hours=1), "posted_at": ago(hours=2), "author_handle": "synthetic_a",
                            "author_id": "42", "text": f"synthetic mention {i}", "likes": 1, "views": 9, "url":
                            f"https://x.com/synthetic_a/status/{1_900_000_000_000_000_000 + i}", "filter_flags": ""},
-        "x_bookmarks": {"post_id": str(1_800_000_000_000_000_000 + i), "folder_id": "", "folder_name": "",
+        "x_bookmarks": {"post_id": str(1_800_000_000_000_000_000 + i), "own_handle": "bookchaowalit", "folder_id": "", "folder_name": "",
                         "first_seen_at": ago(days=2), "last_seen_at": ago(hours=1), "author_handle": "synthetic_b",
                         "text": f"synthetic bookmark {i}", "lang": "th", "domain": "D5 Technology", "topic": "AI",
                         "tags": "synthetic", "calendar_candidate": False, "likes": 3, "url": "https://x.com/s/1"},
@@ -387,7 +387,8 @@ class PrivatePostgresTests(unittest.TestCase):
         self.assertEqual({n: len(self.raw(n)) for n in names}, counts)
 
     def test_i2_composite_keys(self):
-        self.ingest("x_bookmarks", [row("x_bookmarks", 1), row("x_bookmarks", 1, folder_id="f1", folder_name="F")])
+        self.ingest("x_bookmarks", [row("x_bookmarks", 1), row("x_bookmarks", 1, folder_id="f1", folder_name="F"),
+                                    row("x_bookmarks", 1, own_handle="ghp273")])  # 2nd account, same post
         t0 = datetime.now(timezone.utc)
         self.ingest("x_home_timeline", [row("x_home_timeline", 1, collected_at=ict(t0 - timedelta(minutes=m)))
                                         for m in (10, 40)])
@@ -396,8 +397,8 @@ class PrivatePostgresTests(unittest.TestCase):
         self.ingest("x_own_account_daily", [row("x_own_account_daily", 0, handle=h) for h in ("ghp273", "eatbeforeboard")])
         self.ingest("x_own_mentions", [row("x_own_mentions", 1, own_handle=h) for h in ("ghp273", "bookchaowalit")])
         self.assertEqual(self.run_scheduled()[0], 0)
-        folders = sorted(r["folder_id"] for r in self.raw("x_bookmarks"))
-        self.assertEqual(folders, ["", "f1"])  # '' is a value, never NULL
+        folders = sorted((r["own_handle"], r["folder_id"]) for r in self.raw("x_bookmarks"))
+        self.assertEqual(folders, [("bookchaowalit", ""), ("bookchaowalit", "f1"), ("ghp273", "")])  # '' is a value
         for name in ("x_home_timeline", "x_spaces", "x_communities", "x_own_account_daily", "x_own_mentions"):
             self.assertEqual(len(self.raw(name)), 2, name)
 

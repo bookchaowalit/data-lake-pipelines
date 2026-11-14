@@ -27,7 +27,7 @@ checks them in raw only. `bot_sql.HEADERS` holds their column order (= the contr
 |---|---|---|---|---|
 | `x_own_account_daily` | private | `snapshot_date, handle` | `private/raw/` | one row per key |
 | `x_own_mentions` | private | `post_id, own_handle` | `private/raw/` | one row per key |
-| `x_bookmarks` | private | `post_id, folder_id, last_seen_at, removed_at` | `private/raw/` | the newest `last_seen_at` / `removed_at` per `(post_id, folder_id)` |
+| `x_bookmarks` | private | `post_id, own_handle, folder_id, last_seen_at, removed_at` | `private/raw/` | the newest `last_seen_at` / `removed_at` per `(post_id, own_handle, folder_id)` |
 | `x_home_timeline` | private | `post_id, collected_at` | `private/raw/` | one row per key |
 | `x_spaces` | public | `space_id, collected_at` | `raw/` | one row per key |
 | `x_communities` | public | `community_id, snapshot_date` | `raw/` | one row per key |
@@ -54,8 +54,9 @@ bookmark and a new verification are new raw versions instead of a refused "chang
 
 Column order and kinds: `infra/scripts/x_lakehouse/schemas.py` (`X_OWN_ACCOUNT_DAILY` …
 `X_LIST_SOURCES`). Required at ingest: the key columns, plus `user_id` for `x_own_account_daily`;
-for `x_bookmarks` only `post_id` and `last_seen_at` (a bookmark outside a folder has `folder_id = ''`,
-stored as `''`, never NULL); for `x_list_sources` only `list_id`.
+for `x_bookmarks` only `post_id`, `own_handle` and `last_seen_at` (a bookmark outside a folder has
+`folder_id = ''`, stored as `''`, never NULL; `own_handle` added 2026-11-14 before any row landed, since
+the bookmarks of three accounts are pulled); for `x_list_sources` only `list_id`.
 
 Rules shared with the other datasets: `run_id` as today; timestamps ISO-8601 with `+07:00` (or the
 Sheet's ICT wall time) stored as `timestamptz`; a key sent again with the same values is skipped, with

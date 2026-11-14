@@ -79,7 +79,7 @@ HEADERS: dict[str, Sequence[str]] = {
                            "source".split(),
     "x_own_mentions": "post_id own_handle kind collected_at posted_at author_handle author_id text "
                       "in_reply_to_post_id conversation_id likes reposts replies quotes views url filter_flags".split(),
-    "x_bookmarks": "post_id folder_id folder_name first_seen_at last_seen_at removed_at author_handle author_id "
+    "x_bookmarks": "post_id own_handle folder_id folder_name first_seen_at last_seen_at removed_at author_handle author_id "
                    "posted_at text lang domain topic tags time_bound_date calendar_candidate likes reposts replies "
                    "views url filter_flags".split(),
     "x_home_timeline": "post_id collected_at posted_at author_handle author_id author_followers text lang likes "
