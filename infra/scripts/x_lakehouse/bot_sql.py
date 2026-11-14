@@ -7,7 +7,7 @@ Each file holds ONE statement, at most 500 rows and 900 KB, for one Supabase con
 
     select x_intel.ingest('x_feed', $json$[{...}, ...]$json$::jsonb, 'run1113m');
 
-The four private datasets (the owner's own account data) go to their own door instead, which
+The six private datasets (the owner's own account data) go to their own door instead, which
 x_intel.ingest() refuses to replace:
 
     select x_intel_private.ingest('x_bookmarks', $json$[...]$json$::jsonb, 'run1113m');
@@ -90,10 +90,17 @@ HEADERS: dict[str, Sequence[str]] = {
     "x_communities": "community_id snapshot_date name description member_count created_at access query domain "
                      "topic member_delta filter_flags url".split(),
     "x_list_sources": "list_id name owner_handle member_count follower_count mapped_qid members_hash verified_at "
-                      "status".split(),
+                      "status".split(),    "x_post_engagers": "post_id engagement user_id user_handle user_name user_followers user_verified collected_at "
+                       "engaged_at quote_post_id quote_text quote_likes query_id filter_flags".split(),
+    "x_news": "story_id collected_at headline summary category keywords lang post_ids post_count story_updated_at "
+              "query url".split(),
+    "x_own_likes": "post_id own_handle collected_at posted_at author_handle author_id text lang likes reposts "
+                   "replies quotes views url filter_flags".split(),
+    "x_bookmark_folders": "folder_id own_handle collected_at name post_count".split(),
 }
 # Datasets whose door is x_intel_private.ingest() (kept equal to schemas.PRIVATE_NAMES by the tests).
-PRIVATE = frozenset({"x_own_account_daily", "x_own_mentions", "x_bookmarks", "x_home_timeline"})
+PRIVATE = frozenset({"x_own_account_daily", "x_own_mentions", "x_bookmarks", "x_home_timeline", "x_own_likes",
+                     "x_bookmark_folders"})
 
 
 def ingest_function(dataset: str) -> str:

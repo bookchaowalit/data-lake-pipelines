@@ -315,11 +315,55 @@ X_LIST_SOURCES = Dataset(
     sheet=False,
     notes="ready before X Lists are live: no writer yet",
 )
-PRIVATE_NAMES = ("x_own_account_daily", "x_own_mentions", "x_bookmarks", "x_home_timeline")
-NEW_PUBLIC_NAMES = ("x_spaces", "x_communities", "x_list_sources")
+# ------------------------------------------------- more bot-only datasets (owner 2026-11-14, raw only)
+# No writer spec: kinds follow the X API v2 objects the bots read. Proposed contract v1; a column the
+# writer sends that is not here is refused by ingest() ("unknown columns"), never dropped silently.
+# Who quoted, reposted or liked a top post (Chief Data caps it at ~10 calls a day). An engagement is
+# observed once: the first version wins (raw is insert-only by key).
+X_POST_ENGAGERS = Dataset(
+    "x_post_engagers", "",
+    _cols("post_id:str engagement:str user_id:str user_handle:str user_name:str user_followers:int "
+          "user_verified:bool collected_at:ts engaged_at:ts quote_post_id:str quote_text:str "
+          "quote_likes:int query_id:str filter_flags:str"),
+    key=("post_id", "engagement", "user_id"),
+    ingest_ts="collected_at",
+    sheet=False, mask_phone=("quote_text",),
+    notes="engagement: quote / repost / like; engaged_at only for quotes (X gives no time for likes or reposts)",
+)
+# X News stories (search_news), one row per story per pull: a story's headline and post list change.
+X_NEWS = Dataset(
+    "x_news", "",
+    _cols("story_id:str collected_at:ts headline:str summary:str category:str keywords:str lang:str "
+          "post_ids:str post_count:int story_updated_at:ts query:str url:str"),
+    key=("story_id", "collected_at"),
+    ingest_ts="collected_at",
+    sheet=False, mask_phone=("headline", "summary"),
+    notes="keywords and post_ids are '; '-joined lists (ingest() refuses nested values)",
+)
+# Private: posts the owner's accounts liked, and their bookmark folders.
+X_OWN_LIKES = Dataset(
+    "x_own_likes", "",
+    _cols("post_id:str own_handle:str collected_at:ts posted_at:ts author_handle:str author_id:str text:str "
+          "lang:str likes:int reposts:int replies:int quotes:int views:int url:str filter_flags:str"),
+    key=("post_id", "own_handle"),
+    ingest_ts="collected_at",
+    privacy="private", sheet=False, mask_phone=("text",),
+    notes="X gives no liked-at time: collected_at of the first pull that saw the like",
+)
+# A folder list per account per pull (the folder's posts are x_bookmarks rows with its folder_id).
+X_BOOKMARK_FOLDERS = Dataset(
+    "x_bookmark_folders", "",
+    _cols("folder_id:str own_handle:str collected_at:ts name:str post_count:int"),
+    key=("folder_id", "own_handle", "collected_at"),
+    ingest_ts="collected_at",
+    privacy="private", sheet=False, mask_phone=("name",),
+)
+PRIVATE_NAMES = ("x_own_account_daily", "x_own_mentions", "x_bookmarks", "x_home_timeline", "x_own_likes",
+                 "x_bookmark_folders")
+NEW_PUBLIC_NAMES = ("x_spaces", "x_communities", "x_list_sources", "x_post_engagers", "x_news")
 NEW_NAMES = PRIVATE_NAMES + NEW_PUBLIC_NAMES
 
-# Rollback switch (name only; the owner sets it): X_LAKE_NEW_DATASETS=off drops the seven datasets
+# Rollback switch (name only; the owner sets it): X_LAKE_NEW_DATASETS=off drops the bot-only datasets
 # from every allowlist, so ingest() refuses them as unknown again. Stored rows and files stay.
 NEW_DATASETS_ON = os.environ.get("X_LAKE_NEW_DATASETS", "on").strip().lower() != "off"
 
@@ -332,7 +376,7 @@ SHEET_DATASETS: dict[str, Dataset] = {
 }
 NEW_DATASETS: dict[str, Dataset] = {
     d.name: d for d in (X_OWN_ACCOUNT_DAILY, X_OWN_MENTIONS, X_BOOKMARKS, X_HOME_TIMELINE, X_SPACES,
-                        X_COMMUNITIES, X_LIST_SOURCES)
+                        X_COMMUNITIES, X_LIST_SOURCES, X_POST_ENGAGERS, X_NEWS, X_OWN_LIKES, X_BOOKMARK_FOLDERS)
 }
 # Every dataset the drain / append accept (the allowlist; there is no separate ALLOWED list).
 DATASETS: dict[str, Dataset] = {**SHEET_DATASETS, **(NEW_DATASETS if NEW_DATASETS_ON else {})}

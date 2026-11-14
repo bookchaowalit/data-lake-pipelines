@@ -1,4 +1,4 @@
-# X lakehouse: seven bot-only datasets (raw only), the private inbox, drain_log, digest_log
+# X lakehouse: bot-only datasets (raw only), the private inbox, drain_log, digest_log
 
 Status: code and tests in this PR; **nothing applied or deployed**. The owner applies the migration
 and runs `railway up` (steps in §8). Source: Chief Data `schema_spec.md` (task m1110-src, §8 from
@@ -18,7 +18,7 @@ Nothing in this PR is real owner data: every fixture is synthetic
 
 ## 1. Datasets
 
-All seven have **no Sheet tab** and **no curated table**: bots send them through `ingest()` only, the
+All of them have **no Sheet tab** and **no curated table**: bots send them through `ingest()` only, the
 cron drains them into raw Parquet. The Sheet catch-up, the Sheet validation and the
 `X_LAKE_SOURCE=both` inbox-vs-Sheet compare skip them (no `missing_in_sheet` failure); `validate`
 checks them in raw only. `bot_sql.HEADERS` holds their column order (= the contract below).
@@ -32,6 +32,20 @@ checks them in raw only. `bot_sql.HEADERS` holds their column order (= the contr
 | `x_spaces` | public | `space_id, collected_at` | `raw/` | one row per key |
 | `x_communities` | public | `community_id, snapshot_date` | `raw/` | one row per key |
 | `x_list_sources` | public | `list_id, verified_at` | `raw/` | the newest `verified_at` per `list_id` |
+| `x_post_engagers` | public | `post_id, engagement, user_id` | `raw/` | one row per key (first pull wins) |
+| `x_news` | public | `story_id, collected_at` | `raw/` | the newest `collected_at` per `story_id` |
+| `x_own_likes` | private | `post_id, own_handle` | `private/raw/` | one row per key |
+| `x_bookmark_folders` | private | `folder_id, own_handle, collected_at` | `private/raw/` | the newest `collected_at` per `(folder_id, own_handle)` |
+
+**Added 2026-11-14 (owner: "everything Chief Data pulls goes to the lake").** Chief Data started
+pulling these on 2026-11-13/14 and kept them as files on its machine because the lake had no dataset
+for them: `x_post_engagers` (who quoted, reposted or liked a top post), `x_news` (X News stories,
+`search_news`), `x_own_likes` and `x_bookmark_folders` (private). There is no writer spec for them:
+the columns are a **proposed v1** from the X API v2 objects, so the writer must send exactly these
+column names (a different name is refused as `unknown columns`, nothing is dropped silently). List
+values (`x_news.keywords`, `x_news.post_ids`) are `; `-joined text, since ingest() refuses nested
+values. Replies, full-archive and X Lists posts are ordinary posts and go to `x_feed` with their
+source in `watch_type` / `watch_value`; they need no dataset of their own.
 
 The version columns sit in the raw key (`x_bookmarks`, `x_list_sources`), so a re-seen or removed
 bookmark and a new verification are new raw versions instead of a refused "changed values" row.
@@ -126,9 +140,11 @@ lifecycle rule on each prefix (free, set by the owner or by Claude with the owne
 | `<prefix>/private/raw/x_own_mentions/` | delete objects after 365 days |
 | `<prefix>/private/raw/x_bookmarks/` | keep (no rule): the intended rule is "180 days after `removed_at`", which depends on row content; an object-age rule cannot express it. A reader or a later job applies it. |
 | `<prefix>/private/raw/x_own_account_daily/` | keep (never deleted) |
+| `<prefix>/private/raw/x_own_likes/` | keep (no rule yet; the owner picks one) |
+| `<prefix>/private/raw/x_bookmark_folders/` | keep (a few rows a day) |
 
 The `_manifests` under `private/` are small and stay. Public `x_spaces` / `x_communities` /
-`x_list_sources` raw is kept like every other public raw dataset.
+`x_list_sources` / `x_post_engagers` / `x_news` raw is kept like every other public raw dataset.
 
 ## 3. Section 8: dropped (owner 2026-11-12)
 
