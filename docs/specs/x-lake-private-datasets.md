@@ -138,7 +138,7 @@ Raw Parquet is append-only and the cron never deletes it. Retention for the priv
 lifecycle rule on each prefix of bucket `x-intel-lake`, set 2026-11-14 by Claude at the owner's request
 (Cloudflare API `PUT /accounts/{id}/r2/buckets/x-intel-lake/lifecycle`, token Infisical `/cloudflare`;
 that call replaces every rule, so read the list first and send it back whole). Rule ids
-`private-home-timeline-30d` and `private-own-mentions-365d`; the bucket's other rules
+`private-home-timeline-30d`, `private-own-mentions-365d` and `private-own-likes-365d`; the bucket's other rules
 (`Default Multipart Abort Rule`, `meta-landing-30d`) were kept:
 
 | prefix | rule |
@@ -147,7 +147,7 @@ that call replaces every rule, so read the list first and send it back whole). R
 | `<prefix>/private/raw/x_own_mentions/` | delete objects after 365 days |
 | `<prefix>/private/raw/x_bookmarks/` | keep (no rule): the intended rule is "180 days after `removed_at`", which depends on row content; an object-age rule cannot express it. A reader or a later job applies it. |
 | `<prefix>/private/raw/x_own_account_daily/` | keep (never deleted) |
-| `<prefix>/private/raw/x_own_likes/` | keep (no rule yet; the owner picks one) |
+| `<prefix>/private/raw/x_own_likes/` | delete objects after 365 days (owner 2026-11-14) |
 | `<prefix>/private/raw/x_bookmark_folders/` | keep (a few rows a day) |
 
 The `_manifests` under `private/` are small and stay. Public `x_spaces` / `x_communities` /
