@@ -261,6 +261,25 @@ class RawLayerTests(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertTrue(any("raw rows with coercion errors" in x for x in r["reasons"]))
 
+    def test_validate_accepts_one_post_seen_by_two_watches_on_different_days(self):
+        # 2026-11-14: a post matched by keyword query K07 on 11-13 and by account watch A96 on 11-14 is
+        # two X Feed observations with different natural keys, not a duplicate.
+        rows = [type_row(X_FEED, feed_row("7"), sheet_row=2),
+                type_row(X_FEED, feed_row("7", collected="2026-11-06 01:00", query_id="A96",
+                                          watch_type="account", watch_value="@a"), sheet_row=3)]
+        write_raw(X_FEED, rows, [r.values["collected_at"] for r in rows], store=self.store, prefix="",
+                  source="append", execute=True, run_date=date(2026, 11, 6), now=NOW)
+        r = self._reconcile(rows, X_FEED, None)
+        self.assertEqual((r["ok"], r["reasons"]), (True, []))
+        self.assertEqual((r["raw_duplicate_post_ids"], r["duplicate_post_ids_sheet"]), (1, 1))
+
+    def test_validate_still_fails_on_a_repeated_post_id_in_signals(self):
+        sig = {"post_id": "8", "collected_at": "2026-11-05 09:00"}
+        rows = [type_row(X_SIGNALS, {**sig, "domain": d}, sheet_row=i) for i, d in ((2, "a"), (3, "b"))]
+        r = self._reconcile(rows, X_SIGNALS, None)
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("duplicate post_id" in x for x in r["reasons"]), r["reasons"])
+
     def test_every_part_is_listed_by_a_manifest_written_before_it(self):
         order = []
         real_put = self.store.put_new
