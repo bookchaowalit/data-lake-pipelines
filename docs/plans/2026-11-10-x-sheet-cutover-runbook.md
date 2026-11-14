@@ -50,7 +50,7 @@ Read-only dry run 2026-11-10: tab rows 2–1,044 contiguous, 1,043 keys = curate
 4. **Bot change:** the owner gives Chief Data the brief below. From its next run it writes nothing to the X tabs.
 5. **Verify one bot run later:** the cron `event="drain"` shows every dataset, `event="validate"` ok, no
    `config_coerce_errors`; the X tabs have no new rows after the switch time.
-6. **Serving tabs:** Railway var `X_LAKE_SERVE=execute` (no redeploy needed; read each run). The next run writes
+6. **Serving tabs:** Railway var `X_LAKE_SERVE=execute`, then `railway redeploy` (a `cron run` uses the deployment's variables, so a var set with `--skip-deploys` is not seen until a redeploy; done 2026-11-14 08:58 ICT, first serve write 09:01). The next run writes
    "Serve · X Signals 7d", "Serve · Open Claims", "Serve · X Query Plan" (tabs it owns; never AI Summaries*, Chief *).
 7. The old X tabs stay frozen. Nothing is deleted (Phase 3, ≥ 30 days, owner approval).
 
