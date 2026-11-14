@@ -78,6 +78,18 @@ class CollectTests(unittest.TestCase):
         with self.assertRaises(WikimediaError):
             collect(lambda url: bad, DAY, pause=0)
 
+    def test_malformed_item_among_good_ones_is_an_error(self):
+        for bad in (
+            "not-an-object",
+            {"views": 3, "rank": 1},
+            {"article": "", "views": 3, "rank": 1},
+        ):
+            body = ranking(5)
+            articles: list[object] = body["items"][0]["articles"]
+            articles.insert(2, bad)
+            with self.subTest(bad=bad), self.assertRaises(WikimediaError):
+                collect(lambda url, body=body: body, DAY, pause=0)
+
     def test_missing_or_bad_rank_or_views_is_an_error(self):
         for bad in (
             {"views": None},

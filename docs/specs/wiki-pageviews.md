@@ -41,7 +41,7 @@ signal of what Thai and English readers look up.
 
 ## Failure and heartbeat
 
-- Exit `0` means ok. Exit `2` covers an API error, an empty ranking, an unexpected response shape, a missing or non-integer `rank`/`views` (rank ≥ 1, views ≥ 0),
+- Exit `0` means ok. Exit `2` covers an API error, an empty ranking, an unexpected response shape, a malformed entry (not an object or no `article`), a missing or non-integer `rank`/`views` (rank ≥ 1, views ≥ 0),
   an empty or local lake URI with `--require-cloud`, and a bad `--date`. The public log shows only
   the exception type.
 - Heartbeat `wiki-pageviews` goes to `monitor.bookchaowalit.com`, which alerts after 26 h without a run.
@@ -52,7 +52,7 @@ signal of what Thai and English readers look up.
 - the top-N per project and the URL shape
 - the namespace flag
 - the error on an empty ranking or a bad response shape
-- the error on a missing or malformed `rank`/`views`
+- the error on a malformed entry or a missing or malformed `rank`/`views`
 - the host pin
 - that a same-day re-run writes nothing
 - that a retry after a failed marker write reuses the snapshot and writes no second batch

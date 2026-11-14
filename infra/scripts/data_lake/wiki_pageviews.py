@@ -90,8 +90,10 @@ def collect(
             raise WikimediaError(f"empty ranking for {project}")
         before = len(rows)
         for item in articles[:TOP_N]:
+            # A malformed entry fails the run: skipping it would store a partial ranking and the
+            # marker would then close the day for good.
             if not isinstance(item, dict) or not item.get("article"):
-                continue
+                raise WikimediaError(f"malformed ranking entry for {project}")
             title = str(item["article"])
             rank, views = item.get("rank"), item.get("views")
             # A malformed ranking must fail before Bronze or the marker close the day for good.
