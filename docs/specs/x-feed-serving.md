@@ -29,7 +29,14 @@ would run dry within a week. `x_feed` still arrives on every run.
 | Telegram digest | facts gain `feed` (totals: posts, authors, watches; top 8 watches; top 15 posts, 10 weekly). The gateway is called when there are signals **or** feed posts; feed links are allowed links. Facts-only fallback lists the top feed posts. `PROMPT_VERSION` = `x-digest-v2`. |
 | x-insights site | new page `/feed/` "Top posts": top 50 posts of the last 7 days (window ends on the current hour, so a rebuild within the hour is byte-stable) and posts per watch. |
 
+## Weekly analyses and Gold (2026-11-14, second step)
+
+| Reader | Change |
+|---|---|
+| `weekly.py` | adds the raw twins `watch_sustained` (top 10 watches by distinct posts this week, the last 6 weeks, weeks in a row at 20+), `feed_local_discovery` (Thai posts), `feed_community_knowledge` (likes ≥ 20, by reposts/like) and `feed_price_reported` (price-like text), each by engagement. The signal analyses stay and run dry; `life_path`, `debate` and the triage audit need AI labels and have no raw twin (with no signals the audit finds no posts and never calls the gateway). |
+| Gold | `02_top_accounts_by_signals` is replaced by `02_top_accounts_by_posts`: authors by distinct posts in 30 days (newest counts per post), likes, reposts, views, watches, main watch. |
+
 ## Not changed
 
-`weekly.py` (weekly analyses), Gold query `02_top_accounts_by_signals.sql` and the Signals/Claims pages still
-read x_signals / claims; they show the last data until a later change moves them.
+Gold `01_daily_volume_per_domain` (X Signals domains) and the site's Signals / Claims pages still read
+x_signals / claims and show the last data.

@@ -125,17 +125,20 @@ def summarise(rows: list[dict[str, Any]], start: datetime, end: datetime) -> Fee
     return FeedWindow(start, end, posts, watches, n)
 
 
+FEED_SOURCE_NOTE = "raw X Feed by engagement (no AI labels)"
+
+
+def load_rows(store: Any, prefix: str, start: datetime) -> list[dict[str, Any]]:
+    """Every raw x_feed row stored from the day before ``start`` (ICT) on, all columns."""
+    since = (start.astimezone(TZ) - timedelta(days=1)).date()
+    tbl = read_dataset(store, prefix, X_FEED, since)
+    return [] if tbl is None else tbl.to_pylist()
+
+
 def load(store: Any, prefix: str, start: datetime, end: datetime) -> FeedWindow:
     """Raw x_feed collected in [start, end). Partitions are dated by collected_at in ICT, so reading from
     the start's ICT date covers the window (one extra day for rows stored a day late)."""
-    since = (start.astimezone(TZ) - timedelta(days=1)).date()
-    tbl = read_dataset(store, prefix, X_FEED, since)
-    rows = (
-        []
-        if tbl is None
-        else tbl.to_pylist()  # all columns: summarise keeps them in _screen for the denylist
-    )
-    return summarise(rows, start, end)
+    return summarise(load_rows(store, prefix, start), start, end)  # all columns: kept in _screen
 
 
 def loader(cfg: Any) -> Any:

@@ -3,6 +3,13 @@
 Parallel run: rows go to ``lh_analyses`` / ``lh_triage_audit`` (bot tables untouched). Analyses are SQL over
 the curated tables and marts (plus raw ``alpha_feed`` for verified prices); the triage audit asks the AI
 gateway to relabel a stable sample of the week. Logs carry counts and the week only, never post text.
+
+Since 2026-11-14 the analyses also come from raw ``x_feed`` (spec docs/specs/x-feed-serving.md): the bots
+send no X Signals or Claims since 2026-11-13, so the signal analyses run dry. ``watch_sustained``,
+``feed_local_discovery``, ``feed_community_knowledge`` and ``feed_price_reported`` are the raw twins of
+fad_sustained / local_discovery / community_knowledge / price_reported, ranked by engagement (no AI labels).
+life_path, debate and the triage audit need AI labels and have no raw twin; with no signals the audit finds
+no posts and never calls the gateway.
 """
 
 from __future__ import annotations
@@ -198,6 +205,54 @@ def analyses(conn: Any, w: Week, store: Any = None, prefix: str = "") -> list[di
         if rank == 5:
             break
     out += _price_verified(w, store, prefix)
+    out += _feed_analyses(w, weeks, store, prefix)
+    return out
+
+
+def _feed_analyses(w: Week, weeks: Sequence[Week], store: Any, prefix: str) -> list[dict[str, Any]]:
+    """Raw X Feed twins of the signal analyses (feed.py: one row per post, newest observation)."""
+    if store is None:
+        return []
+    from .feed import FEED_SOURCE_NOTE, load_rows, summarise
+
+    rows = load_rows(store, prefix, weeks[-1].start)
+    per_week = {wk.label: summarise(rows, wk.start, wk.end) for wk in weeks}
+    this = per_week[w.label]
+    out: list[dict[str, Any]] = []
+    counts = {wk.label: dict(per_week[wk.label].watches) for wk in weeks}
+    for rank, (watch, n) in enumerate(this.watches[:10], 1):
+        series = [counts[wk.label].get(watch, 0) for wk in weeks]
+        run = 0
+        for k in series:
+            if k < FAD_MIN:
+                break
+            run += 1
+        out.append(_row(w, "watch_sustained", rank, watch, topic=watch, value=n, value_kind="posts this week",
+                        metric=" ".join(f"{wk.label.split('-')[1]}:{k}" for wk, k in zip(weeks, series)),
+                        note=f"{run} week(s) in a row at {FAD_MIN}+; {FEED_SOURCE_NOTE}"))
+
+    def post_row(analysis: str, rank: int, p: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        return _row(w, analysis, rank, p.get("text"), post_id=p.get("post_id"), link=p.get("post_url"),
+                    topic=f"{p.get('watch_type') or ''}:{p.get('watch_value') or ''}",
+                    metric=kw.pop("metric", f"engagement {p['engagement']}"), note=FEED_SOURCE_NOTE, **kw)
+
+    thai = [p for p in this.posts if re.search(THAI_RE, p.get("text") or "")]
+    out += [post_row("feed_local_discovery", i, p, geo="TH") for i, p in enumerate(thai[:5], 1)]
+    talk = sorted((p for p in this.posts if int(p.get("likes") or 0) >= 20),
+                  key=lambda p: (-(int(p.get("reposts") or 0) / int(p["likes"])), str(p["post_id"])))
+    out += [post_row("feed_community_knowledge", i, p,
+                     metric=f"reposts/like {int(p.get('reposts') or 0) / int(p['likes']):.2f}")
+            for i, p in enumerate(talk[:5], 1)]
+    rank = 0
+    for p in this.posts:  # by engagement
+        m = PRICE_RE.search(p.get("text") or "")
+        if not m:
+            continue
+        rank += 1
+        out.append(post_row("feed_price_reported", rank, p, value=m.group(0).strip(),
+                            value_kind="reported (anecdotal, unverified)"))
+        if rank == 5:
+            break
     return out
 
 

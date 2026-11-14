@@ -59,6 +59,52 @@ class FakeGateway:
         return httpx.Client(transport=httpx.MockTransport(self))
 
 
+class FeedAnalysesTests(unittest.TestCase):
+    """Raw X Feed twins of the signal analyses (2026-11-14): no Postgres, no AI labels."""
+
+    def test_feed_analyses_follow_their_rules(self):
+        from datetime import timedelta, timezone
+        from unittest import mock
+
+        from x_lakehouse import feed
+
+        def r(pid, when, text="post", likes=0, reposts=0, watch=("keyword", "ai")):
+            at = datetime.strptime(when, "%Y-%m-%d %H:%M").replace(tzinfo=ICT).astimezone(timezone.utc)
+            return {"post_id": pid, "collected_at": at, "watch_type": watch[0], "watch_value": watch[1],
+                    "author_handle": "a", "post_url": f"https://x.com/a/status/{pid}", "text": text,
+                    "likes": likes, "reposts": reposts, "replies": 0, "views": 0}
+
+        rows = [r(f"a{i}", "2026-11-10 09:00", likes=1) for i in range(25)]  # W46: 25 posts on keyword:ai
+        rows += [r(f"b{i}", "2026-11-03 09:00") for i in range(22)]  # W45: 22
+        rows += [r("t1", "2026-11-11 10:00", "ข่าวไทย วันนี้", likes=50),
+                 r("t1", "2026-11-12 10:00", "ข่าวไทย วันนี้", likes=80, watch=("account", "news")),  # seen again
+                 r("d1", "2026-11-12 10:00", "a thread", likes=100, reposts=40),
+                 r("p1", "2026-11-12 11:00", "oil up 3% today", likes=5),
+                 r("n1", "2026-11-17 10:00", "next week", likes=999)]
+        import tempfile
+
+        from x_lakehouse.lake import LocalStore
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feed, "load_rows", return_value=rows) as load:
+            out = weekly.analyses(mock.MagicMock(), weekly.last_complete_week(MONDAY), store=LocalStore(Path(tmp)),
+                                  prefix="")
+        self.assertEqual(load.call_args.args[2], weekly.last_complete_week(MONDAY).start - timedelta(weeks=5))
+        by = {}
+        for x in out:
+            by.setdefault(x["analysis"], []).append(x)
+        top = by["watch_sustained"][0]
+        self.assertEqual((top["item"], top["value"]), ("keyword:ai", "28"))
+        self.assertTrue(top["metric"].startswith("W46:28 W45:22"), top["metric"])
+        self.assertTrue(top["note"].startswith("2 week(s) in a row at 20+"))
+        self.assertEqual([(x["post_id"], x["geo"]) for x in by["feed_local_discovery"]], [("t1", "TH")])
+        self.assertEqual(by["feed_local_discovery"][0]["metric"], "engagement 80")  # newest observation
+        self.assertEqual(by["feed_community_knowledge"][0]["post_id"], "d1")
+        self.assertEqual(by["feed_community_knowledge"][0]["metric"], "reposts/like 0.40")
+        self.assertEqual((by["feed_price_reported"][0]["post_id"], by["feed_price_reported"][0]["value"]),
+                         ("p1", "3%"))
+        self.assertNotIn("n1", {x["post_id"] for x in out})  # next week stays out
+
+
 @unittest.skipUnless(DB, "set X_LAKE_TEST_DB_URL to a throwaway Postgres")
 class WeeklyPostgresTests(unittest.TestCase):
     def setUp(self):

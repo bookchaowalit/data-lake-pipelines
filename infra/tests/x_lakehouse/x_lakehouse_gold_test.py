@@ -32,8 +32,12 @@ def build_lake(root: Path) -> None:
         "x_signals": f"select * from (values ('1', 'D5 Technology', 'urgent_candidate', 'T1', 'alert_digest', {ts}),"
                      f" ('2', 'D2 Economy', 'none', 'T3', 'none', {ts})) t(post_id, domain, alert_tier, cred_tier,"
                      " route, collected_at)",
-        "x_feed": f"select * from (values ('1', 'test_a', 3, 100, {ts}), ('2', 'test_b', 1, 10, {ts}))"
-                  " t(post_id, author_handle, likes, views, collected_at)",
+        # Post 1 seen by two watches (counts once, newest counts); post 3 by test_a too.
+        "x_feed": f"select * from (values ('1', 'test_a', 'keyword', 'ai', 3, 0, 100, {ts} - interval 1 hour),"
+                  f" ('1', 'test_a', 'account', 'test_a', 5, 1, 150, {ts}),"
+                  f" ('3', 'test_a', 'keyword', 'ai', 2, 0, 20, {ts}),"
+                  f" ('2', 'test_b', 'keyword', 'ai', 1, 0, 10, {ts}))"
+                  " t(post_id, author_handle, watch_type, watch_value, likes, reposts, views, collected_at)",
         "x_topic_counts": f"select * from (values ('q1', 'ai', {ts}, 50, 9, 4.0, true, {ts}))"
                           " t(query_id, topic, snapshot_at, total_24h, max_hour_24h, ratio, spike, _ingested_at)",
         "x_account_snapshots": f"select * from (values ('test_a', 'u1', {ts} - interval 2 day, 100, 'ok'),"
@@ -64,7 +68,7 @@ class GoldTests(unittest.TestCase):
         report = self.run_gold(write=False)
         self.assertTrue(report["ok"], report)
         self.assertEqual(set(report["queries"]), {f.stem for f in gold.QUERIES.glob("*.sql")})
-        self.assertEqual(report["queries"]["02_top_accounts_by_signals"]["rows"], 2)
+        self.assertEqual(report["queries"]["02_top_accounts_by_posts"]["rows"], 2)
         self.assertFalse((self.root / "gold").exists())
 
     def test_write_lands_one_part_per_query_and_a_manifest(self):
@@ -83,10 +87,17 @@ class GoldTests(unittest.TestCase):
         60 days later sees them aged out."""
         at_run = self.run_gold(write=False)["queries"]
         self.assertEqual(at_run["05_account_follower_growth"]["rows"], 1)
-        self.assertEqual(at_run["02_top_accounts_by_signals"]["rows"], 2)
+        self.assertEqual(at_run["02_top_accounts_by_posts"]["rows"], 2)
         later = self.run_gold(write=False, now=NOW + timedelta(days=60))["queries"]
         self.assertEqual(later["05_account_follower_growth"]["rows"], 0)
-        self.assertEqual(later["02_top_accounts_by_signals"]["rows"], 0)
+        self.assertEqual(later["02_top_accounts_by_posts"]["rows"], 0)
+
+    def test_top_accounts_count_each_post_once_with_its_newest_counts(self):
+        self.run_gold(write=True)
+        [part] = (self.root / "gold" / "02_top_accounts_by_posts").rglob("*.parquet")
+        rows = duckdb.connect().execute(f"select author_handle, posts, total_likes, total_views, watches, "
+                                        f"main_watch from read_parquet('{part}')").fetchall()
+        self.assertEqual(rows, [("test_a", 2, 7, 170, 2, "keyword:ai"), ("test_b", 1, 1, 10, 1, "keyword:ai")])
 
     def test_no_query_reads_duckdb_now(self):
         for f in gold.QUERIES.glob("*.sql"):
