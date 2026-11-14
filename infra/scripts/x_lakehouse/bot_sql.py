@@ -7,6 +7,11 @@ Each file holds ONE statement, at most 500 rows and 900 KB, for one Supabase con
 
     select x_intel.ingest('x_feed', $json$[{...}, ...]$json$::jsonb, 'run1113m');
 
+The four private datasets (the owner's own account data) go to their own door instead, which
+x_intel.ingest() refuses to replace:
+
+    select x_intel_private.ingest('x_bookmarks', $json$[...]$json$::jsonb, 'run1113m');
+
 Rows are dicts keyed by the Sheet header names, or lists in the Sheet's column order (the header is
 built in below and must match the live Sheet; ``python -m x_lakehouse.bot_sql --check`` compares it
 with the package contract). Values are sent as they are (text, numbers, booleans); the lake types
@@ -68,7 +73,31 @@ HEADERS: dict[str, Sequence[str]] = {
                   "source_tier metric note".split(),
     "x_triage_audit": "audit_week logged_at n label_agree route_agree label_confusions route_confusions "
                       "drift_vs_prev rule_version note".split(),
+    # Bot-only datasets (no Sheet tab; contract docs/specs/x-lake-private-datasets.md).
+    "x_own_account_daily": "snapshot_date snapshot_at handle user_id followers following posts listed "
+                           "followers_delta posts_24h views_24h likes_24h replies_24h reposts_24h mentions_24h "
+                           "source".split(),
+    "x_own_mentions": "post_id own_handle kind collected_at posted_at author_handle author_id text "
+                      "in_reply_to_post_id conversation_id likes reposts replies quotes views url filter_flags".split(),
+    "x_bookmarks": "post_id folder_id folder_name first_seen_at last_seen_at removed_at author_handle author_id "
+                   "posted_at text lang domain topic tags time_bound_date calendar_candidate likes reposts replies "
+                   "views url filter_flags".split(),
+    "x_home_timeline": "post_id collected_at posted_at author_handle author_id author_followers text lang likes "
+                       "reposts replies quotes views age_min velocity eng_rate rank domain topic filter_flags "
+                       "url".split(),
+    "x_spaces": "space_id collected_at state title scheduled_start started_at lang creator_handle creator_id "
+                "participant_count query domain topic calendar_candidate filter_flags url".split(),
+    "x_communities": "community_id snapshot_date name description member_count created_at access query domain "
+                     "topic member_delta filter_flags url".split(),
+    "x_list_sources": "list_id name owner_handle member_count follower_count mapped_qid members_hash verified_at "
+                      "status".split(),
 }
+# Datasets whose door is x_intel_private.ingest() (kept equal to schemas.PRIVATE_NAMES by the tests).
+PRIVATE = frozenset({"x_own_account_daily", "x_own_mentions", "x_bookmarks", "x_home_timeline"})
+
+
+def ingest_function(dataset: str) -> str:
+    return "x_intel_private.ingest" if dataset in PRIVATE else "x_intel.ingest"
 
 
 class BotSqlError(ValueError):
@@ -114,7 +143,7 @@ def statement(dataset: str, rows: list[dict[str, Any]], run_id: str) -> str:
         raise BotSqlError(f"unknown dataset {dataset!r}")
     payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
     tag = _tag(payload)
-    return f"select x_intel.ingest('{dataset}', {tag}{payload}{tag}::jsonb, '{run_id}');\n"
+    return f"select {ingest_function(dataset)}('{dataset}', {tag}{payload}{tag}::jsonb, '{run_id}');\n"
 
 
 def chunks(dataset: str, rows: list[dict[str, Any]], run_id: str, *, max_rows: int = MAX_ROWS,
@@ -156,9 +185,11 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--check"]:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from x_lakehouse.schemas import DATASETS
+        from x_lakehouse.schemas import PRIVATE_NAMES, SHEET_DATASETS, NEW_DATASETS
 
-        bad = [n for n, d in DATASETS.items() if list(HEADERS.get(n, [])) != d.names] + [n for n in HEADERS if n not in DATASETS]
+        known = {**SHEET_DATASETS, **NEW_DATASETS}
+        bad = [n for n, d in known.items() if list(HEADERS.get(n, [])) != d.names] + [n for n in HEADERS if n not in known]
+        bad += ["PRIVATE"] if PRIVATE != set(PRIVATE_NAMES) else []
         print("ok" if not bad else f"header drift: {bad}")
         return 1 if bad else 0
     if len(args) != 4:

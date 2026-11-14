@@ -13,6 +13,13 @@ from the marts; rows matching the client denylist never leave the host; the AI a
 links from the facts; a failed or invalid answer falls back to a facts-only message. Every value in
 the Telegram message is HTML-escaped (X text is untrusted). Logs carry counts only.
 
+``digest_log`` keeps the two outcomes apart: ``ai_status`` (``ok`` = AI summary sent, ``fallback`` =
+gateway called but the facts-only message was sent, ``skipped`` = gateway not called) with
+``fallback_reason``, and delivery in ``status`` / ``error`` / ``telegram_message_ids``. ``error`` is set
+only when delivery failed (or the message was blocked for a client term). When the gateway reports
+``provider_auth`` for 3 digests in a row, one alert goes to the same Telegram chat,
+once per streak (``digest_log.auth_alerted_at``; ``X_DIGEST_AUTH_ALERT=off`` turns it off, history stays).
+
     python -m x_lakehouse.digest --dry-run              # facts counts, no gateway, no Telegram
     python -m x_lakehouse.digest --send --kind midday   # what the cron does with X_LAKE_DIGEST=send
 """
@@ -48,6 +55,10 @@ from .schemas import PG_SCHEMA as S  # noqa: E402
 GATEWAY_URL = "https://api.bookchaowalit.com"
 PROMPT_VERSION = "x-digest-v1"
 MAX_MESSAGE = 4000  # Telegram's limit is 4,096 characters
+AUTH_FAILURE = "provider_auth"  # gateway error code: it could not log in to the model provider
+AUTH_ALERT_AFTER = 3
+AUTH_ALERT_TEXT = ("⚠️ X digest: เกตเวย์ AI ล็อกอินผู้ให้บริการไม่ได้ (provider_auth) ติดกัน 3 รอบ "
+                   "สรุปถูกส่งเป็นข้อมูลดิบแทน ตรวจคีย์ผู้ให้บริการของเกตเวย์")
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 # Host-like text in model prose, scanned after NFKC (full-width dots become "."): labels may be
 # non-ASCII (IDN), and bare IPv4 addresses count too. Telegram turns such text into links by itself.
@@ -464,8 +475,9 @@ def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:
     return parts
 
 
-def send_telegram(http: httpx.Client, token: str, chat_id: str, text: str) -> None:
-    """DigestError = Telegram surely did not take the message (safe to retry); DeliveryUnknown = it
+def send_telegram(http: httpx.Client, token: str, chat_id: str, text: str) -> int | None:
+    """Sends one message; returns its Telegram message_id (None if the reply has none).
+    DigestError = Telegram surely did not take the message (safe to retry); DeliveryUnknown = it
     may have. Exception texts are dropped because they can carry the token-bearing URL."""
     try:
         r = http.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=30,
@@ -479,11 +491,15 @@ def send_telegram(http: httpx.Client, token: str, chat_id: str, text: str) -> No
     if r.status_code != 200:
         raise DeliveryUnknown(f"telegram http {r.status_code}")
     try:
-        ok = (r.json() or {}).get("ok") is True
+        body = r.json() or {}
+        ok = body.get("ok") is True
     except (ValueError, AttributeError):
-        ok = False
+        body, ok = {}, False
     if not ok:
         raise DeliveryUnknown("telegram unreadable 200 answer")
+    result = body.get("result") if isinstance(body, dict) else None
+    mid = result.get("message_id") if isinstance(result, dict) else None
+    return mid if isinstance(mid, int) and not isinstance(mid, bool) else None
 
 
 # -------------------------------------------------------------------------------------------- run
@@ -516,17 +532,95 @@ def _mark(conn: Any, w: Window, status: str, owner: str) -> bool:
 
 
 def _log_row(conn: Any, w: Window, status: str, owner: str, **kw: Any) -> None:
+    """``error``: delivery failure only. ``ai_status`` / ``fallback_reason``: the AI summary's outcome."""
+    ids = kw.get("message_ids")
     with conn.cursor() as c:
         c.execute(f"insert into {S}.digest_log (digest_id, kind, window_start, window_end, status, signals, "
-                  f"sent_messages, tokens_in, tokens_out, cost_usd, error) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                  f"sent_messages, tokens_in, tokens_out, cost_usd, error, ai_status, fallback_reason, "
+                  f"telegram_message_ids) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                   f"on conflict (digest_id) do update set window_end = excluded.window_end, status = excluded.status, "
                   f"signals = excluded.signals, sent_messages = excluded.sent_messages, tokens_in = excluded.tokens_in, "
                   f"tokens_out = excluded.tokens_out, cost_usd = excluded.cost_usd, error = excluded.error, "
+                  f"ai_status = excluded.ai_status, fallback_reason = excluded.fallback_reason, "
+                  f"telegram_message_ids = excluded.telegram_message_ids, "
                   f"updated_at = now() where {S}.digest_log.status not in ('sent', 'partial', 'unknown') "
                   f"and {S}.digest_log.owner = %s",
                   (w.digest_id, w.kind, w.start, w.end, status, kw.get("signals"), kw.get("sent"),
-                   kw.get("tokens_in"), kw.get("tokens_out"), kw.get("cost_usd"), kw.get("error"), owner))
+                   kw.get("tokens_in"), kw.get("tokens_out"), kw.get("cost_usd"), kw.get("error"),
+                   kw.get("ai_status"), kw.get("fallback_reason"), None if ids is None else json.dumps(ids), owner))
     conn.commit()
+
+
+AUTH_ALERT_LOCK = 0x786C61616C74  # "xlaalt": one provider_auth alert claim at a time
+
+
+def _streak(c: Any) -> tuple[int, bool]:
+    auth = f"position({digest_lit(AUTH_FAILURE)} in coalesce(fallback_reason, '')) > 0"
+    c.execute(f"with b as (select updated_at, digest_id from {S}.digest_log "
+              f"where ai_status in ('ok', 'fallback') and not ({auth}) "
+              f"order by updated_at desc, digest_id desc limit 1) "
+              f"select count(*), coalesce(bool_or(d.auth_alerted_at is not null), false) "
+              f"from {S}.digest_log d left join b on true where d.ai_status in ('ok', 'fallback') and {auth} "
+              f"and (b.updated_at is null or (d.updated_at, d.digest_id) > (b.updated_at, b.digest_id))")
+    n, alerted = c.fetchone()
+    return int(n), bool(alerted)
+
+
+def auth_failure_streak(conn: Any) -> tuple[int, bool]:
+    """(digests in a row, newest first, gateway actually called, whose summary fell back on
+    provider_auth; whether this streak was already alerted). The whole streak back to the newest
+    gateway call that did not fail on provider_auth is counted, however long. Rows from before
+    2026-11-10 (ai_status null) and digests that never called the gateway neither count nor reset."""
+    with conn.cursor() as c:
+        out = _streak(c)
+    conn.commit()
+    return out
+
+
+def digest_lit(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _auth_alert(conn: Any, cfg: Config, client: httpx.Client, w: Window, ai: dict[str, Any]) -> dict[str, Any]:
+    """One alert per provider_auth streak, sent by the digest that brings it to AUTH_ALERT_AFTER (or the
+    first one after, if that send was surely rejected). Digests that did not fail on provider_auth never
+    alert, so skipped or retried digests cannot repeat it.
+
+    At most once: the streak is claimed first (digest_log.auth_alerted_at, under AUTH_ALERT_LOCK so two
+    digests cannot both claim it) and committed before Telegram is called. Only a definite rejection
+    (DigestError) gives the claim back; a crash or an unknown outcome keeps it, so no repeat."""
+    failed_here = ai.get("ai_status") == "fallback" and AUTH_FAILURE in (ai.get("fallback_reason") or "")
+    off = cfg.get("X_DIGEST_AUTH_ALERT", "on").lower() == "off"
+    with conn.cursor() as c:
+        if failed_here and not off:
+            c.execute("select pg_advisory_xact_lock(%s)", (AUTH_ALERT_LOCK,))
+        streak, alerted = _streak(c)
+        claim = failed_here and not off and streak >= AUTH_ALERT_AFTER and not alerted
+        if claim:
+            # identifiers are module constants; values are bound parameters
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
+            c.execute(f"update {S}.digest_log set auth_alerted_at = now() where digest_id = %s", (w.digest_id,))
+            claim = c.rowcount == 1
+    conn.commit()  # the claim is durable before anything leaves the host
+    out: dict[str, Any] = {"provider_auth_streak": streak}
+    if not claim:
+        return out
+    try:
+        send_telegram(client, cfg.require("TELEGRAM_NOTI_BOT_TOKEN"), cfg.require("TELEGRAM_NOTI_CHAT_ID"),
+                      AUTH_ALERT_TEXT)
+    except DigestError as exc:
+        with conn.cursor() as c:  # surely not delivered: give the claim back, the next digest retries
+            # identifiers are module constants; values are bound parameters
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
+            c.execute(f"update {S}.digest_log set auth_alerted_at = null where digest_id = %s", (w.digest_id,))
+        conn.commit()
+        out["auth_alert"] = f"error: {exc}"  # status code only, never the token-bearing URL
+        return out
+    except DeliveryUnknown as exc:
+        out["auth_alert"] = f"unknown: {exc}"  # may have arrived: the claim stays, never repeated
+        return out
+    out["auth_alert"] = "sent"
+    return out
 
 
 def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind: str = "auto",
@@ -561,9 +655,10 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
             if mode == "dry":
                 reports.append(rep | {"status": "dry"})
                 continue
-            answer, usage, error = None, {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}, None
+            answer, usage, reason = None, {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}, None
+            ai_status = "skipped"  # gateway not called (no signals, or a client term in the facts)
             if facts.totals["signals"] and any_term(facts.as_prompt(), denylist):
-                error = "client term in the facts; gateway not called"  # never send it out
+                reason = "client term in the facts; gateway not called"  # never send it out
             elif facts.totals["signals"]:
                 try:
                     sent_facts = copy.deepcopy(facts)  # trimmed for the gateway; the fallback keeps all
@@ -572,14 +667,17 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                                              cfg.get("X_DIGEST_ROUTE", "sheet-summaries"), sent_facts)
                     answer = validate_answer(raw, sent_facts, denylist)
                     rep["dropped_items"] = answer["dropped"]
+                    ai_status = "ok"
                 except DigestError as exc:
-                    error = str(exc)  # facts-only fallback below
+                    reason, ai_status = str(exc), "fallback"  # facts-only message below
+            ai = {"ai_status": ai_status, "fallback_reason": reason}
             text = render(facts, answer)
             # What Telegram shows: tags dropped, entities decoded, word joiners removed.
             shown = html.unescape(re.sub(r"<[^>]+>", " ", text)).replace(WORD_JOINER, "")
             if contains_term(text, denylist) or contains_term(shown, denylist):
-                _log_row(conn, w, "blocked", owner, signals=facts.totals["signals"], error="client term in message", **usage)
-                reports.append(rep | {"status": "blocked"})
+                _log_row(conn, w, "blocked", owner, signals=facts.totals["signals"], error="client term in message",
+                         **ai, **usage)
+                reports.append(rep | {"status": "blocked", **ai, **_auth_alert(conn, cfg, client, w, ai)})
                 continue
             parts = split_message(text)
             # From here a crash may leave parts in the chat: 'delivering' is never taken over by
@@ -587,13 +685,15 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
             if not _mark(conn, w, "delivering", owner):
                 reports.append(rep | {"status": "superseded"})  # another run took the id over and sends it
                 continue
-            delivered, failure, unknown = 0, None, False
+            delivered, failure, unknown, ids = 0, None, False, []
             for p in parts:
                 for attempt in (1, 2):  # one retry per part, only after a definite rejection
                     try:
                         assert telegram is not None  # send mode only
-                        send_telegram(client, telegram[0], telegram[1], p)
+                        mid = send_telegram(client, telegram[0], telegram[1], p)
                         delivered += 1
+                        if mid is not None:
+                            ids.append(mid)
                         failure = None
                         break
                     except DigestError as exc:
@@ -608,12 +708,16 @@ def run(conn: Any, cfg: Config, *, mode: str, now: datetime | None = None, kind:
                 # retryable ('error'). Some parts delivered: terminal ('partial'), so a later run never
                 # resends the parts the owner already has.
                 status = "unknown" if unknown else "partial" if delivered else "error"
-                _log_row(conn, w, status, owner, signals=facts.totals["signals"], sent=delivered, error=failure, **usage)
-                reports.append(rep | {"status": status, "messages": delivered, "of": len(parts), "error": failure})
+                _log_row(conn, w, status, owner, signals=facts.totals["signals"], sent=delivered, error=failure,
+                         message_ids=ids, **ai, **usage)
+                reports.append(rep | {"status": status, "messages": delivered, "of": len(parts), "error": failure,
+                                      **ai, **_auth_alert(conn, cfg, client, w, ai)})
                 continue
-            _log_row(conn, w, "sent", owner, signals=facts.totals["signals"], sent=len(parts), error=error, **usage)
-            reports.append(rep | {"status": "sent", "ai": answer is not None, "fallback_reason": error,
-                                  "messages": len(parts), **usage})
+            # Delivered: error stays null; the summary's own outcome is in ai_status / fallback_reason.
+            _log_row(conn, w, "sent", owner, signals=facts.totals["signals"], sent=len(parts), error=None,
+                     message_ids=ids, **ai, **usage)
+            reports.append(rep | {"status": "sent", "ai": answer is not None, **ai,
+                                  "messages": len(parts), **usage, **_auth_alert(conn, cfg, client, w, ai)})
     finally:
         if own:
             client.close()

@@ -18,7 +18,9 @@ Source (``X_LAKE_SOURCE``, default ``sheet``; see inbox.py for the bot side):
             (ISO time) starts the comparison window at the first dual-write run.
     inbox   lake only: drain the inbox, validate raw vs Postgres, check every drained row reached R2;
             after an ok run delete inbox rows drained more than 3 days ago.
-inbox/both take a Postgres advisory lock: a second drainer exits 0 without writing.
+inbox/both take a Postgres advisory lock: a second drainer exits 0 without writing. They also drain the
+private inbox (private.py; skipped while schema x_intel_private does not exist) and write one
+``x_intel.drain_log`` row per run (counts only).
 ``X_LAKE_SERVE=execute`` refreshes the serving tabs after an ok run (default: dry run, counts only).
 ``X_LAKE_META=dry|write`` lands owner-shared Meta posts (meta.py, spec docs/specs/meta-intake.md) before the digest.
 ``X_LAKE_DIGEST=dry|send`` builds (and sends) the Telegram digest at the end of every run (digest.py).
@@ -46,7 +48,7 @@ if __package__ in (None, ""):
 
 import httpx  # noqa: E402
 
-from . import backfill, digest, inbox, serve_sheet  # noqa: E402
+from . import backfill, digest, inbox, private, serve_sheet  # noqa: E402
 from . import curated as cur  # noqa: E402
 from .lake import open_store  # noqa: E402
 from .coerce import TZ  # noqa: E402
@@ -308,12 +310,17 @@ def _finish(ok: bool, started: datetime, cfg: Config) -> int:
     return 0 if ok else 1
 
 
+def _names(private_on: bool) -> list[str]:
+    """Datasets to validate: every public one, the private ones only when their schema is in use."""
+    return [n for n, d in DATASETS.items() if not d.private or private_on]
+
+
 def _run_sheet(cfg: Config) -> int:
     started = datetime.now(timezone.utc)
     code, summary = _backfill()
     _log(event="backfill", exit_code=code, **summary)
     since = (started.astimezone(TZ) - timedelta(days=1)).date()
-    report = reconcile(cfg, list(DATASETS), since, None)
+    report = reconcile(cfg, _names(False), since, None)
     failed = {n: r["reasons"] for n, r in report["datasets"].items() if not r["ok"]}
     _log(event="validate", since=since, ok=report["ok"], failed=failed,
          sheet_rows={n: r["sheet_rows"] for n, r in report["datasets"].items()})
@@ -329,6 +336,7 @@ def _run_inbox(cfg: Config) -> int:
             _log(event="drain", status="locked", note="another drainer holds the lock; nothing written")
             return 0
         inbox.ensure_inbox(lock)
+        private_on = private.ensure_private(lock)
         store, prefix = open_store(cfg)
         drained = inbox.drain(lock, store=store, prefix=prefix, cfg=cfg, now=started)
         _log(event="drain", source=source, rows=drained["rows"], marked=drained.get("marked", 0),
@@ -339,6 +347,16 @@ def _run_inbox(cfg: Config) -> int:
         # Every accepted row marked, and no config row held back for a coercion error (those stay in
         # the inbox and fail each run until a corrected row replaces them).
         ok = drained.get("unmarked", 0) == 0 and not drained.get("config_coerce_errors")
+        pdrained: dict[str, object] = {}
+        if private_on:
+            pdrained = private.drain(lock, store=store, prefix=prefix, cfg=cfg, now=started)
+            _log(event="drain_private", rows=pdrained["rows"], marked=pdrained.get("marked", 0),
+                 datasets=pdrained["datasets"], coerce_errors=pdrained.get("coerce_errors", {}),
+                 raw={n: r["written"] for n, r in pdrained.get("raw", {}).items()},  # type: ignore[union-attr]
+                 curated=pdrained.get("curated", {}))
+            ok = ok and pdrained.get("unmarked", 0) == 0
+        else:
+            _log(event="drain_private", status="schema_missing", note="x_intel_private not created yet; skipped")
         since = (started.astimezone(TZ) - timedelta(days=1)).date()
         if source == "both":
             catchup_at = datetime.now(timezone.utc) - timedelta(minutes=1)  # before the Sheet read
@@ -348,8 +366,8 @@ def _run_inbox(cfg: Config) -> int:
             # The catch-up wrote config as the Sheet looked when it was read; put back bot edits sent since.
             _log(event="reapply_config", upserted=inbox.reapply_config(lock, catchup_at))
             snapshot_at = datetime.now(timezone.utc)  # rows the bots send after this may miss the read
-            sheet = backfill.load(cfg, list(DATASETS))
-            report = reconcile(cfg, list(DATASETS), since, None, preloaded=sheet)
+            sheet = backfill.load(cfg, _names(private_on))
+            report = reconcile(cfg, _names(private_on), since, None, preloaded=sheet)
             window = datetime.combine(since, datetime.min.time(), TZ)
             if cfg.get("X_LAKE_COMPARE_SINCE"):
                 window = max(window, datetime.fromisoformat(cfg.get("X_LAKE_COMPARE_SINCE")).astimezone(timezone.utc))
@@ -360,16 +378,31 @@ def _run_inbox(cfg: Config) -> int:
                  inbox_rows={n: r["inbox_rows"] for n, r in cmp.items()})
             ok = ok and not mismatch
         else:
-            report = reconcile(cfg, list(DATASETS), since, None, sheet=False)
+            report = reconcile(cfg, _names(private_on), since, None, sheet=False)
         failed = {n: r["reasons"] for n, r in report["datasets"].items() if not r["ok"]}
-        lost = {n: k for n, k in inbox.landed(lock, store, prefix, started - timedelta(days=1)).items() if k}
+        landed = inbox.landed(lock, store, prefix, started - timedelta(days=1))
+        if private_on:
+            landed |= private.landed(lock, store, prefix, started - timedelta(days=1))
+        lost = {n: k for n, k in landed.items() if k}
         _log(event="validate", since=since, source=source, ok=report["ok"] and not lost, failed=failed,
              drained_missing_from_raw=lost)
         # A drained row with a coercion error fails the run even when its ingest date is older than the
         # validate window (a delayed or replayed row); the run then also skips the prune.
-        ok = ok and report["ok"] and not lost and not drained.get("coerce_errors")
+        ok = (ok and report["ok"] and not lost and not drained.get("coerce_errors")
+              and not pdrained.get("coerce_errors"))
+        both = [drained, pdrained]
+        inbox.record_drain(
+            lock, batch_id=str(drained.get("batch_id") or pdrained.get("batch_id") or f"drain-{started:%Y%m%dT%H%M%SZ}"),
+            started_at=started, source=source,
+            rows_by_dataset={n: k for d in both for n, k in dict(d.get("datasets") or {}).items()},  # type: ignore[arg-type]
+            raw_written={n: r["written"] for d in both for n, r in dict(d.get("raw") or {}).items()},  # type: ignore[arg-type]
+            curated={n: r for d in both for n, r in dict(d.get("curated") or {}).items()},  # type: ignore[arg-type]
+            coerce_errors={n: r for d in both for n, r in dict(d.get("coerce_errors") or {}).items()},  # type: ignore[arg-type]
+            missing_from_raw=landed, ok=ok)
         if ok:
             _log(event="prune", deleted=inbox.prune(lock, started))
+            if private_on:
+                _log(event="prune_private", deleted=private.prune(lock, started))
         # Still holding the lock: the serving refresh rewrites rows and clears the tail in separate
         # requests, so two runs refreshing at once could leave a tab short.
         return _finish(ok, started, cfg)

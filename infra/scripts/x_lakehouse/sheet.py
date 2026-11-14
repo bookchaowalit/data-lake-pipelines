@@ -88,10 +88,13 @@ class SheetReader:
         return out
 
 
+WRITABLE_TABS = frozenset(SERVE_TABS.values())
+
+
 def assert_writable(tab: str) -> None:
     """The only tabs this package may write are its own serving tabs."""
-    if is_protected(tab) or tab not in SERVE_TABS.values():
-        raise SheetError(f"refusing to write tab {tab!r}: only {sorted(SERVE_TABS.values())} are writable")
+    if is_protected(tab) or tab not in WRITABLE_TABS:
+        raise SheetError(f"refusing to write tab {tab!r}: only {sorted(WRITABLE_TABS)} are writable")
 
 
 class SheetWriter:

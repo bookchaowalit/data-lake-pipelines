@@ -42,14 +42,17 @@ from .sheet import SheetReader  # noqa: E402
 
 
 def load(cfg: Config, names: list[str]) -> tuple[dict[str, Any], dict[str, DatasetCheck], list[str]]:
-    with httpx.Client(timeout=120) as http:
-        reader = SheetReader(cfg, http)
-        titles = reader.titles()
-        tabs = [DATASETS[n].tab for n in names]
-        for t in tabs:
-            assert not is_protected(t), t
-        missing_tabs = [t for t in tabs if t not in titles]
-        data = reader.read([t for t in tabs if t in titles])
+    tabs = [DATASETS[n].tab for n in names if DATASETS[n].sheet]  # bot-only datasets have no tab
+    for t in tabs:
+        assert not is_protected(t), t
+    missing_tabs: list[str] = []
+    data: dict[str, Any] = {}
+    if tabs:  # only bot-only datasets: no Sheet read, so no Google credential is needed
+        with httpx.Client(timeout=120) as http:
+            reader = SheetReader(cfg, http)
+            titles = reader.titles()
+            missing_tabs = [t for t in tabs if t not in titles]
+            data = reader.read([t for t in tabs if t in titles])
     typed: dict[str, Any] = {}
     checks: dict[str, DatasetCheck] = {}
     for n in names:
@@ -111,7 +114,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--execute", action="store_true", help="really write R2 + Postgres (default: dry run)")
     p.add_argument("--dry-run", action="store_true", help="the default; accepted for clarity")
-    p.add_argument("--datasets", default=",".join(DATASETS), help="comma list (default: all)")
+    p.add_argument("--datasets", default=",".join(n for n, d in DATASETS.items() if d.sheet),
+                   help="comma list of Sheet datasets (default: all with a Sheet tab)")
     p.add_argument("--local-out", help="dry run: also write the Parquet parts to this directory")
     p.add_argument("--lake-uri", help="override X_LAKE_URI")
     p.add_argument("--check-targets", action="store_true", help="dry run: read existing R2/Postgres state")
@@ -127,6 +131,9 @@ def main(argv: list[str] | None = None) -> int:
     unknown = [n for n in names if n not in DATASETS]
     if unknown:
         p.error(f"unknown datasets {unknown}")
+    no_tab = [n for n in names if not DATASETS[n].sheet]
+    if no_tab:
+        p.error(f"datasets without a Sheet tab (bots send them through ingest()): {no_tab}")
 
     typed, checks, missing_tabs = load(cfg, names)
     for n, rows in typed.items():
@@ -165,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         store, prefix, write_files = LocalStore(Path(args.local_out)), "", True
     try:
         if args.check_targets and conn is not None:
-            for t in cur.CURATED:
+            for t in cur.CURATED:  # x_intel only: the private schema is never counted from here
                 try:
                     targets[f"postgres x_intel.{t}"] = cur.count(conn, t)
                 except Exception as exc:  # table not created yet

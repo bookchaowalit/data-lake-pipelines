@@ -5,6 +5,9 @@ Layout::
     <prefix>/raw/<dataset>/date=YYYY-MM-DD/part-NNNN.parquet     zstd, explicit Arrow schema
     <prefix>/_manifests/<dataset>/<batch_id>/date=D-part-NNNN.json   one entry per part, written
                                                                     before the part (rollback list)
+    <prefix>/private/raw/<dataset>/...   private datasets (the owner's own X account data): the same
+    <prefix>/private/_manifests/...      layout under its own root, so a listing of <prefix>/raw/ or
+                                         <prefix>/_manifests/ never sees them
 
 Idempotent and resumable: before writing a partition, the writer reads the ``_row_key`` column of
 the parts already there and writes only rows whose key is new, as the next part number. A part is
@@ -146,6 +149,15 @@ def _join(*parts: str) -> str:
     return "/".join(p.strip("/") for p in parts if p)
 
 
+def dataset_root(prefix: str, dataset: Dataset) -> str:
+    """Key root of a dataset: ``<prefix>`` (public) or ``<prefix>/private`` (private)."""
+    return _join(prefix, "private") if dataset.private else prefix
+
+
+def raw_dir(prefix: str, dataset: Dataset) -> str:
+    return _join(dataset_root(prefix, dataset), "raw", dataset.name)
+
+
 def ingest_date(ts: Any, fallback: date) -> date:
     if isinstance(ts, datetime):
         return ts.astimezone(TZ).date()
@@ -222,21 +234,21 @@ def write_raw(dataset: Dataset, rows: list[TypedRow], partition_ts: list[Any], *
     # partition; so is any row whose timestamp is blank.
     known_elsewhere: set[str] = set()
     if undated and store is not None:
-        for key in store.list(_join(prefix, "raw", dataset.name) + "/"):
+        for key in store.list(raw_dir(prefix, dataset) + "/"):
             if PART.search(key):
                 tbl = pq.read_table(io.BytesIO(store.read(key)), columns=["_row_key"])
                 known_elsewhere.update(k for k in tbl.column("_row_key").to_pylist() if k in undated)
 
     reserved: dict[str, int] = {}  # day -> next part number not claimed by any manifest entry
     if store is not None:
-        for key in store.list(_join(prefix, "_manifests", dataset.name) + "/"):
+        for key in store.list(_join(dataset_root(prefix, dataset), "_manifests", dataset.name) + "/"):
             if m := MANIFEST_PART.search(key):
                 reserved[m.group(1)] = max(reserved.get(m.group(1), 0), int(m.group(2)) + 1)
 
     report = WriteReport(dataset.name, batch_id)
     for day in sorted(by_date):
         batch = by_date[day]
-        part_dir = _join(prefix, "raw", dataset.name, f"date={day}")
+        part_dir = _join(raw_dir(prefix, dataset), f"date={day}")
         plan = PartitionPlan(dataset.name, day, len(batch))
         existing_keys: set[str] = set()
         next_part = 0
@@ -263,7 +275,7 @@ def write_raw(dataset: Dataset, rows: list[TypedRow], partition_ts: list[Any], *
                 entry = {"dataset": dataset.name, "batch_id": batch_id, "source": source,
                          "written_at": now.isoformat(), "contract": f"{dataset.name}.v1",
                          "key": plan.key, "rows": len(fresh), "date": day}
-                store.put_new(_join(prefix, "_manifests", dataset.name, batch_id,
+                store.put_new(_join(dataset_root(prefix, dataset), "_manifests", dataset.name, batch_id,
                                     f"date={day}-part-{next_part:04d}.json"),
                               json.dumps(entry, indent=1).encode())
                 store.put_new(plan.key, parquet_bytes(table))
@@ -281,7 +293,7 @@ def read_dataset(store: Store, prefix: str, dataset: Dataset, since: date | None
 
     Adds ``_partition_date`` (the part's ``date=`` value) so callers can scope by where a row is stored.
     """
-    keys = [k for k in store.list(_join(prefix, "raw", dataset.name) + "/") if PART.search(k)]
+    keys = [k for k in store.list(raw_dir(prefix, dataset) + "/") if PART.search(k)]
     if since is not None:
         keys = [k for k in keys if (d := _part_date(k)) is not None and d >= since]
     if not keys:
@@ -303,7 +315,7 @@ def lookup_latest(store: Store, prefix: str, dataset: Dataset, column: str, valu
         return {}
     wanted = {(d - timedelta(days=i)).isoformat() for d in days for i in range(lookback + 1)}
     out: dict[str, dict[str, Any]] = {}
-    for key in store.list(_join(prefix, "raw", dataset.name) + "/"):
+    for key in store.list(raw_dir(prefix, dataset) + "/"):
         m = re.search(r"date=(\d{4}-\d{2}-\d{2})/", key)
         if not PART.search(key) or not m or m.group(1) not in wanted:
             continue

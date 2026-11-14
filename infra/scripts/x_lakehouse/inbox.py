@@ -44,8 +44,9 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     __package__ = "x_lakehouse"
 
-from .schemas import CURATED, DATASETS, PG_SCHEMA, POSTGRES, SHEET_TZ, Curated, Dataset, Kind  # noqa: E402
-from .coerce import TZ as TZ_ICT  # noqa: E402
+from .schemas import (CURATED, DATASETS, PG_SCHEMA, POSTGRES, PRIVATE_NAMES, PUBLIC_DATASETS, SHEET_TZ,  # noqa: E402
+                      Curated, Dataset, Kind)
+from .coerce import PHONE_MASK, PHONE_PATTERN, TZ as TZ_ICT  # noqa: E402
 
 S = PG_SCHEMA
 INBOX = f"{S}.ingest_inbox"
@@ -58,11 +59,11 @@ KEEP_DRAINED = timedelta(days=3)
 KEEP_DELIVERIES = timedelta(days=30)  # longer than any bot retry
 # Datasets whose stored inbox row is replaced by a newer version of the same key (no raw history:
 # the drain must apply the latest edit, not the first one).
-REPLACEABLE = tuple(n for n, d in DATASETS.items() if not d.raw)
+REPLACEABLE = tuple(n for n, d in PUBLIC_DATASETS.items() if not d.raw)
 # Raw datasets with a curated table: prune keeps each pruned key's payload hash in ingest_seen, so a
 # key resent with other values is still refused once its inbox row is gone (raw keeps the first
 # version and would never take the change; curated alone would diverge from raw).
-SEEN_GUARDED = tuple(n for n, d in DATASETS.items() if d.raw and n in CURATED)
+SEEN_GUARDED = tuple(n for n, d in PUBLIC_DATASETS.items() if d.raw and n in CURATED)
 CLOSED_STATES = ("closed", "done", "resolved", "archived", "dismissed")  # same list as serve_sheet
 
 # Python's str.strip() whitespace set, so SQL trims exactly what coerce.raw_text trims.
@@ -125,6 +126,18 @@ language sql immutable parallel safe set search_path = pg_catalog, {S} as $f$
   select encode(sha256(convert_to(p_dataset || chr(30)
            || coalesce((select string_agg({S}._raw_text(r -> k), chr(31) order by i)
                         from unnest(p_keys) with ordinality u(k, i)), ''), 'UTF8')), 'hex')
+$f$;
+
+-- Twin of coerce.mask_phones (same pattern text): phone numbers in free text become "[phone]".
+create or replace function {S}._mask_phones(t text) returns text language sql immutable parallel safe
+set search_path = pg_catalog as $f$
+  select regexp_replace(t, {_lit(PHONE_PATTERN)}, {_lit(PHONE_MASK)}, 'g')
+$f$;
+create or replace function {S}._mask_row(r jsonb, p_cols text[]) returns jsonb language sql immutable parallel safe
+set search_path = pg_catalog, {S} as $f$
+  select coalesce(jsonb_object_agg(k, case when k = any(p_cols) and jsonb_typeof(v) = 'string'
+                                           then to_jsonb({S}._mask_phones(v #>> '{{}}')) else v end), '{{}}'::jsonb)
+  from jsonb_each(r) e(k, v)
 $f$;
 
 create or replace function {S}._c_text(v jsonb) returns text language sql immutable parallel safe
@@ -196,8 +209,9 @@ end $f$;
 """
 
 
-def _cast(expr: str, kind: Kind) -> str:
-    return f"{S}._c_{'text' if kind == 'str' else kind}({expr})"
+def _cast(expr: str, kind: Kind, empty_ok: bool = False) -> str:
+    out = f"{S}._c_{'text' if kind == 'str' else kind}({expr})"
+    return f"coalesce({out}, '')" if empty_ok else out
 
 
 def _inbox_table() -> str:
@@ -242,7 +256,7 @@ def _upsert_fn(c: Curated) -> str:
     ds = c.source
     cols = [n for n, _ in c.data_columns]
     joined = {n for n, _, _ in c.joined}
-    src = [f"{_cast(f'r.j -> {_lit(n)}', k)} as {n}" for n, k in ds.columns]
+    src = [f"{_cast(f'r.j -> {_lit(n)}', k, n in ds.empty_ok)} as {n}" for n, k in ds.columns]
     for n, k, from_col in c.joined:
         src.append(f"{_cast(f'f.row -> {_lit(from_col)}', k)} as {n}")
     feed = ""
@@ -305,9 +319,9 @@ revoke all on function {S}._ingest_upsert_{c.table}(jsonb, text) from public;
 
 def _ingest_fn() -> str:
     meta = []
-    for n, d in DATASETS.items():
+    for n, d in PUBLIC_DATASETS.items():
         meta.append(f"    when {_lit(n)} then cols := {_arr(d.names)}; keys := {_arr(d.key)}; "
-                    f"req := {_arr(d.required_columns)};")
+                    f"req := {_arr(d.required_columns)}; mask := {_arr(d.mask_phone)};")
     upserts = "\n".join(f"    when {_lit(t)} then up := {S}._ingest_upsert_{t}(good, 'ingest-' || p_run_id);"
                         for t in CURATED)
     # Config rows are applied by SQL only (the drain never re-upserts them), so a typed value the SQL
@@ -323,10 +337,16 @@ def _ingest_fn() -> str:
 create or replace function {S}.ingest(p_dataset text, p_rows jsonb, p_run_id text) returns jsonb
 language plpgsql security definer set search_path = pg_catalog, {S} as $f$
 declare
-  cols text[]; keys text[]; req text[];
+  cols text[]; keys text[]; req text[]; mask text[];
   r jsonb; i int := 0; n int; bad text[]; nested text[]; blank text[]; untyped text[]; rk text; seen text;
   ins int := 0; skipped int := 0; errors jsonb := '[]'::jsonb; good jsonb := '[]'::jsonb; up jsonb;
 begin
+  -- The owner's own account data never enters this schema's inbox: it has its own door.
+  if p_dataset = any({_arr(PRIVATE_NAMES)}) then
+    return jsonb_build_object('inserted', 0, 'skipped', 0, 'upserted', null, 'errors',
+      jsonb_build_array(jsonb_build_object('row', null, 'dataset', p_dataset,
+        'error', 'private dataset: call x_intel_private.ingest() instead; nothing stored')));
+  end if;
   case p_dataset
 {chr(10).join(meta)}
     else
@@ -366,6 +386,9 @@ begin
     if cardinality(blank) > 0 then
       errors := errors || jsonb_build_object('row', i, 'error', 'key column is blank', 'columns', to_jsonb(blank));
       continue;
+    end if;
+    if cardinality(mask) > 0 then
+      r := _mask_row(r, mask);  -- phone numbers never reach the inbox, raw or curated
     end if;
     if p_dataset = any({_arr(REPLACEABLE)}) then
       case p_dataset
@@ -476,9 +499,12 @@ def _views() -> str:
 
 
 def _grants() -> str:
-    """EXECUTE / SELECT for the connector role ``postgres`` only; nothing for anon or authenticated."""
+    """EXECUTE / SELECT for the connector role ``postgres`` only; nothing for anon or authenticated.
+    ``postgres`` may read the read views and drain_log (counts only)."""
     fns = [f"{S}.ingest(text, jsonb, text)"]
-    rels = [INBOX, f"{S}.ingest_deliveries", f"{S}.ingest_seen", f"{S}.v_query_plan_sheet", f"{S}.v_watchlist_sheet", f"{S}.v_claims_open"]
+    readable = [f"{S}.v_query_plan_sheet", f"{S}.v_watchlist_sheet", f"{S}.v_claims_open", f"{S}.drain_log"]
+    others = [c.qualified for c in CURATED.values() if c.qualified not in readable]
+    rels = [INBOX, f"{S}.ingest_deliveries", f"{S}.ingest_seen"] + readable + others
     revoke = "\n".join(
         f"  if exists (select 1 from pg_roles where rolname = {_lit(role)}) then\n"
         + "".join(f"    revoke all on function {f} from {role};\n" for f in fns)
@@ -487,7 +513,7 @@ def _grants() -> str:
     grant = ("  if exists (select 1 from pg_roles where rolname = 'postgres') and current_user <> 'postgres' then\n"
              f"    grant usage on schema {S} to postgres;\n"  # do not rely on postgres being a member of x_lake
              + "".join(f"    grant execute on function {f} to postgres;\n" for f in fns)
-             + "".join(f"    grant select on {r} to postgres;\n" for r in rels[3:])  # the views only
+             + "".join(f"    grant select on {r} to postgres;\n" for r in readable)
              + "  end if;")
     return f"do $$ begin\n{revoke}\n{grant}\nend $$;\n"
 
@@ -523,14 +549,22 @@ def try_lock(conn: Any) -> bool:
 
 
 def undrained(conn: Any) -> list[tuple[int, str, dict[str, Any], datetime]]:
+    return _undrained(conn, INBOX, list(PUBLIC_DATASETS))
+
+
+def _undrained(conn: Any, inbox: str, names: list[str]) -> list[tuple[int, str, dict[str, Any], datetime]]:
+    """Undrained rows of datasets this build accepts. A row of a dataset switched off (rollback switch)
+    stays in the inbox untouched until the switch is back on."""
     with conn.cursor() as c:
-        c.execute(f"select id, dataset, row, received_at from {INBOX} where drained_at is null order by id")
+        c.execute(f"select id, dataset, row, received_at from {inbox} where drained_at is null "
+                  "and dataset = any(%s) order by id", (names,))
         rows = [(int(i), str(d), dict(r), ra) for i, d, r, ra in c.fetchall()]
     conn.commit()
     return rows
 
 
-def drain(conn: Any, *, store: Any, prefix: str, cfg: Any = None, now: datetime | None = None) -> dict[str, Any]:
+def drain(conn: Any, *, store: Any, prefix: str, cfg: Any = None, now: datetime | None = None,
+          inbox: str = INBOX, names: list[str] | None = None) -> dict[str, Any]:
     """Undrained inbox rows -> append_rows (R2 raw + curated) -> mark drained. Counts only in the result.
 
     Config datasets (no raw) are NOT upserted again: ingest() already applied them, and re-applying a
@@ -542,7 +576,7 @@ def drain(conn: Any, *, store: Any, prefix: str, cfg: Any = None, now: datetime 
     from .coerce import type_row
 
     now = now or datetime.now(timezone.utc)
-    pending = undrained(conn)
+    pending = undrained(conn) if inbox == INBOX and names is None else _undrained(conn, inbox, list(names or []))
     if not pending:
         return {"rows": 0, "marked": 0, "superseded": 0, "unmarked": 0, "datasets": {}, "batch_id": None,
                 "config_coerce_errors": {}}
@@ -562,14 +596,14 @@ def drain(conn: Any, *, store: Any, prefix: str, cfg: Any = None, now: datetime 
         report = append_rows(dict(by_ds), cfg=cfg, store=store, prefix=prefix, conn=conn, now=now)
     with conn.cursor() as c:
         # Matching received_at too: a config row replaced after it was read stays undrained.
-        c.execute(f"update {INBOX} i set drained_batch_id = %s, drained_at = %s "
+        c.execute(f"update {inbox} i set drained_batch_id = %s, drained_at = %s "
                   "from unnest(%s::bigint[], %s::timestamptz[]) u(id, ra) "
                   "where i.id = u.id and i.received_at = u.ra and i.drained_at is null",
                   (report["batch_id"], now, [d[0] for d in done], [d[1] for d in done]))
         marked = c.rowcount
         # A config row ingest() replaced while the drain ran is superseded, not lost: its newer
         # version stays undrained for the next run (the received_at check above skipped it).
-        c.execute(f"select count(*) from {INBOX} i join unnest(%s::bigint[], %s::timestamptz[]) u(id, ra) "
+        c.execute(f"select count(*) from {inbox} i join unnest(%s::bigint[], %s::timestamptz[]) u(id, ra) "
                   "on i.id = u.id where i.drained_at is null and i.received_at <> u.ra",
                   ([d[0] for d in done], [d[1] for d in done]))
         superseded = int(c.fetchone()[0])
@@ -603,30 +637,50 @@ def reapply_config(conn: Any, since: datetime) -> dict[str, Any]:
     return out
 
 
-def landed(conn: Any, store: Any, prefix: str, since: datetime) -> dict[str, int]:
+def landed(conn: Any, store: Any, prefix: str, since: datetime, inbox: str = INBOX) -> dict[str, int]:
     """Raw datasets: inbox rows drained since ``since`` whose row_key is missing from R2 (must be 0)."""
     import io
 
     import pyarrow.parquet as pq
 
-    from .lake import PART, _join
+    from .lake import PART, raw_dir
 
     with conn.cursor() as c:
-        c.execute(f"select dataset, row_key from {INBOX} where drained_at >= %s", (since,))
+        # identifiers are module constants; values are bound parameters
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
+        c.execute(f"select dataset, row_key from {inbox} where drained_at >= %s", (since,))
         keys: dict[str, set[str]] = defaultdict(set)
         for ds, rk in c.fetchall():
-            if DATASETS[ds].raw:
+            if ds in DATASETS and DATASETS[ds].raw:
                 keys[ds].add(rk)
     conn.commit()
     out = {}
     for ds, want in keys.items():
         have: set[str] = set()
-        for key in store.list(_join(prefix, "raw", ds) + "/"):
+        for key in store.list(raw_dir(prefix, DATASETS[ds]) + "/"):
             if PART.search(key):
                 have.update(pq.read_table(io.BytesIO(store.read(key)), columns=["_row_key"])
                             .column("_row_key").to_pylist())
         out[ds] = len(want - have)
     return out
+
+
+def record_drain(conn: Any, *, batch_id: str, started_at: datetime, source: str, rows_by_dataset: dict[str, int],
+                 raw_written: dict[str, int], curated: dict[str, Any], coerce_errors: dict[str, Any],
+                 missing_from_raw: dict[str, int], ok: bool) -> None:
+    """One x_intel.drain_log row per drain run. Dataset names and counts only (never row content)."""
+    def counts(obj: Any) -> Any:  # nested dicts of ints only; anything else is dropped
+        if isinstance(obj, dict):
+            return {str(k): counts(v) for k, v in obj.items() if isinstance(v, (dict, int)) and not isinstance(v, bool)}
+        return int(obj)
+
+    with conn.cursor() as c:
+        c.execute(f"insert into {S}.drain_log (batch_id, started_at, source, rows_by_dataset, raw_written, curated, "
+                  "coerce_errors, missing_from_raw, ok) values (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                  "on conflict (batch_id) do nothing",
+                  (batch_id, started_at, source, *(json.dumps(counts(x)) for x in
+                   (rows_by_dataset, raw_written, curated, coerce_errors, missing_from_raw)), ok))
+    conn.commit()
 
 
 def prune(conn: Any, now: datetime | None = None) -> int:
@@ -651,7 +705,7 @@ def stored_dates(store: Any, prefix: str) -> dict[str, dict[str, Any]]:
 
     out: dict[str, dict[str, Any]] = {}
     for n, ds in DATASETS.items():
-        if ds.raw and ds.ingest_ts is None and n != "x_post_context":  # context is dated by its post
+        if ds.sheet and ds.raw and ds.ingest_ts is None and n != "x_post_context":  # context: dated by its post
             tbl = read_dataset(store, prefix, ds)
             out[n] = ({} if tbl is None else
                       dict(zip(tbl.column("_row_key").to_pylist(), tbl.column("_partition_date").to_pylist())))
@@ -681,6 +735,8 @@ def compare(conn: Any, sheet_typed: dict[str, list[Any]], window_start: datetime
     feed_ts = {k: v.get("collected_at") for k, v in feed_index(sheet_typed.get("x_feed", [])).items()}
     out: dict[str, dict[str, int]] = {}
     for n, ds in DATASETS.items():
+        if not ds.sheet:
+            continue  # bot-only datasets have no Sheet tab to compare with
         rows = sheet_typed.get(n, [])
         sheet_keys = {r.row_key for r in rows}
         mine = [(rk, row, ra) for d, rk, row, ra in inbox if d == n]
@@ -730,11 +786,12 @@ def main(argv: list[str] | None = None) -> int:
         ensure_inbox(conn)
     finally:
         conn.close()
-    print("applied: x_intel.ingest_inbox, x_intel.ingest(), read views, grants")
+    print("applied: x_intel.ingest_inbox, x_intel.ingest(), read views, grants (private schema: python -m x_lakehouse.private)")
     return 0
 
 
-__all__ = ["POSTGRES", "compare", "reapply_config", "stored_dates", "drain", "ensure_inbox", "inbox_ddl", "landed", "prune", "try_lock"]
+__all__ = ["POSTGRES", "compare", "reapply_config", "record_drain", "stored_dates", "drain", "ensure_inbox", "inbox_ddl",
+           "landed", "prune", "try_lock"]
 
 if __name__ == "__main__":
     sys.exit(main())
