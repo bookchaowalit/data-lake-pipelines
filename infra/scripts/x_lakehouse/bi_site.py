@@ -120,7 +120,7 @@ def add_feed(snap: Snapshot, feed: Any, denylist: Sequence[str]) -> None:
         if any_term(p, denylist):
             held += 1
         else:
-            posts.append(p)
+            posts.append({k: v for k, v in p.items() if k != "_screen"})
     snap.feed = posts[:TOP_POSTS]
     snap.feed_watches = [(w, n) for w, n in feed.watches if not contains_term(w, denylist)][:15]
     snap.feed_window = (feed.start, feed.end)

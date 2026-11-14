@@ -10,7 +10,9 @@ an AI call and without a new curated table (RAW-ONLY rule, 2026-11-12):
 * ``engagement`` = likes + 2 x reposts + replies (views break ties), the ranking every reader uses;
 * per watch (``watch_type:watch_value``), the distinct posts it saw.
 
-Callers screen the rows against the client denylist themselves (digest / site); the Sheet tab is the
+Callers screen the rows against the client denylist themselves (digest / site), on the whole post dict:
+``_screen`` carries every raw field of every observation of the post (_extra, _coerce_errors, the other
+watches' values), so a client term outside COLUMNS still withholds the post. The Sheet tab is the
 owner's own and is not screened, like the Signals tab before it.
 """
 
@@ -89,6 +91,7 @@ def summarise(rows: list[dict[str, Any]], start: datetime, end: datetime) -> Fee
     """``rows``: raw x_feed rows (dicts). Keeps rows collected in [start, end) with a post_id."""
     newest: dict[str, dict[str, Any]] = {}
     seen_by: dict[str, set[str]] = defaultdict(set)
+    raw_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
     n = 0
     for r in rows:
         pid, at = r.get("post_id"), r.get("collected_at")
@@ -96,6 +99,7 @@ def summarise(rows: list[dict[str, Any]], start: datetime, end: datetime) -> Fee
             continue
         n += 1
         seen_by[pid].add(watch_label(r))
+        raw_rows[pid].append(r)
         cur = newest.get(pid)
         if cur is None or at > cur["collected_at"]:
             newest[pid] = r
@@ -104,6 +108,9 @@ def summarise(rows: list[dict[str, Any]], start: datetime, end: datetime) -> Fee
         row = {c: r.get(c) for c in COLUMNS}
         row["watches"] = len(seen_by[pid])
         row["engagement"] = engagement(r)
+        # Every field of every observation (_extra, _coerce_errors, other watches' values, ...), for the
+        # denylist screen in the digest and the site: a client term outside COLUMNS still withholds the post.
+        row["_screen"] = raw_rows[pid]
         posts.append(row)
     posts.sort(
         key=lambda p: (
@@ -126,7 +133,7 @@ def load(store: Any, prefix: str, start: datetime, end: datetime) -> FeedWindow:
     rows = (
         []
         if tbl is None
-        else tbl.select([c for c in COLUMNS if c in tbl.column_names]).to_pylist()
+        else tbl.to_pylist()  # all columns: summarise keeps them in _screen for the denylist
     )
     return summarise(rows, start, end)
 

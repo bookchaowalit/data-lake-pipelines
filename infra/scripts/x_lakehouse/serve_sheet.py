@@ -118,8 +118,14 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     cfg = Config()
     conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
+    feed, feed_failed = None, False
     try:
-        views = fetch(conn, feed_window(cfg))
+        feed = feed_window(cfg)
+    except Exception as exc:  # noqa: BLE001 - the Postgres tabs are still refreshed; the run reports it
+        print(f"!! {SERVE_TABS['x_feed']}: lake read failed ({type(exc).__name__}); skipped", file=sys.stderr)
+        feed_failed = True
+    try:
+        views = fetch(conn, feed)
     finally:
         conn.close()
     for tab, (header, rows) in views.items():
@@ -142,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             w.replace_body(tab, rows)
             print(f"wrote {tab}: {len(rows)} rows")
-    return 1 if skipped else 0  # a stale view must not look like a successful refresh
+    return 1 if skipped or feed_failed else 0  # a stale view must not look like a successful refresh
 
 
 if __name__ == "__main__":

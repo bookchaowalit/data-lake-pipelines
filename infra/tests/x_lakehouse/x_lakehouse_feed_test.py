@@ -224,6 +224,16 @@ class DigestTests(unittest.TestCase):
         )
         self.assertEqual(answer["opportunities"][0]["link"], "https://x.com/a/status/2")
 
+    def test_a_client_term_outside_the_shown_columns_still_withholds_the_post(self):
+        # Codex P1 2026-11-14: _extra / _coerce_errors / another watch's value must be screened too.
+        t = START + timedelta(hours=1)
+        f = self.facts([{**row("1", t, likes=9), "_extra": '{"note": "for Acme Corp"}'},
+                        row("2", t, likes=5), row("2", t + timedelta(hours=1), watch=("account", "AcmeCorp")),  # skeleton match
+                        {**row("2", t + timedelta(hours=2)), "watch_value": "duckdb"},
+                        row("3", t, likes=1), {**row("3", t + timedelta(minutes=5)), "_coerce_errors": "ACME CORP"}])
+        self.assertEqual(f.feed_top, [])
+        self.assertEqual(f.withheld, 3)  # 1: _extra, 2: an older observation's watch, 3: _coerce_errors
+
     def test_render_without_signals_shows_the_feed(self):
         f = self.facts(
             [row("2", START + timedelta(hours=1), likes=5, text="duckdb 2.0 <b>")]
@@ -237,6 +247,26 @@ class DigestTests(unittest.TestCase):
 
     def test_empty_feed_and_no_signals_is_the_short_note(self):
         self.assertIn("ยังไม่มีสัญญาณใหม่", digest.render(self.facts([]), None))
+
+
+class ServeFailureTests(unittest.TestCase):
+    def test_a_lake_failure_skips_the_feed_tab_and_fails_the_refresh(self):
+        from unittest import mock
+
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        fake = mock.MagicMock()
+        with mock.patch.object(serve_sheet.cur, "connect", return_value=fake), \
+                mock.patch.object(serve_sheet, "feed_window", side_effect=OSError("r2 down")), \
+                mock.patch.object(serve_sheet, "fetch", return_value={}) as fetch, \
+                mock.patch.dict("os.environ", {"X_LAKE_DB_URL": "x"}):
+            err, out = io.StringIO(), io.StringIO()
+            with redirect_stderr(err), redirect_stdout(out):
+                code = serve_sheet.main([])
+        self.assertEqual(fetch.call_args.args[1], None)
+        self.assertIn("lake read failed (OSError)", err.getvalue())
+        self.assertEqual(code, 0)  # dry run: nothing written, nothing stale
 
 
 class SiteTests(unittest.TestCase):
