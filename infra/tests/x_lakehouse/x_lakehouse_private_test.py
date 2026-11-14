@@ -123,6 +123,17 @@ def row(ds: str, i: int = 0, **kw: object) -> dict[str, object]:
 
 
 class OfflineTests(unittest.TestCase):
+    def test_repulled_bot_datasets_carry_their_partition_time_in_the_key(self):
+        # Raw checks keys only inside one day partition (the ICT date of ingest_ts). A public bot-only
+        # dataset without an ingest_seen guard, or one pulled again every run, must therefore have
+        # ingest_ts in its key, or a row seen again on a later day lands twice under one _row_key.
+        for name in NEW_PUBLIC_NAMES:
+            ds = DATASETS[name]
+            if ds.ingest_ts is not None and name not in inbox.SEEN_GUARDED:
+                self.assertIn(ds.ingest_ts, ds.key, name)
+        for name in ("x_post_engagers", "x_own_likes", "x_news", "x_bookmark_folders"):
+            self.assertIn("collected_at", DATASETS[name].key, name)
+
     def test_load_of_bot_only_datasets_never_touches_the_sheet(self):
         # validate --datasets x_bookmarks --raw-only must work without a Google credential.
         from x_lakehouse import backfill

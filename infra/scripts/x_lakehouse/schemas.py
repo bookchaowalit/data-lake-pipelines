@@ -318,14 +318,16 @@ X_LIST_SOURCES = Dataset(
 # ------------------------------------------------- more bot-only datasets (owner 2026-11-14, raw only)
 # No writer spec: kinds follow the X API v2 objects the bots read. Proposed contract v1; a column the
 # writer sends that is not here is refused by ingest() ("unknown columns"), never dropped silently.
-# Who quoted, reposted or liked a top post (Chief Data caps it at ~10 calls a day). An engagement is
-# observed once: the first version wins (raw is insert-only by key).
+# Who quoted, reposted or liked a top post (Chief Data caps it at ~10 calls a day). One row per pull:
+# raw is partitioned by collected_at and only checks keys inside a partition, so collected_at must be
+# in the key (an engagement seen again on another day is a new version, not a duplicate key). A
+# reader takes the earliest collected_at per (post_id, engagement, user_id).
 X_POST_ENGAGERS = Dataset(
     "x_post_engagers", "",
     _cols("post_id:str engagement:str user_id:str user_handle:str user_name:str user_followers:int "
           "user_verified:bool collected_at:ts engaged_at:ts quote_post_id:str quote_text:str "
           "quote_likes:int query_id:str filter_flags:str"),
-    key=("post_id", "engagement", "user_id"),
+    key=("post_id", "engagement", "user_id", "collected_at"),
     ingest_ts="collected_at",
     sheet=False, mask_phone=("quote_text",),
     notes="engagement: quote / repost / like; engaged_at only for quotes (X gives no time for likes or reposts)",
@@ -340,15 +342,16 @@ X_NEWS = Dataset(
     sheet=False, mask_phone=("headline", "summary"),
     notes="keywords and post_ids are '; '-joined lists (ingest() refuses nested values)",
 )
-# Private: posts the owner's accounts liked, and their bookmark folders.
+# Private: posts the owner's accounts liked, and their bookmark folders. A like is pulled again every
+# run with fresh counts, so collected_at is in the key (same reason as x_post_engagers).
 X_OWN_LIKES = Dataset(
     "x_own_likes", "",
     _cols("post_id:str own_handle:str collected_at:ts posted_at:ts author_handle:str author_id:str text:str "
           "lang:str likes:int reposts:int replies:int quotes:int views:int url:str filter_flags:str"),
-    key=("post_id", "own_handle"),
+    key=("post_id", "own_handle", "collected_at"),
     ingest_ts="collected_at",
     privacy="private", sheet=False, mask_phone=("text",),
-    notes="X gives no liked-at time: collected_at of the first pull that saw the like",
+    notes="X gives no liked-at time: the earliest collected_at per (post_id, own_handle) is the first pull that saw it",
 )
 # A folder list per account per pull (the folder's posts are x_bookmarks rows with its folder_id).
 X_BOOKMARK_FOLDERS = Dataset(

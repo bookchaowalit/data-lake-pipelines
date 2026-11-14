@@ -32,9 +32,9 @@ checks them in raw only. `bot_sql.HEADERS` holds their column order (= the contr
 | `x_spaces` | public | `space_id, collected_at` | `raw/` | one row per key |
 | `x_communities` | public | `community_id, snapshot_date` | `raw/` | one row per key |
 | `x_list_sources` | public | `list_id, verified_at` | `raw/` | the newest `verified_at` per `list_id` |
-| `x_post_engagers` | public | `post_id, engagement, user_id` | `raw/` | one row per key (first pull wins) |
+| `x_post_engagers` | public | `post_id, engagement, user_id, collected_at` | `raw/` | the earliest `collected_at` per `(post_id, engagement, user_id)` |
 | `x_news` | public | `story_id, collected_at` | `raw/` | the newest `collected_at` per `story_id` |
-| `x_own_likes` | private | `post_id, own_handle` | `private/raw/` | one row per key |
+| `x_own_likes` | private | `post_id, own_handle, collected_at` | `private/raw/` | the earliest `collected_at` per `(post_id, own_handle)` (newest for the counts) |
 | `x_bookmark_folders` | private | `folder_id, own_handle, collected_at` | `private/raw/` | the newest `collected_at` per `(folder_id, own_handle)` |
 
 **Added 2026-11-14 (owner: "everything Chief Data pulls goes to the lake").** Chief Data started
@@ -44,7 +44,9 @@ for them: `x_post_engagers` (who quoted, reposted or liked a top post), `x_news`
 the columns are a **proposed v1** from the X API v2 objects, so the writer must send exactly these
 column names (a different name is refused as `unknown columns`, nothing is dropped silently). List
 values (`x_news.keywords`, `x_news.post_ids`) are `; `-joined text, since ingest() refuses nested
-values. Replies, full-archive and X Lists posts are ordinary posts and go to `x_feed` with their
+values. Raw checks keys only inside a day partition (the partition is the ingest timestamp's ICT
+date), so these four carry `collected_at` in the key: the same engagement or like seen again on a
+later day is a new version, never a duplicate key or a refused "changed values" row. Replies, full-archive and X Lists posts are ordinary posts and go to `x_feed` with their
 source in `watch_type` / `watch_value`; they need no dataset of their own.
 
 The version columns sit in the raw key (`x_bookmarks`, `x_list_sources`), so a re-seen or removed
