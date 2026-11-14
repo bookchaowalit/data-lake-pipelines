@@ -36,12 +36,12 @@ signal of what Thai and English readers look up.
 - Counts are aggregates, so there is no personal data. Titles of articles about living people are
   public encyclopaedia titles. `privacy_class=public`, and the licence `CC0-1.0` is stored in the
   metadata.
-- **Idempotence**: there is one ranking per `view_date`. After a write, a marker `control/state/source=wikimedia/dataset=wiki_top_articles/view_date=D.json` stops any later run for that day (even one with revised numbers) before it fetches.
-- **Cost**: 1 object and 3 R2 Class A writes per run, under 100 KB.
+- **Idempotence**: there is one ranking per `view_date`. After a write, a marker `control/state/source=wikimedia/dataset=wiki_top_articles/view_date=D.json` stops any later run for that day (even one with revised numbers) before it fetches. The fetched ranking is first checkpointed at `.../view_date=D.snapshot.json`; if the marker write fails after Bronze is written, the retry ingests that same snapshot (same batch) instead of fetching again.
+- **Cost**: 2 objects (Bronze + snapshot checkpoint) and 4 R2 Class A writes per run, under 200 KB.
 
 ## Failure and heartbeat
 
-- Exit `0` means ok. Exit `2` covers an API error, an empty ranking or an unexpected response shape,
+- Exit `0` means ok. Exit `2` covers an API error, an empty ranking, an unexpected response shape, a missing or non-integer `rank`/`views` (rank ≥ 1, views ≥ 0),
   an empty or local lake URI with `--require-cloud`, and a bad `--date`. The public log shows only
   the exception type.
 - Heartbeat `wiki-pageviews` goes to `monitor.bookchaowalit.com`, which alerts after 26 h without a run.
@@ -52,6 +52,8 @@ signal of what Thai and English readers look up.
 - the top-N per project and the URL shape
 - the namespace flag
 - the error on an empty ranking or a bad response shape
+- the error on a missing or malformed `rank`/`views`
 - the host pin
 - that a same-day re-run writes nothing
+- that a retry after a failed marker write reuses the snapshot and writes no second batch
 - the exit codes

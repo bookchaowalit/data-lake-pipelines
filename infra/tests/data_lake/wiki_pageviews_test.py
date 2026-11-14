@@ -78,6 +78,25 @@ class CollectTests(unittest.TestCase):
         with self.assertRaises(WikimediaError):
             collect(lambda url: bad, DAY, pause=0)
 
+    def test_missing_or_bad_rank_or_views_is_an_error(self):
+        for bad in (
+            {"views": None},
+            {"rank": None},
+            {"views": "12"},
+            {"rank": True},
+            {"views": -1},
+            {"rank": 0},
+        ):
+            body = ranking(5)
+            first = body["items"][0]["articles"][0]
+            for key, value in bad.items():
+                if value is None:
+                    del first[key]
+                else:
+                    first[key] = value
+            with self.subTest(bad=bad), self.assertRaises(WikimediaError):
+                collect(lambda url, body=body: body, DAY, pause=0)
+
     def test_fetch_refuses_other_hosts(self):
         fetch = http_fetch()
         for url in ("file:///etc/passwd", "https://evil.example/api"):
@@ -104,6 +123,35 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(len(list(Path(tmp).rglob("*.parquet"))), 1)
             self.assertTrue(
                 capture(FakeApi(), tmp, day=date(2026, 11, 11), pause=0)["new"]
+            )
+
+    def test_marker_write_failure_retry_reuses_the_same_snapshot(self):
+        from unittest import mock
+
+        from data_lake.storage import ObjectStore
+
+        real_put = ObjectStore.put_bytes
+
+        def put_failing_marker(self, key, data, **kw):
+            if key.endswith(f"view_date={DAY.isoformat()}.json"):
+                raise OSError("marker write failed")
+            return real_put(self, key, data, **kw)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ObjectStore, "put_bytes", put_failing_marker):
+                with self.assertRaises(OSError):
+                    capture(FakeApi(), tmp, day=DAY, pause=0)
+            revised = FakeApi(n=180)  # the API answers differently on the retry
+            retry = capture(revised, tmp, day=DAY, pause=0)
+            self.assertEqual(retry["status"], "captured")
+            self.assertFalse(
+                retry["new"]
+            )  # the Bronze batch from the first try is reused
+            self.assertEqual(retry["records"], 2 * TOP_N)
+            self.assertEqual(revised.calls, [])
+            self.assertEqual(len(list(Path(tmp).rglob("*.parquet"))), 1)
+            self.assertEqual(
+                capture(FakeApi(), tmp, day=DAY, pause=0)["status"], "exists"
             )
 
     def test_errors_exit_2(self):

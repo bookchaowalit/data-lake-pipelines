@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeGuard
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = ROOT / "infra" / "scripts"
@@ -93,6 +93,10 @@ def collect(
             if not isinstance(item, dict) or not item.get("article"):
                 continue
             title = str(item["article"])
+            rank, views = item.get("rank"), item.get("views")
+            # A malformed ranking must fail before Bronze or the marker close the day for good.
+            if not _count(rank) or rank < 1 or not _count(views):
+                raise WikimediaError(f"bad rank or views for {project}")
             rows.append(
                 {
                     "id": f"{project}:{title}@{day.isoformat()}",
@@ -100,8 +104,8 @@ def collect(
                     "article": title,
                     "namespace_page": ":"
                     in title,  # Special:, Wikipedia: and similar, kept but flagged
-                    "rank": item.get("rank"),
-                    "views": item.get("views"),
+                    "rank": rank,
+                    "views": views,
                     "view_date": day.isoformat(),
                 }
             )
@@ -110,8 +114,17 @@ def collect(
     return rows
 
 
+def _count(value: Any) -> TypeGuard[int]:
+    """A non-negative int (bool is an int subclass, so it is refused explicitly)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _marker_key(day: date) -> str:
     return f"control/state/source={SOURCE}/dataset={DATASET}/view_date={day.isoformat()}.json"
+
+
+def _snapshot_key(day: date) -> str:
+    return f"control/state/source={SOURCE}/dataset={DATASET}/view_date={day.isoformat()}.snapshot.json"
 
 
 def capture(
@@ -138,9 +151,22 @@ def capture(
                 "new": False,
                 "manifest_key": done.get("manifest_key"),
             }
-    rows = collect(fetch, day, pause=pause)
     if dry_run:
+        rows = collect(fetch, day, pause=pause)
         return {"status": "dry-run", "view_date": day.isoformat(), "records": len(rows)}
+    # The fetched ranking is checkpointed before Bronze is written. If the marker write below fails,
+    # a retry ingests this same snapshot (same content, same batch) instead of a re-fetch whose
+    # revised numbers would add a second ranking for the day.
+    snapshot = _snapshot_key(day)
+    try:
+        rows = json.loads(store.get_bytes(snapshot))
+    except ObjectNotFound:
+        rows = collect(fetch, day, pause=pause)
+        store.put_bytes(
+            snapshot,
+            canonical_json(rows).encode("utf-8"),
+            content_type="application/json",
+        )
     result = ingest_records(
         rows,
         source=SOURCE,
