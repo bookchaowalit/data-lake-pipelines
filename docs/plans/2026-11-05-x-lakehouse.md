@@ -73,7 +73,9 @@ X Feed / 317 context / 20 trends TH / 174 signals rows, validate ok; Railway one
    door `x_intel_private.ingest()`, inbox in schema `x_intel_private`, raw under
    `<prefix>/private/`, never served; `x_intel.ingest()` refuses them) and `x_spaces`,
    `x_communities`, `x_list_sources` (public inbox, normal raw path, not served). All seven are raw
-   only: no curated table. Phone numbers in their text become `[phone]`. Limit: bots on the
+   only: no curated table. Phone numbers in their text become `[phone]`. Four more, raw only too
+   (2026-11-14): `x_post_engagers`, `x_news` (public) and `x_own_likes`, `x_bookmark_folders`
+   (private). Limit: bots on the
    `postgres` role may still bypass RLS on the private inbox (spec §2).
 10. **Section 8: dropped (owner 2026-11-12, raw only).** The prompt's small curated tables
     (`x_trends_th`, `x_trends_intl`, `x_topic_counts`, `x_account_snapshots`, `alpha_feed`) and the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the seven bot-only datasets (raw only), the private inbox, the section-8 datasets staying
+"""Tests for the bot-only datasets (raw only), the private inbox, the section-8 datasets staying
 raw-only and x_intel.drain_log (spec docs/specs/x-lake-private-datasets.md; acceptance P1-P9, I1-I7, R5,
 S1-S5, S8).
 
@@ -93,6 +93,18 @@ def row(ds: str, i: int = 0, **kw: object) -> dict[str, object]:
         "x_list_sources": {"list_id": str(1_500_000_000_000_000_000 + i), "name": f"synthetic list {i}",
                            "owner_handle": "synthetic_e", "member_count": 40, "follower_count": 5, "mapped_qid": "A93",
                            "members_hash": "0" * 16, "verified_at": ago(hours=2), "status": "ok"},
+        "x_post_engagers": {"post_id": str(1_400_000_000_000_000_000), "engagement": ("quote", "repost", "like")[i % 3],
+                            "user_id": str(500 + i), "user_handle": f"synthetic_f{i}", "user_followers": 12,
+                            "user_verified": False, "collected_at": ago(hours=1), "quote_text": f"synthetic quote {i}",
+                            "query_id": "A93"},
+        "x_news": {"story_id": f"synthetic-story-{i}", "collected_at": ago(hours=1), "headline": f"synthetic news {i}",
+                   "summary": "synthetic", "category": "Technology", "keywords": "AI; chips", "lang": "en",
+                   "post_ids": "1; 2", "post_count": 2, "query": "AI", "url": "https://x.com/i/news/1"},
+        "x_own_likes": {"post_id": str(1_300_000_000_000_000_000 + i), "own_handle": "bookchaowalit",
+                        "collected_at": ago(hours=1), "posted_at": ago(hours=5), "author_handle": "synthetic_g",
+                        "text": f"synthetic like {i}", "lang": "th", "likes": 7, "url": "https://x.com/s/2"},
+        "x_bookmark_folders": {"folder_id": f"{1_200_000_000_000_000_000 + i}", "own_handle": "bookchaowalit",
+                               "collected_at": ago(hours=1), "name": f"synthetic folder {i}", "post_count": 3},
         # Section-8 datasets (Sheet header names).
         "x_trends_th": {"snapshot_date": today_ict(), "snapshot_at": ago(hours=1), "rank": i + 1,
                         "trend_name": f"#synthetic{i}", "trend_type": "hashtag", "post_count": 1000},
@@ -111,6 +123,17 @@ def row(ds: str, i: int = 0, **kw: object) -> dict[str, object]:
 
 
 class OfflineTests(unittest.TestCase):
+    def test_repulled_bot_datasets_carry_their_partition_time_in_the_key(self):
+        # Raw checks keys only inside one day partition (the ICT date of ingest_ts). A public bot-only
+        # dataset without an ingest_seen guard, or one pulled again every run, must therefore have
+        # ingest_ts in its key, or a row seen again on a later day lands twice under one _row_key.
+        for name in NEW_PUBLIC_NAMES:
+            ds = DATASETS[name]
+            if ds.ingest_ts is not None and name not in inbox.SEEN_GUARDED:
+                self.assertIn(ds.ingest_ts, ds.key, name)
+        for name in ("x_post_engagers", "x_own_likes", "x_news", "x_bookmark_folders"):
+            self.assertIn("collected_at", DATASETS[name].key, name)
+
     def test_load_of_bot_only_datasets_never_touches_the_sheet(self):
         # validate --datasets x_bookmarks --raw-only must work without a Google credential.
         from x_lakehouse import backfill
