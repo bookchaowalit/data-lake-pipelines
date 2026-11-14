@@ -215,18 +215,22 @@ def _bi(cfg: Config) -> None:
         conn = cur.connect(cfg.require("X_LAKE_DB_URL"))
         try:
             ensure_marts(conn)  # the site reads the marts; do not rely on X_LAKE_DIGEST having created them
-            feed_win, feed_days, feed_error = None, None, None
+            feed_win, rows, chart, feed_error = None, None, None, None
             try:
+                from .coerce import TZ
                 from .lake import open_store
 
                 end = _hour()
+                # The chart shows CHART_DAYS whole ICT days ending on end's date: load exactly those.
+                first = (end.astimezone(TZ) - timedelta(days=bi_site.CHART_DAYS - 1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0)
+                chart = (first.astimezone(timezone.utc), end)
                 store, prefix = open_store(cfg)
-                rows = feed.load_rows(store, prefix, end - timedelta(days=bi_site.CHART_DAYS))
+                rows = feed.load_rows(store, prefix, chart[0])
                 feed_win = feed.summarise(rows, end - timedelta(days=serve_sheet.DAYS), end)
-                feed_days = feed.daily(rows, end - timedelta(days=bi_site.CHART_DAYS), end)
             except Exception as exc:  # noqa: BLE001 - the site still builds from the marts
-                feed_win, feed_days, feed_error = None, None, type(exc).__name__
-            snap = bi_site.load_snapshot(conn, denylist, feed_win, feed_days)
+                feed_win, rows, chart, feed_error = None, None, None, type(exc).__name__
+            snap = bi_site.load_snapshot(conn, denylist, feed_win, rows, chart)
         finally:
             conn.close()
         with tempfile.TemporaryDirectory(prefix="x-insights-") as tmp:

@@ -225,10 +225,13 @@ def add_feed(f: Facts, feed: Any, denylist: Sequence[str]) -> None:
             f.withheld += 1
             continue
         clean.append(p)
+    from .feed import watch_counts
+
+    watches = [(wl, n) for wl, n in watch_counts(clean) if not contains_term(wl, denylist)]
     f.feed_totals = {"posts": len(clean), "authors": len({(p["author_handle"] or "").lower() for p in clean
                                                           if p["author_handle"]}),
-                     "watches": len(feed.watches)}
-    f.feed_watches = [{"watch": wl, "posts": n} for wl, n in feed.watches if not contains_term(wl, denylist)][:8]
+                     "watches": len(watches)}
+    f.feed_watches = [{"watch": wl, "posts": n} for wl, n in watches][:8]
     f.feed_top = [_feed_post(p) for p in clean if p.get("post_url")][:top_n]
 
 

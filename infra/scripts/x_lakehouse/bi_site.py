@@ -84,7 +84,8 @@ def _rows(cur: Any, cols: Sequence[str]) -> list[dict[str, Any]]:
 
 
 def load_snapshot(conn: Any, denylist: Sequence[str], feed: Any = None,
-                  feed_daily: Sequence[dict[str, Any]] | None = None) -> Snapshot:
+                  daily_rows: Sequence[dict[str, Any]] | None = None,
+                  daily_window: tuple[datetime, datetime] | None = None) -> Snapshot:
     """Read the marts and screen them. ``denylist`` must be non-empty (digest.load_denylist fails closed)."""
     if not denylist:
         raise ValueError("client denylist is empty; the site is not built (fails closed)")
@@ -115,12 +116,13 @@ def load_snapshot(conn: Any, denylist: Sequence[str], feed: Any = None,
     conn.commit()
     snap = screen(Snapshot(as_of, newest, daily, ranked, claims, digests), denylist)
     if feed is not None:
-        add_feed(snap, feed, denylist, feed_daily)
+        add_feed(snap, feed, denylist, daily_rows, daily_window)
     return snap
 
 
 def add_feed(snap: Snapshot, feed: Any, denylist: Sequence[str],
-             daily: Sequence[dict[str, Any]] | None = None) -> None:
+             daily_rows: Sequence[dict[str, Any]] | None = None,
+             daily_window: tuple[datetime, datetime] | None = None) -> None:
     """Raw X Feed window (feed.FeedWindow): every field screened, watch labels naming a client dropped."""
     posts, held = [], 0
     for p in feed.posts:
@@ -128,20 +130,25 @@ def add_feed(snap: Snapshot, feed: Any, denylist: Sequence[str],
             held += 1
         else:
             posts.append({k: v for k, v in p.items() if k != "_screen"})
+    from .feed import watch_counts
+
+    clean = [p for p in feed.posts if not any_term(p, denylist)]  # with _screen, before it is dropped
+    watches = [(w, n) for w, n in watch_counts(clean) if not contains_term(w, denylist)]
     snap.feed = posts[:TOP_POSTS]
-    snap.feed_totals = {"posts": len(posts), "watches": len(feed.watches),
+    snap.feed_totals = {"posts": len(posts), "watches": len(watches),
                         "authors": len({(p["author_handle"] or "").lower() for p in posts if p["author_handle"]})}
-    snap.feed_watches = [(w, n) for w, n in feed.watches if not contains_term(w, denylist)][:15]
+    snap.feed_watches = watches[:15]
     snap.feed_window = (feed.start, feed.end)
     snap.withheld["posts"] = held
-    masked = set()
     snap.feed_daily = []
-    for r in daily or []:
-        if contains_term(str(r["watch"]), denylist):
-            masked.add(r["watch"])
-            r = {**r, "watch": WITHHELD}
-        snap.feed_daily.append(r)
-    snap.withheld["watches"] = len(masked) + sum(1 for w, _ in feed.watches if contains_term(w, denylist))
+    if daily_rows and daily_window:
+        from .feed import daily, screen_rows
+
+        # Raw rows of the chart window: a post with a client term in any observation is left out entirely,
+        # and a watch label naming a client is dropped (not shown as a series).
+        kept = screen_rows(list(daily_rows), lambda r: any_term(r, denylist))
+        snap.feed_daily = [r for r in daily(kept, *daily_window) if not contains_term(str(r["watch"]), denylist)]
+    snap.withheld["watches"] = sum(1 for w, _ in feed.watches if contains_term(w, denylist))
 
 
 def screen(snap: Snapshot, denylist: Sequence[str]) -> Snapshot:

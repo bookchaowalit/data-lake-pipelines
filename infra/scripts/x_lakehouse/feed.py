@@ -128,6 +128,19 @@ def summarise(rows: list[dict[str, Any]], start: datetime, end: datetime) -> Fee
 FEED_SOURCE_NOTE = "raw X Feed by engagement (no AI labels)"
 
 
+def watch_counts(posts: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """(watch, distinct posts) over ``posts`` (summarise output, already screened), most first. Uses every
+    observation of a post (``_screen``), so a post seen by two watches counts for both."""
+    c = Counter(w for p in posts for w in {watch_label(o) for o in (p.get("_screen") or [p])})
+    return sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def screen_rows(rows: list[dict[str, Any]], blocked: Any) -> list[dict[str, Any]]:
+    """Rows of the posts none of whose observations ``blocked(row)`` flags (e.g. a client term anywhere)."""
+    bad = {r.get("post_id") for r in rows if blocked(r)}
+    return [r for r in rows if r.get("post_id") not in bad]
+
+
 def daily(rows: list[dict[str, Any]], start: datetime, end: datetime) -> list[dict[str, Any]]:
     """Distinct posts per (ICT day, watch) collected in [start, end): the site's chart (Gold 01's twin)."""
     seen: dict[tuple[Any, str], set[str]] = defaultdict(set)

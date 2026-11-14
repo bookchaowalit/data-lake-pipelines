@@ -206,6 +206,8 @@ class DigestTests(unittest.TestCase):
         )
         self.assertEqual(f.withheld, 2)
         self.assertEqual([p["link"] for p in f.feed_top], ["https://x.com/a/status/2"])
+        # Watch counts come from the screened posts (post 1's keyword:duckdb sighting is not counted).
+        self.assertEqual((f.feed_watches, f.feed_totals["watches"]), ([{"watch": "keyword:duckdb", "posts": 1}], 1))
         self.assertTrue(f.has_data)
         self.assertIn("https://x.com/a/status/2", f.links)
         self.assertNotIn("acme corp", str(f.as_prompt()).lower())
@@ -310,8 +312,8 @@ class SiteFeedPagesTests(unittest.TestCase):
         rows = [row("1", t, likes=9), row("1", t + timedelta(hours=2), watch=("account", "AcmeCorp")),
                 row("2", t, likes=3, author="b"), row("3", t - timedelta(days=3), likes=1, author="c")]
         snap = snapshot()
-        bi_site.add_feed(snap, feed.summarise(rows, START, END), ("acme corp",),
-                         feed.daily(rows, START - timedelta(days=13), END))
+        bi_site.add_feed(snap, feed.summarise(rows, START, END), ("acme corp",), rows,
+                         (START - timedelta(days=13), END))
         return snap
 
     def test_daily_counts_distinct_posts_per_watch_and_ict_day(self):
@@ -326,6 +328,11 @@ class SiteFeedPagesTests(unittest.TestCase):
         html = bi_site.render_overview(snap)
         self.assertIn('data-kpi="posts">1<', html)  # post 1 is withheld (a client watch saw it)
         self.assertIn('data-kpi="authors">1<', html)
+        self.assertIn('data-kpi="watches">1<', html)  # keyword:duckdb only: post 1's watches are not counted
+        # The chart counts screened posts only and drops client-named watches (no "(withheld)" series).
+        self.assertEqual([(str(r["day"]), r["watch"], r["posts"]) for r in snap.feed_daily],
+                         [("2026-11-10", "keyword:duckdb", 1), ("2026-11-13", "keyword:duckdb", 1)])
+        self.assertNotIn("(withheld)", html)
         self.assertIn("Posts per day by watch", html)
         self.assertNotIn("Acme", html)
         self.assertIn('href="/feed/"', html)
