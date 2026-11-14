@@ -20,11 +20,12 @@
 # No secrets here: names, URLs and Infisical paths only.
 schema_version: data-lake-pipelines.source-coverage.v1
 updated: '2026-11-12'
-current_batch: 3
+current_batch: 4
 batches:
   1: {checked_at: '2026-11-12', report: docs/source-coverage/batch-01.md}
   2: {checked_at: '2026-11-12', report: docs/source-coverage/batch-02.md}
   3: {checked_at: '2026-11-12', report: docs/source-coverage/batch-03.md}
+  4: {checked_at: '2026-11-12', report: docs/source-coverage/batch-04.md}
 sources:
   - id: salesforce
     name: Salesforce
@@ -1908,7 +1909,641 @@ sources:
     evidence:
     - https://github.com/Kaggle/kaggle-api/blob/main/docs/README.md
     checked_at: '2026-11-12'
+  - id: hacker-news
+    name: Hacker News
+    batch: 4
+    category: tech-news
+    popularity_rank: 1
+    method: api
+    api_docs_url: https://github.com/HackerNews/API
+    mcp_server: none found
+    auth_type: none
+    rate_limit: none documented ("no rate limit")
+    cost: free
+    entities:
+    - top_stories
+    - items
+    - users
+    - updates
+    bulk_or_webhook: walk ids or updates.json; Firebase streaming
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: API repo is MIT; no data terms, comments belong to their authors (content rights unverified)
+    pii_level: low
+    scores:
+      value: 3
+      cost: 1
+      effort: 1
+      risk: 2
+    verdict: later
+    verdict_reason: easy and credential-free, but content rights are unverified; story ids, scores and titles only once the owner is fine with that
+    owner_action: say whether keeping HN titles (not comments) is acceptable
+    evidence:
+    - https://github.com/HackerNews/API
+    checked_at: '2026-11-12'
+  - id: arxiv
+    name: arXiv
+    batch: 4
+    category: research
+    popularity_rank: 2
+    method: api
+    api_docs_url: https://info.arxiv.org/help/api/index.html
+    mcp_server: none found
+    auth_type: none
+    rate_limit: 1 request per 3 seconds, one connection
+    cost: free
+    entities:
+    - eprint_metadata
+    - abstracts
+    - categories
+    bulk_or_webhook: OAI-PMH incremental harvest; S3 bulk (requester pays)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: metadata CC0; full text and PDFs must not be stored and served (link to abstract pages)
+    pii_level: low
+    scores:
+      value: 3
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: later
+    verdict_reason: daily cs.AI/cs.CL metadata via OAI-PMH fits the AI governance learning plan; metadata only, never PDFs
+    owner_action: null
+    evidence:
+    - https://info.arxiv.org/help/api/tou.html
+    checked_at: '2026-11-12'
+  - id: openalex
+    name: OpenAlex
+    batch: 4
+    category: research
+    popularity_rank: 3
+    method: api
+    api_docs_url: https://docs.openalex.org
+    mcp_server: none official
+    auth_type: optional free API key (needed to page past 10,000 results)
+    rate_limit: 10/s without key, 30/s with a free key; daily USD budget
+    cost: free tier
+    entities:
+    - works
+    - authors
+    - institutions
+    - topics
+    - sources
+    bulk_or_webhook: S3 snapshot
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: data CC0 (widely documented); polite pool replaced by keys and budgets
+    pii_level: low
+    scores:
+      value: 2
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: later
+    verdict_reason: arXiv covers the near-term need; OpenAlex when citation graphs matter
+    owner_action: free key at https://openalex.org/settings/api when needed -> Infisical /openalex
+    evidence:
+    - https://help.openalex.org/how-to-use-the-api/rate-limits-and-authentication
+    checked_at: '2026-11-12'
+  - id: crossref
+    name: Crossref
+    batch: 4
+    category: research
+    popularity_rank: 4
+    method: api
+    api_docs_url: https://github.com/CrossRef/rest-api-doc
+    mcp_server: none found
+    auth_type: none (mailto for the polite pool)
+    rate_limit: advertised in X-Rate-Limit headers (example 50/s)
+    cost: free
+    entities:
+    - works
+    - members
+    - funders
+    - journals
+    bulk_or_webhook: annual public snapshot
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: no ownership claimed over bibliographic metadata; caching and reuse allowed; abstracts may carry publisher terms
+    pii_level: low
+    scores:
+      value: 1
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: skip
+    verdict_reason: overlaps OpenAlex for our needs
+    owner_action: null
+    evidence:
+    - https://github.com/CrossRef/rest-api-doc
+    checked_at: '2026-11-12'
+  - id: wikimedia-pageviews
+    name: Wikimedia pageviews (top articles)
+    batch: 4
+    category: trends
+    popularity_rank: 5
+    method: api
+    api_docs_url: https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/getting-started.html
+    mcp_server: none found
+    auth_type: none (descriptive User-Agent required)
+    rate_limit: one request at a time (per the access policy)
+    cost: free
+    entities:
+    - top_articles
+    - per_article_views
+    - unique_devices
+    bulk_or_webhook: hourly and daily dumps at dumps.wikimedia.org
+    coverage_pct: 30
+    current_status: partial
+    tos_notes: API data CC0 1.0 (access policy page)
+    pii_level: low
+    scores:
+      value: 3
+      cost: 1
+      effort: 1
+      risk: 1
+    verdict: ingest-now
+    verdict_reason: credential-free, CC0, aggregate counts; daily top 200 of th + en Wikipedia as a trend signal; per-article series and more wikis are the next 70 %
+    pipeline:
+      workflow: .github/workflows/wiki-pageviews.yml
+      heartbeat: wiki-pageviews
+      jobs_queue: wiki-pageviews
+      datasets:
+      - wiki_top_articles
+    owner_action: null
+    evidence:
+    - https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/getting-started.html
+    - https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/access-policy.html
+    checked_at: '2026-11-12'
+  - id: npm-registry
+    name: npm registry downloads
+    batch: 4
+    category: dev-tools
+    popularity_rank: 6
+    method: api
+    api_docs_url: https://github.com/npm/registry/blob/main/docs/download-counts.md
+    mcp_server: none found
+    auth_type: none
+    rate_limit: not documented (keep low)
+    cost: free
+    entities:
+    - daily_downloads_per_package
+    bulk_or_webhook: bulk query up to 128 unscoped packages, 365 days
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: no data terms on the page (unverified); counts are not personal data
+    pii_level: low
+    scores:
+      value: 2
+      cost: 1
+      effort: 1
+      risk: 1
+    verdict: later
+    verdict_reason: useful once we publish npm packages; until then a watchlist of a few framework packages adds little
+    owner_action: null
+    evidence:
+    - https://github.com/npm/registry/blob/main/docs/download-counts.md
+    checked_at: '2026-11-12'
+  - id: pypi-stats
+    name: PyPI (JSON API + pypistats)
+    batch: 4
+    category: dev-tools
+    popularity_rank: 7
+    method: api
+    api_docs_url: https://docs.pypi.org/api/json/
+    mcp_server: none found
+    auth_type: none (BigQuery needs a Google Cloud account)
+    rate_limit: pypistats IP-based limit (no number); data updates daily
+    cost: free (BigQuery 1 TB/month free)
+    entities:
+    - project_metadata
+    - releases
+    - recent_downloads
+    bulk_or_webhook: pypistats 180 days; full history in BigQuery
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: no explicit terms read (unverified)
+    pii_level: low
+    scores:
+      value: 2
+      cost: 1
+      effort: 1
+      risk: 1
+    verdict: later
+    verdict_reason: same as npm
+    owner_action: null
+    evidence:
+    - https://docs.pypi.org/api/json/
+    - https://pypistats.org/api/
+    checked_at: '2026-11-12'
+  - id: product-hunt
+    name: Product Hunt
+    batch: 4
+    category: startups
+    popularity_rank: 8
+    method: api
+    api_docs_url: https://api.producthunt.com/v2/docs
+    mcp_server: none found
+    auth_type: Bearer token (developer token)
+    rate_limit: in headers (not read)
+    cost: free
+    entities:
+    - posts
+    - topics
+    - collections
+    bulk_or_webhook: none
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: API must not be used for commercial purposes by default (contact hello@producthunt.com)
+    pii_level: medium
+    scores:
+      value: 3
+      cost: 1
+      effort: 1
+      risk: 4
+    verdict: blocked-legal
+    verdict_reason: default terms forbid commercial use and our lake feeds a business; needs written permission
+    owner_action: if wanted, ask hello@producthunt.com for permission to use daily launches for market research
+    evidence:
+    - https://api.producthunt.com/v2/docs
+    checked_at: '2026-11-12'
+  - id: google-trends
+    name: Google Trends
+    batch: 4
+    category: trends
+    popularity_rank: 9
+    method: api
+    api_docs_url: https://developers.google.com/search/apis/trends
+    mcp_server: none found
+    auth_type: allowlisted alpha (application form)
+    rate_limit: unverified
+    cost: unverified
+    entities:
+    - relative_search_interest
+    bulk_or_webhook: none
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: alpha terms not read; pytrends scrapes web endpoints and is not used
+    scraping_allowed: false
+    pii_level: low
+    scores:
+      value: 4
+      cost: 1
+      effort: 2
+      risk: 2
+    verdict: later
+    verdict_reason: the official API is invite-only; apply rather than scrape
+    owner_action: apply for the Trends API alpha via https://developers.google.com/search/apis/trends
+    evidence:
+    - https://developers.google.com/search/apis/trends
+    checked_at: '2026-11-12'
+  - id: stack-exchange
+    name: Stack Exchange
+    batch: 4
+    category: dev-tools
+    popularity_rank: 10
+    method: api
+    api_docs_url: https://api.stackexchange.com/docs
+    mcp_server: none found
+    auth_type: optional app key (300/day without, 10,000/day with)
+    rate_limit: 300 requests/day without a key; obey backoff
+    cost: free
+    entities:
+    - questions
+    - answers
+    - tags
+    bulk_or_webhook: data dump behind login; 2024 dump licence reportedly bars commercial use and LLM training
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: content CC BY-SA 4.0 (attribution, share-alike); dump terms secondhand (unverified)
+    pii_level: medium
+    scores:
+      value: 2
+      cost: 1
+      effort: 2
+      risk: 3
+    verdict: later
+    verdict_reason: tag-level counts only (no post bodies) would be safe; low priority
+    owner_action: null
+    evidence:
+    - https://api.stackexchange.com/docs
+    checked_at: '2026-11-12'
+  - id: world-bank
+    name: World Bank Indicators API
+    batch: 4
+    category: economy
+    popularity_rank: 11
+    method: api
+    api_docs_url: https://datahelpdesk.worldbank.org/knowledgebase/articles/889392-about-the-indicators-api-documentation
+    mcp_server: none found
+    auth_type: none
+    rate_limit: not published
+    cost: free
+    entities:
+    - indicators
+    - countries
+    - time_series
+    bulk_or_webhook: paged JSON; bulk files in the data catalog
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: catalog datasets CC BY 4.0 with no-endorsement condition (partly unverified); check per-dataset licence
+    pii_level: low
+    scores:
+      value: 2
+      cost: 1
+      effort: 1
+      risk: 1
+    verdict: later
+    verdict_reason: yearly data; a monthly pull of a Thailand indicator set is enough when finance products need it
+    owner_action: null
+    evidence:
+    - https://datahelpdesk.worldbank.org/knowledgebase/articles/889392-about-the-indicators-api-documentation
+    - https://www.worldbank.org/en/about/legal/terms-of-use-for-datasets
+    checked_at: '2026-11-12'
+  - id: imf-data
+    name: IMF Data API
+    batch: 4
+    category: economy
+    popularity_rank: 12
+    method: api
+    api_docs_url: https://data.imf.org/en/Resource-Pages/IMF-API
+    mcp_server: none official
+    auth_type: keyless for open datasets (unverified); portal account for the explorer
+    rate_limit: not published
+    cost: free
+    entities:
+    - weo
+    - ifs
+    - bop
+    bulk_or_webhook: SDMX queries
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: Copyright and Usage page not read (unverified)
+    pii_level: low
+    scores:
+      value: 1
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: skip
+    verdict_reason: World Bank and BOT cover our macro needs
+    owner_action: null
+    evidence:
+    - https://data.imf.org/en/Resource-Pages/IMF-API
+    checked_at: '2026-11-12'
+  - id: oecd
+    name: OECD Data Explorer SDMX
+    batch: 4
+    category: economy
+    popularity_rank: 13
+    method: api
+    api_docs_url: https://www.oecd.org/en/data/insights/data-explainers/2024/11/Api-best-practices-and-recommendations.html
+    mcp_server: none found
+    auth_type: none
+    rate_limit: 20-60 downloads per hour (sources disagree)
+    cost: free
+    entities:
+    - dataflows
+    - datasets
+    bulk_or_webhook: SDMX-CSV per query
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: terms not read (unverified); page returned 403 to automated reading
+    pii_level: low
+    scores:
+      value: 1
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: skip
+    verdict_reason: Thailand is not an OECD member; little value
+    owner_action: null
+    evidence:
+    - https://www.oecd.org/en/data/insights/data-explainers/2024/11/Api-best-practices-and-recommendations.html
+    checked_at: '2026-11-12'
+  - id: air4thai
+    name: Air4Thai (PCD air quality)
+    batch: 4
+    category: environment
+    popularity_rank: 14
+    method: api
+    api_docs_url: https://air4thai.pcd.go.th/services/getNewAQI_JSON.php
+    mcp_server: none found
+    auth_type: none (widely used keyless; official status unverified)
+    rate_limit: unpublished
+    cost: free
+    entities:
+    - stations
+    - pm25
+    - pm10
+    - aqi
+    bulk_or_webhook: hourly snapshot JSON
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: no terms found; server failed TLS verification (incomplete chain) - never disable TLS checks
+    pii_level: low
+    scores:
+      value: 3
+      cost: 1
+      effort: 2
+      risk: 2
+    verdict: later
+    verdict_reason: good Thai daily signal, but the TLS chain must verify from a runner first and the endpoint's status is unconfirmed
+    owner_action: null
+    evidence:
+    - https://www.pcd.go.th/?p=34396
+    checked_at: '2026-11-12'
+  - id: tmd-weather
+    name: Thai Meteorological Department API
+    batch: 4
+    category: environment
+    popularity_rank: 15
+    method: api
+    api_docs_url: https://data.tmd.go.th/api/index1.php
+    mcp_server: none found
+    auth_type: uid/ukey (observations) or registration + OAuth (NWP)
+    rate_limit: usage limits section without figures
+    cost: free
+    entities:
+    - observations
+    - forecasts
+    - warnings
+    - earthquakes
+    bulk_or_webhook: JSON/XML; CSV downloads
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: follows the open government data policy; no specific terms (unverified)
+    pii_level: low
+    scores:
+      value: 2
+      cost: 1
+      effort: 2
+      risk: 1
+    verdict: later
+    verdict_reason: needs a free registration; Open-Meteo is the keyless alternative for non-commercial use
+    owner_action: register at https://data.tmd.go.th/nwpapi/register -> Infisical /tmd
+    evidence:
+    - https://data.tmd.go.th/api/index1.php
+    - https://data.tmd.go.th/nwpapi/doc/
+    checked_at: '2026-11-12'
+  - id: egp-procurement
+    name: e-GP Thai government procurement
+    batch: 4
+    category: open-data
+    popularity_rank: 16
+    method: api
+    api_docs_url: https://data.go.th/en
+    mcp_server: none found
+    auth_type: data.go.th developer token (for API); e-GP itself unknown
+    rate_limit: unverified
+    cost: free
+    entities:
+    - procurement_announcements
+    - awards
+    bulk_or_webhook: CKAN dataset downloads
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: portal conditions PDF unreadable (unverified); award data names vendors and officials
+    pii_level: medium
+    scores:
+      value: 3
+      cost: 1
+      effort: 3
+      risk: 2
+    verdict: later
+    verdict_reason: leads for agency work (government tenders), but no confirmed API; never scrape gprocurement.go.th without reading its terms
+    owner_action: register a developer token at https://data.go.th/ and say whether tenders are a lead source
+    evidence:
+    - https://data.go.th/en
+    checked_at: '2026-11-12'
+  - id: dbd-datawarehouse
+    name: DBD DataWarehouse+ / open data
+    batch: 4
+    category: open-data
+    popularity_rank: 17
+    method: api
+    api_docs_url: https://bdex.dbd.go.th/opendata
+    mcp_server: none found
+    auth_type: none for open statistics; BDEX application for company records
+    rate_limit: n/a
+    cost: open stats free; BDEX has fees
+    entities:
+    - registration_statistics
+    - company_records_bdex
+    bulk_or_webhook: CSV/JSON downloads for open data
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: open datasets under Open Data Common; DataWarehouse+ ToS not read; robots.txt blocks nothing but scraping stays off
+    pii_level: high
+    scores:
+      value: 3
+      cost: 2
+      effort: 2
+      risk: 3
+    verdict: later
+    verdict_reason: company records (directors, shareholders) are personal data; only open statistics without BDEX
+    owner_action: decide whether BDEX company data is worth the application and fees
+    evidence:
+    - https://datawarehouse.dbd.go.th/robots.txt
+    checked_at: '2026-11-12'
+  - id: open-meteo
+    name: Open-Meteo
+    batch: 4
+    category: environment
+    popularity_rank: 18
+    method: api
+    api_docs_url: https://open-meteo.com/en/docs
+    mcp_server: none found
+    auth_type: none for the free tier
+    rate_limit: 10,000/day, 600/min per IP
+    cost: free for non-commercial use only
+    entities:
+    - forecast
+    - historical
+    - air_quality
+    bulk_or_webhook: multi-location requests
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: data CC BY 4.0 (attribution) but the free API is non-commercial; subscriptions or ads count as commercial
+    pii_level: low
+    scores:
+      value: 2
+      cost: 2
+      effort: 1
+      risk: 3
+    verdict: later
+    verdict_reason: a lake that feeds paid products counts as commercial, so the free tier does not fit; TMD after registration
+    owner_action: null
+    evidence:
+    - https://open-meteo.com/en/terms
+    - https://open-meteo.com/en/licence
+    checked_at: '2026-11-12'
+  - id: gdelt
+    name: GDELT 2.0
+    batch: 4
+    category: news
+    popularity_rank: 19
+    method: api
+    api_docs_url: https://www.gdeltproject.org/data.html
+    mcp_server: none found
+    auth_type: none
+    rate_limit: none stated
+    cost: free
+    entities:
+    - events
+    - mentions
+    - gkg
+    bulk_or_webhook: 15-minute CSV zip files
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: unlimited use incl. commercial; must cite GDELT and link to it
+    pii_level: low
+    scores:
+      value: 3
+      cost: 2
+      effort: 3
+      risk: 1
+    verdict: later
+    verdict_reason: strong for Thailand news events, but the files are large; filter to Thailand per day before it touches R2 (watch ADR-0013 §7)
+    owner_action: null
+    evidence:
+    - https://www.gdeltproject.org/about.html
+    - https://www.gdeltproject.org/data.html
+    checked_at: '2026-11-12'
+  - id: common-crawl
+    name: Common Crawl
+    batch: 4
+    category: web
+    popularity_rank: 20
+    method: api
+    api_docs_url: https://index.commoncrawl.org/
+    mcp_server: none found
+    auth_type: none over HTTPS
+    rate_limit: none stated ("do not overload")
+    cost: free (S3 egress charged outside us-east-1)
+    entities:
+    - warc
+    - wat
+    - wet
+    - url_index
+    bulk_or_webhook: monthly crawls (TB scale)
+    coverage_pct: 0
+    current_status: missing
+    tos_notes: limited non-transferable licence; no redistribution grant; content keeps owners' copyright; no harvesting personal data
+    pii_level: high
+    scores:
+      value: 2
+      cost: 4
+      effort: 4
+      risk: 4
+    verdict: skip
+    verdict_reason: TB-scale raw pages would blow the R2 free tier and carry personal data; index lookups only if a project needs them
+    owner_action: null
+    evidence:
+    - https://commoncrawl.org/terms-of-use
+    - https://commoncrawl.org/get-started
+    checked_at: '2026-11-12'
 next_batch:
-  number: 4
+  number: 5
   sources:
-    [hacker-news, arxiv, openalex, crossref, wikimedia-pageviews, npm-registry, pypi-stats, product-hunt, google-trends, world-bank, imf-data, oecd, air4thai, tmd-weather, egp-procurement, dbd-datawarehouse, open-meteo, gdelt, common-crawl, stack-exchange]
+    [ddproperty, livinginsider, hipflat, facebook-marketplace, google-places, openstreetmap-overpass, agoda, booking-com, airbnb, tripadvisor, thairath, thai-pbs, bangkok-post, matichon, blognone, techcrunch, the-verge, youtube-trending, tiktok-creative-center, google-news]
