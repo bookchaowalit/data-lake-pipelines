@@ -5,7 +5,7 @@ with f as (
     select post_id, author_handle, coalesce(watch_type, '') || ':' || coalesce(watch_value, '') as watch,
            likes, reposts, views, collected_at
     from read_parquet('{lake}/raw/x_feed/date=*/*.parquet', hive_partitioning = true, union_by_name = true)
-    where collected_at >= {now} - interval 30 day
+    where collected_at >= {now} - interval 30 day and collected_at <= {now}  -- a past {now} sees no later counts
       and coalesce(post_id, '') <> '' and coalesce(author_handle, '') <> ''
 ),
 latest as (

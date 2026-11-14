@@ -98,6 +98,9 @@ class GoldTests(unittest.TestCase):
         rows = duckdb.connect().execute(f"select author_handle, posts, total_likes, total_views, watches, "
                                         f"main_watch from read_parquet('{part}')").fetchall()
         self.assertEqual(rows, [("test_a", 2, 7, 170, 2, "keyword:ai"), ("test_b", 1, 1, 10, 1, "keyword:ai")])
+        # A run dated between post 1's two observations (NOW-3h, NOW-2h) sees only the first one.
+        early = gold.run(self.cfg, write=False, now=NOW - timedelta(hours=2, minutes=30))["queries"]
+        self.assertEqual(early["02_top_accounts_by_posts"]["rows"], 1)  # only post 1's first observation
 
     def test_no_query_reads_duckdb_now(self):
         for f in gold.QUERIES.glob("*.sql"):
