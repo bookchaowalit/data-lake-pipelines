@@ -597,6 +597,8 @@ def _auth_alert(conn: Any, cfg: Config, client: httpx.Client, w: Window, ai: dic
         streak, alerted = _streak(c)
         claim = failed_here and not off and streak >= AUTH_ALERT_AFTER and not alerted
         if claim:
+            # identifiers are module constants; values are bound parameters
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
             c.execute(f"update {S}.digest_log set auth_alerted_at = now() where digest_id = %s", (w.digest_id,))
             claim = c.rowcount == 1
     conn.commit()  # the claim is durable before anything leaves the host
@@ -608,6 +610,8 @@ def _auth_alert(conn: Any, cfg: Config, client: httpx.Client, w: Window, ai: dic
                       AUTH_ALERT_TEXT)
     except DigestError as exc:
         with conn.cursor() as c:  # surely not delivered: give the claim back, the next digest retries
+            # identifiers are module constants; values are bound parameters
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
             c.execute(f"update {S}.digest_log set auth_alerted_at = null where digest_id = %s", (w.digest_id,))
         conn.commit()
         out["auth_alert"] = f"error: {exc}"  # status code only, never the token-bearing URL

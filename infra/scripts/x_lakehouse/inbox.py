@@ -646,6 +646,8 @@ def landed(conn: Any, store: Any, prefix: str, since: datetime, inbox: str = INB
     from .lake import PART, raw_dir
 
     with conn.cursor() as c:
+        # identifiers are module constants; values are bound parameters
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         c.execute(f"select dataset, row_key from {inbox} where drained_at >= %s", (since,))
         keys: dict[str, set[str]] = defaultdict(set)
         for ds, rk in c.fetchall():

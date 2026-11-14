@@ -205,6 +205,8 @@ def schema_ready(conn: Any) -> bool:
         if not exists:
             c.execute("select has_database_privilege(current_user, current_database(), 'CREATE')")
             if c.fetchone()[0]:
+                # identifiers are module constants; values are bound parameters
+                # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.lang.security.audit.formatted-sql-query.formatted-sql-query
                 c.execute(f"create schema {P}")
                 exists = True
         ok = exists
@@ -246,6 +248,8 @@ def prune(conn: Any, now: datetime | None = None) -> dict[str, int]:
         c.execute(f"insert into {P_SEEN} (dataset, row_key, payload_md5) "
                   f"select dataset, row_key, {S}.payload_md5(row) from {P_INBOX} "
                   "where drained_at < %s on conflict do nothing", (now - ib.KEEP_DRAINED,))
+        # identifiers are module constants; values are bound parameters
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         c.execute(f"delete from {P_INBOX} where drained_at < %s", (now - ib.KEEP_DRAINED,))
         inbox_rows = c.rowcount
     conn.commit()
