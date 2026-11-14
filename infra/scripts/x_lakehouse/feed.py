@@ -141,13 +141,18 @@ def screen_rows(rows: list[dict[str, Any]], blocked: Any) -> list[dict[str, Any]
     return [r for r in rows if r.get("post_id") not in bad]
 
 
-def daily(rows: list[dict[str, Any]], start: datetime, end: datetime) -> list[dict[str, Any]]:
-    """Distinct posts per (ICT day, watch) collected in [start, end): the site's chart (Gold 01's twin)."""
+def watch_kind(row: dict[str, Any]) -> str:
+    return (row.get("watch_type") or "").strip() or "(none)"
+
+
+def daily(rows: list[dict[str, Any]], start: datetime, end: datetime, key: Any = watch_label) -> list[dict[str, Any]]:
+    """Distinct posts per (ICT day, ``key(row)``) collected in [start, end) (Gold 01's twin by watch; the
+    site's chart by watch type: with ~1,800 watches a per-watch chart is all "Other")."""
     seen: dict[tuple[Any, str], set[str]] = defaultdict(set)
     for r in rows:
         pid, at = r.get("post_id"), r.get("collected_at")
         if pid and isinstance(at, datetime) and start <= at < end:
-            seen[(at.astimezone(TZ).date(), watch_label(r))].add(pid)
+            seen[(at.astimezone(TZ).date(), key(r))].add(pid)
     return [{"day": d, "watch": w, "posts": len(p)} for (d, w), p in sorted(seen.items())]
 
 

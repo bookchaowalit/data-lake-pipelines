@@ -331,8 +331,9 @@ class SiteFeedPagesTests(unittest.TestCase):
         self.assertIn('data-kpi="watches">1<', html)  # keyword:duckdb only: post 1's watches are not counted
         # The chart counts screened posts only and drops client-named watches (no "(withheld)" series).
         self.assertEqual([(str(r["day"]), r["watch"], r["posts"]) for r in snap.feed_daily],
-                         [("2026-11-10", "keyword:duckdb", 1), ("2026-11-13", "keyword:duckdb", 1)])
+                         [("2026-11-10", "keyword", 1), ("2026-11-13", "keyword", 1)])  # by watch type
         self.assertNotIn("(withheld)", html)
+        self.assertIn("Raw posts to 2026-11-14 07:00 Bangkok time", html)  # footer names the feed window
         self.assertIn("Posts per day by watch", html)
         self.assertNotIn("Acme", html)
         self.assertIn('href="/feed/"', html)

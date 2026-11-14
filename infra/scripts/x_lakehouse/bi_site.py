@@ -142,12 +142,13 @@ def add_feed(snap: Snapshot, feed: Any, denylist: Sequence[str],
     snap.withheld["posts"] = held
     snap.feed_daily = []
     if daily_rows and daily_window:
-        from .feed import daily, screen_rows
+        from .feed import daily, screen_rows, watch_kind
 
-        # Raw rows of the chart window: a post with a client term in any observation is left out entirely,
-        # and a watch label naming a client is dropped (not shown as a series).
+        # Raw rows of the chart window: a post with a client term in any observation (its watch label
+        # included) is left out entirely; the chart then counts distinct posts per day and watch type.
         kept = screen_rows(list(daily_rows), lambda r: any_term(r, denylist))
-        snap.feed_daily = [r for r in daily(kept, *daily_window) if not contains_term(str(r["watch"]), denylist)]
+        snap.feed_daily = [r for r in daily(kept, *daily_window, key=watch_kind)
+                           if not contains_term(str(r["watch"]), denylist)]
     snap.withheld["watches"] = sum(1 for w, _ in feed.watches if contains_term(w, denylist))
 
 
@@ -201,6 +202,15 @@ def _e(value: Any) -> str:
     return "—" if value is None or value == "" else escape(str(value))
 
 
+def _footer(snap: Snapshot) -> str:
+    if snap.feed_window is not None:
+        return (f"Raw posts to {_time(_ict(snap.feed_window[1]))} Bangkok time (newest AI signal "
+                f"{_time(snap.newest)}). Built from the raw X Feed on the lake and the x_intel marts (Supabase) by "
+                "the x-lakehouse job; rows naming a client are left out. Posts belong to their authors.")
+    return (f"Newest signal {_time(snap.newest)} Bangkok time. Built from the x_intel marts "
+            "(Supabase) by the x-lakehouse job; rows naming a client are left out. Posts belong to their authors.")
+
+
 def _page(title: str, path: str, body: str, snap: Snapshot) -> str:
     links = "".join(
         f'<li><a href="{href}"{" aria-current=\"page\"" if href == path else ""}>{escape(name)}</a></li>'
@@ -216,9 +226,7 @@ def _page(title: str, path: str, body: str, snap: Snapshot) -> str:
         f'<header><div class="bar"><a class="brand" href="/">{SITE_NAME}</a>'
         f'<nav aria-label="Main"><ul>{links}</ul></nav></div></header>\n'
         f'<main id="main" tabindex="-1">\n{body}\n</main>\n'
-        f"<footer>Newest signal {_time(snap.newest)} Bangkok time. Built from the x_intel marts "
-        "(Supabase) by the x-lakehouse job; rows naming a client are left out. Posts belong to their authors."
-        "</footer>\n</body>\n</html>\n"
+        f"<footer>{_footer(snap)}</footer>\n</body>\n</html>\n"
     )
 
 
@@ -297,7 +305,7 @@ def _stacked(as_of: date, rows: list[dict[str, Any]], title: str, noun: str, ser
         'scrolls sideways">'
         f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-labelledby="daily-title daily-desc">'
         f'<title id="daily-title">{escape(title)}, {_fmt_date(days[0])} to {_fmt_date(as_of)}</title>'
-        f'<desc id="daily-desc">{total} {noun} over {CHART_DAYS} days; the {series_noun} table lists each '
+        f'<desc id="daily-desc">{total} {noun} over {CHART_DAYS} days; the legend names each '
         f'{series_noun}.</desc>'
         f"{''.join(parts)}</svg></div>"
     )
@@ -319,7 +327,7 @@ def render_feed_overview(snap: Snapshot) -> str:
     watches = _table("watches", "Distinct posts per watch, last 7 days", [("Watch", False), ("Posts", True)],
                      wrows, "Watches table")
     chart_rows = [{"day": r["day"], "series": str(r["watch"]), "n": int(r["posts"])} for r in snap.feed_daily]
-    chart = (_stacked(as_of, chart_rows, "Posts per day by watch", "posts", "watch") if chart_rows
+    chart = (_stacked(as_of, chart_rows, "Posts per day by watch type", "posts", "watch type") if chart_rows
              else f"<p>No posts in the last {CHART_DAYS} days.</p>")
     drows = [f"<tr><th scope=\"row\">{_e(r['digest_id'])}</th><td>{_e(r['status'])}</td>"
              f"<td>{'AI summary' if r['ai'] else 'Facts only'}</td><td class=\"num\">{_fmt_int(r['signals'] or 0)}</td>"
