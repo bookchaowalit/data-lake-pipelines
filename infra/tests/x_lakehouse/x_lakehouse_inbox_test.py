@@ -602,26 +602,30 @@ class InboxPostgresTests(unittest.TestCase):
         self.ingest("claims", [claim_row("CL-1", "2026-11-13 08:00"), claim_row("CL-1", "2026-11-13 12:00")])
         sheet = {"x_feed": [type_row(X_FEED, r) for r in sheet_rows],
                  "claims": [type_row(DATASETS["claims"], claim_row("CL-1", "2026-11-13 12:00"))]}
-        window = datetime.now(timezone.utc) - timedelta(days=1)  # received_at is the database clock
-        rep = inbox.compare(self.conn, sheet, window, NOW)
+        # Sheet rows are dated around NOW; received_at is the database clock (today), so the Sheet
+        # read time is today too (a little after the ingest: compare skips the last minute as clock
+        # skew). Both sides then hold whatever the date the suite runs on.
+        window, read_at = NOW - timedelta(days=1), datetime.now(timezone.utc) + timedelta(minutes=5)
+        rep = inbox.compare(self.conn, sheet, window, NOW, snapshot_at=read_at)
         self.assertEqual((rep["x_feed"]["missing_in_inbox"], rep["x_feed"]["missing_in_sheet"]), (1, 0))
         self.assertEqual((rep["claims"]["missing_in_sheet"], rep["claims"]["missing_in_inbox"]), (0, 0))
         self.ingest("x_feed", sheet_rows[1:])
-        rep = inbox.compare(self.conn, sheet, window, NOW)
+        rep = inbox.compare(self.conn, sheet, window, NOW, snapshot_at=read_at)
         self.assertEqual(rep["x_feed"]["missing_in_inbox"], 0)
         # A row the bot is still writing (inside the grace period) is not a miss yet.
         late = feed_row("3", "2026-11-13 16:20")
         sheet["x_feed"].append(type_row(X_FEED, late))
-        self.assertEqual(inbox.compare(self.conn, sheet, window, NOW)["x_feed"]["missing_in_inbox"], 0)
+        self.assertEqual(inbox.compare(self.conn, sheet, window, NOW, snapshot_at=read_at)["x_feed"]["missing_in_inbox"], 0)
         self.ingest("x_feed", [feed_row("9")])  # in the inbox, never in the Sheet
-        self.assertEqual(inbox.compare(self.conn, sheet, window, NOW)["x_feed"]["missing_in_sheet"], 1)
+        read_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        self.assertEqual(inbox.compare(self.conn, sheet, window, NOW, snapshot_at=read_at)["x_feed"]["missing_in_sheet"], 1)
 
     def test_compare_flags_a_newer_signal_version_missing_from_the_sheet(self):
         old, new = signal_row("8", "2026-11-13 08:00"), signal_row("8", "2026-11-13 09:00")
         self.ingest("x_signals", [old, new])
         sheet = {"x_signals": [type_row(X_SIGNALS, old)]}
-        window = datetime.now(timezone.utc) - timedelta(days=1)
-        rep = inbox.compare(self.conn, sheet, window, NOW)["x_signals"]
+        window = NOW - timedelta(days=1)
+        rep = inbox.compare(self.conn, sheet, window, NOW, snapshot_at=datetime.now(timezone.utc) + timedelta(minutes=5))["x_signals"]
         self.assertEqual(rep["missing_in_sheet"], 1)
 
     def test_t5_both_mode_run_fails_on_a_mismatch_and_passes_on_a_match(self):
