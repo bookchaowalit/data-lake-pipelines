@@ -200,6 +200,23 @@ class InboxPostgresTests(unittest.TestCase):
         self.assertEqual((second["inserted"], second["skipped"]), (0, 600))
         self.assertEqual(self.q("select count(*) from x_intel.ingest_inbox")[0][0], 600)
 
+    def test_a_post_collected_again_keeps_one_feed_row_and_validates(self):
+        # 2026-11-14: the bot sent posts it had collected the evening before again, with a new collected_at
+        # (a new row key), and validate failed on duplicate post_id in raw.
+        first = self.ingest("x_feed", [feed_row("7"), feed_row("8"), feed_row("8", query_id="Q2")], "run1113e")
+        self.assertEqual((first["inserted"], first["duplicate_posts"], first["errors"]), (2, 1, []))
+        code, _, ev = self.run_scheduled()
+        self.assertEqual(code, 0, ev)
+        again = self.ingest("x_feed", [feed_row("7", collected="2026-11-14 08:00", likes=9), feed_row("9")],
+                            "run1114m")
+        self.assertEqual((again["inserted"], again["skipped"], again["duplicate_posts"]), (1, 1, 1))
+        self.assertEqual(self.ingest("x_feed", [feed_row("9")], "run1114m")["duplicate_posts"], 0)  # a retry
+        code, _, ev = self.run_scheduled()
+        self.assertEqual(code, 0, ev)
+        self.assertTrue(ev["validate"]["ok"], ev["validate"])
+        ids = sorted(read_dataset(self.store, "", X_FEED).column("post_id").to_pylist())
+        self.assertEqual(ids, ["7", "8", "9"])
+
     def test_t9_bad_dataset_or_column_is_reported_and_inserts_nothing_for_that_row(self):
         out = self.ingest("x_nope", [feed_row("1")])
         self.assertEqual(out["errors"][0]["error"], "unknown dataset")

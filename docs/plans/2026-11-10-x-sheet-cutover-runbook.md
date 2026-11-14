@@ -58,6 +58,10 @@ Read-only dry run 2026-11-10: tab rows 2–1,044 contiguous, 1,043 keys = curate
 `sheet_row` null). After step 4 — tell Chief Data to resume the Sheet appends and set `X_LAKE_SOURCE=both`; rows
 written only to the lake meanwhile are copied back from raw (plan §11 rollback, owner approval to write a source tab).
 
+2026-11-14: the first post-switch run re-sent 2 posts with a new `collected_at` and validate failed
+(duplicate post_id in raw). `ingest()` now keeps one X Feed row per post (applied by the cron's `ensure_inbox`).
+The two rows already in raw age out of the validate window (`since` = yesterday ICT) on 2026-11-15.
+
 ## Brief for Chief Data (owner pastes it into the Grok bot)
 
 > From <switch time ICT> the X pipeline no longer uses the Google Sheet X tabs.
@@ -75,3 +79,5 @@ written only to the lake meanwhile are copied back from raw (plan §11 rollback,
 >    through `ingest('x_watchlist' | 'x_query_plan', …)`. A new watchlist entry gets the next `sheet_row`
 >    immediately; read it back from `v_watchlist_sheet` before referencing it in `watchlist_rows`.
 > 4. If an `ingest` call fails, retry once, then report the run id; never fall back to writing the tab.
+> 5. A post already stored (collected again by a later run or another query) is skipped and counted in
+>    the reply's `duplicate_posts`; that is not an error and needs no retry.
