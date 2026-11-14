@@ -132,10 +132,14 @@ the job allowed to write private rows. Check with:
     select pg_has_role('postgres', 'x_lake', 'usage');
     select has_table_privilege('postgres', 'x_intel_private.ingest_inbox', 'select');
 
-### Retention of private raw: R2 lifecycle rules (follow-up after merge, not done here)
+### Retention of private raw: R2 lifecycle rules (set 2026-11-14)
 
 Raw Parquet is append-only and the cron never deletes it. Retention for the private datasets is an R2
-lifecycle rule on each prefix (free, set by the owner or by Claude with the owner's OK after merge):
+lifecycle rule on each prefix of bucket `x-intel-lake`, set 2026-11-14 by Claude at the owner's request
+(Cloudflare API `PUT /accounts/{id}/r2/buckets/x-intel-lake/lifecycle`, token Infisical `/cloudflare`;
+that call replaces every rule, so read the list first and send it back whole). Rule ids
+`private-home-timeline-30d` and `private-own-mentions-365d`; the bucket's other rules
+(`Default Multipart Abort Rule`, `meta-landing-30d`) were kept:
 
 | prefix | rule |
 |---|---|
