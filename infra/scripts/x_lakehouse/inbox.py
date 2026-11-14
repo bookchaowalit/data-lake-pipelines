@@ -54,7 +54,6 @@ CONFIG_LOCK = 0x786C616B6563  # "xlakec": transaction lock serialising config in
 # Raw ingest() holds it shared for its transaction, prune() exclusively: a key's move from the inbox to
 # ingest_seen is never seen half-done (no inbox row yet no ingest_seen row) by a resend in flight.
 PRUNE_LOCK = 0x786C616B6570  # "xlakep"
-FEED_POST_LOCK = 0x78666470  # "xfdp": with hashtext(post_id), serialises ingest() calls sending one post
 KEEP_DRAINED = timedelta(days=3)
 KEEP_DELIVERIES = timedelta(days=30)  # longer than any bot retry
 # Datasets whose stored inbox row is replaced by a newer version of the same key (no raw history:
@@ -326,7 +325,7 @@ language plpgsql security definer set search_path = pg_catalog, {S} as $f$
 declare
   cols text[]; keys text[]; req text[];
   r jsonb; i int := 0; n int; bad text[]; nested text[]; blank text[]; untyped text[]; rk text; seen text;
-  ins int := 0; skipped int := 0; dup_posts int := 0; errors jsonb := '[]'::jsonb; good jsonb := '[]'::jsonb; up jsonb;
+  ins int := 0; skipped int := 0; errors jsonb := '[]'::jsonb; good jsonb := '[]'::jsonb; up jsonb;
 begin
   case p_dataset
 {chr(10).join(meta)}
@@ -410,18 +409,6 @@ begin
         end if;
         continue;
       end if;
-      if p_dataset = 'x_feed' and _raw_text(r -> 'post_id') <> '' then
-        -- One X Feed row per post: a post the bots collect again (a later run, another query) gets a new
-        -- collected_at and so a new key, which would put a second row for the post in raw. Keep the first.
-        -- The lock serialises two calls sending the same post; drained rows stay in the inbox for
-        -- KEEP_DRAINED, longer than the validate window (yesterday and today).
-        perform pg_advisory_xact_lock({FEED_POST_LOCK}, hashtext(_raw_text(r -> 'post_id')));
-        if exists (select 1 from ingest_inbox x where x.dataset = 'x_feed'
-                   and x.row ->> 'post_id' = _raw_text(r -> 'post_id') and x.row_key <> rk) then
-          dup_posts := dup_posts + 1;
-          continue;
-        end if;
-      end if;
       insert into ingest_inbox (dataset, run_id, row, row_key) values (p_dataset, p_run_id, r, rk)
       on conflict (dataset, row_key) do nothing;
       get diagnostics n = row_count;
@@ -443,8 +430,7 @@ begin
 {upserts}
     else up := null;
   end case;
-  return jsonb_build_object('inserted', ins, 'skipped', skipped + dup_posts, 'duplicate_posts', dup_posts,
-                            'upserted', up, 'errors', errors);
+  return jsonb_build_object('inserted', ins, 'skipped', skipped, 'upserted', up, 'errors', errors);
 end $f$;
 revoke all on function {S}.ingest(text, jsonb, text) from public;
 """
