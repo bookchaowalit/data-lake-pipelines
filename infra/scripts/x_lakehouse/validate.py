@@ -2,7 +2,8 @@
 """Reconcile Sheet vs raw Parquet vs Postgres. Read-only everywhere.
 
 Per dataset: Sheet rows, raw rows and distinct ``_row_key``s, Postgres rows; Sheet keys missing
-from raw; duplicate post_id in Sheet / raw / curated; null rates; rows carrying coercion errors.
+from raw; duplicate post_id in Sheet / raw / curated (X Feed repeats are reported, not failed); null
+rates; rows carrying coercion errors.
 Exit 1 on any failure (missing tab/column, coercion errors, duplicate keys, Sheet rows missing
 from raw, raw or Sheet keys missing from Postgres), with the reasons — the daily parallel-run check.
 
@@ -31,6 +32,8 @@ from .config import Config  # noqa: E402
 from .lake import ingest_date, open_store, read_dataset  # noqa: E402
 from .pipeline import DatasetCheck, feed_index, partition_values, validate_rows  # noqa: E402
 from .schemas import CURATED, DATASETS, PG_SCHEMA, X_FEED  # noqa: E402
+
+REPEATABLE_POST_ID = frozenset({X_FEED.name})  # see the reasons in reconcile()
 
 
 def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str | None, *,
@@ -145,14 +148,15 @@ def reconcile(cfg: Config, names: list[str], since: date | None, lake_uri: str |
                 reasons.append(f"{rep['raw_rows_with_coerce_errors']} raw rows with coercion errors")
             if chk.duplicate_keys:
                 reasons.append(f"{chk.duplicate_keys} duplicate natural keys in the Sheet")
-            if chk.duplicate_post_ids:
+            # X Feed is an observation log: one post matched by two watches, or seen again later, is
+            # two rows with different natural keys (raw keeps both, readers take the newest). Its
+            # post_id repeats are reported, not failed; duplicate natural keys still fail.
+            if chk.duplicate_post_ids and n not in REPEATABLE_POST_ID:
                 reasons.append(f"{chk.duplicate_post_ids} duplicate post_id in the Sheet")
             if rep.get("sheet_rows_missing_from_raw"):
                 reasons.append(f"{rep['sheet_rows_missing_from_raw']} Sheet rows missing from raw")
             if rep.get("raw_duplicate_keys"):
                 reasons.append(f"{rep['raw_duplicate_keys']} duplicate _row_key in raw")
-            if rep.get("raw_duplicate_post_ids") and n == "x_feed":
-                reasons.append(f"{rep['raw_duplicate_post_ids']} duplicate post_id in raw")
             if rep.get("postgres_missing_keys"):
                 reasons.append(f"{rep['postgres_missing_keys']} keys missing from Postgres")
             if rep.get("postgres_stale_versions"):
