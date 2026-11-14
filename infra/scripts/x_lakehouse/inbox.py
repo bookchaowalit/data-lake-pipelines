@@ -477,12 +477,22 @@ def _sheet_view(name: str, ds: Dataset, table: str, where: str = "", order: str 
             f"{' where ' + where if where else ''}{' order by ' + order if order else ''};\n")
 
 
+def _watchlist_view() -> str:
+    """Sheet columns in Sheet order, numbered by watchlist_row_map (watchlist_rows.py) so the row numbers in
+    x_query_plan.watchlist_rows keep naming the same entries after the cutover; ``sheet_row`` is the last column
+    (a replaced view may only add columns at the end). Unnumbered rows (map not seeded yet) come last."""
+    ds = DATASETS["x_watchlist"]
+    cols = ",\n    ".join(f"{_sheet_cell(n, k)} as {n}" for n, k in ds.columns)
+    return (f"create or replace view {S}.v_watchlist_sheet as select\n    {cols},\n    m.row_no as sheet_row\n"
+            f"from {S}.x_watchlist left join {S}.watchlist_row_map m using (requesting_chief, type, value)"
+            " order by m.row_no nulls last, requesting_chief, type, value;\n")
+
+
 def _views() -> str:
     claims = CURATED["claims"]
     closed = ", ".join(_lit(s) for s in CLOSED_STATES)
     return (_sheet_view("v_query_plan_sheet", DATASETS["x_query_plan"], "x_query_plan", order="query_id")
-            + _sheet_view("v_watchlist_sheet", DATASETS["x_watchlist"], "x_watchlist",
-                          order="requesting_chief, type, value")
+            + _watchlist_view()
             + f"create or replace view {S}.v_claims_open as select {', '.join(n for n, _ in claims.data_columns)} "
               f"from {S}.claims where coalesce(lower(queue_state), '') not in ({closed}) "
               "order by priority nulls last, next_check nulls last, claim_id;\n")
@@ -512,7 +522,9 @@ def inbox_ddl() -> str:
     """Idempotent: safe to run on every inbox-mode cron run. Needs the curated tables (postgres_ddl)."""
     parts = [_helpers(), _inbox_table()]
     parts += [_upsert_fn(c) for c in CURATED.values()]
-    parts += [_ingest_fn(), _views(), _grants()]
+    from .watchlist_rows import ddl as watchlist_rows_ddl
+
+    parts += [_ingest_fn(), watchlist_rows_ddl(), _views(), _grants()]
     return "\n".join(parts)
 
 

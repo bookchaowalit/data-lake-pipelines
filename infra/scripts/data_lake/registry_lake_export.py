@@ -3,7 +3,7 @@
 
 Reads two checkouts that stay the source of truth (Git):
 
-* ``solo-empire`` ``repository-catalog/registries`` (data-sources.yaml, online-systems.yaml,
+* ``bookchaowalit-empire`` ``repository-catalog/registries`` (data-sources.yaml, online-systems.yaml,
   business-capabilities.yaml);
 * ``architecture-docs`` ``systems/ai-data/metadata-catalog`` (catalog.yaml, lineage.yaml).
 
@@ -222,7 +222,7 @@ def export(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--registries", type=Path, required=True,
-                        help="solo-empire repository-catalog/registries directory")
+                        help="bookchaowalit-empire repository-catalog/registries directory")
     parser.add_argument("--catalog", type=Path, required=True,
                         help="architecture-docs systems/ai-data/metadata-catalog directory")
     parser.add_argument("--data-lake-uri", default=os.environ.get("SOLO_EMPIRE_DATA_LAKE_URI", DEFAULT_LAKE_URI))

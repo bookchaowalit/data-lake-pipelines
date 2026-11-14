@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Stable watchlist row numbers for the Sheet cutover (x_lakehouse/watchlist_rows.py).
+
+Postgres tests run only with X_LAKE_TEST_DB_URL (throwaway database; they drop schema x_intel).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "infra" / "scripts"))
+
+from x_lakehouse import curated as cur  # noqa: E402
+from x_lakehouse import watchlist_rows as wr  # noqa: E402
+from x_lakehouse.inbox import ensure_inbox  # noqa: E402
+
+DB = os.environ.get("X_LAKE_TEST_DB_URL", "")
+A, B, C, D = ("chief-data", "account", "a"), ("chief-data", "account", "b"), ("chief-x", "keyword", "c"), \
+    ("chief-x", "keyword", "d")
+
+
+class PlanTests(unittest.TestCase):
+    def test_new_keys_take_their_sheet_numbers(self):
+        plan = wr.plan_seed([(2, A), (3, B)], {})
+        self.assertEqual(plan["to_insert"], [(2, A), (3, B)])
+        self.assertEqual((plan["moved"], plan["number_conflicts"]), ([], []))
+
+    def test_never_renumbers(self):
+        plan = wr.plan_seed([(2, B), (3, A)], {A: 2, B: 3})
+        self.assertEqual(len(plan["moved"]), 2)
+        self.assertEqual(plan["to_insert"], [])
+
+    def test_a_taken_number_is_a_conflict(self):
+        plan = wr.plan_seed([(2, C)], {A: 2})
+        self.assertEqual(plan["number_conflicts"], [2])
+
+    def test_header_problems_block_the_seed(self):
+        from types import SimpleNamespace as NS
+
+        self.assertEqual(wr.header_problems(NS(missing_columns=["value"], blank_key_rows=0)),
+                         {"missing_columns": ["value"]})
+        self.assertEqual(wr.header_problems(NS(missing_columns=[], blank_key_rows=3)), {"blank_key_rows": 3})
+        self.assertEqual(wr.header_problems(NS(missing_columns=[], blank_key_rows=0, order_differs=True)), {})
+
+    def test_cli_refuses_blank_keys_and_blocks_duplicates_before_the_migration(self):
+        """main(): row checks run (blank keys), and a dry run without the map fails on duplicates."""
+        import contextlib
+        import io
+        import json
+        from unittest import mock
+
+        from x_lakehouse import backfill
+        from x_lakehouse.pipeline import DatasetCheck
+
+        from x_lakehouse.coerce import type_row
+        from x_lakehouse.schemas import DATASETS
+
+        def rows(*vals):  # typed exactly as backfill.load() types the tab
+            return [type_row(DATASETS["x_watchlist"], dict(zip(wr.KEY, v)), sheet_row=i + 2)
+                    for i, v in enumerate(vals)]
+
+        class Conn:
+            def cursor(self):
+                return self
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, *a):
+                pass
+
+            def fetchone(self):
+                return (None,)  # to_regclass: the map does not exist yet
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        for tab, code, field in ((rows(A, ("chief-x", "keyword", "")), 2, "blank_key_rows"),
+                                 (rows(A, A), 1, "duplicate_keys_in_sheet")):
+            check = DatasetCheck("x_watchlist", "X Watchlist")
+            out = io.StringIO()
+            with mock.patch.object(backfill, "load", return_value=({"x_watchlist": tab}, {"x_watchlist": check}, [])), \
+                    mock.patch("x_lakehouse.curated.connect", return_value=Conn()), \
+                    mock.patch.dict(os.environ, {"X_LAKE_DB_URL": "x"}), contextlib.redirect_stdout(out):
+                self.assertEqual(wr.main(["--seed"]), code)
+            self.assertTrue(json.loads(out.getvalue()).get(field), out.getvalue())
+
+    def test_a_key_that_failed_to_type_blocks_the_seed(self):
+        from types import SimpleNamespace as NS
+
+        tab = [NS(sheet_row=2, errors={}), NS(sheet_row=3, errors={"value": {"raw": "9007199254740993", "reason": "x"}}),
+               NS(sheet_row=4, errors={"notes": {"raw": "", "reason": "x"}}), NS(sheet_row=None, errors={"type": {}})]
+        self.assertEqual(wr.key_coerce_rows(tab), [3])
+
+    def test_duplicate_keys_in_the_tab_are_reported(self):
+        self.assertEqual(wr.plan_seed([(2, A), (5, A)], {})["duplicate_keys_in_sheet"], [5])
+
+
+@unittest.skipUnless(DB, "set X_LAKE_TEST_DB_URL to a throwaway Postgres")
+class MapPostgresTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = cur.connect(DB)
+        with self.conn.cursor() as c:
+            c.execute("drop schema if exists x_intel cascade")
+        self.conn.commit()
+        ensure_inbox(self.conn)
+
+    def tearDown(self):
+        self.conn.rollback()
+        self.conn.close()
+
+    def add(self, *keys):
+        with self.conn.cursor() as c:
+            for chief, typ, value in keys:
+                c.execute("insert into x_intel.x_watchlist (requesting_chief, type, value) values (%s, %s, %s)",
+                          (chief, typ, value))
+        self.conn.commit()
+
+    def view(self):
+        with self.conn.cursor() as c:
+            c.execute("select requesting_chief, type, value, sheet_row from x_intel.v_watchlist_sheet")
+            rows = c.fetchall()
+        self.conn.commit()
+        return rows
+
+    def test_trigger_waits_for_the_seed(self):
+        self.add(A, B)
+        self.assertEqual(wr.read_map(self.conn), {})  # nothing numbered before the tab is seeded
+        self.assertEqual([r[3] for r in self.view()], [None, None])
+
+    def test_seed_uses_tab_numbers_then_numbers_the_rest_and_new_rows(self):
+        self.add(A, B, C)  # C is in curated but not in the tab (sent by a bot through the inbox)
+        dry = wr.seed(self.conn, [(2, A), (7, B)], execute=False)
+        self.assertEqual((dry["to_insert"], dry["written"], dry["curated_unmapped_before"]), (2, 0, 3))
+        self.assertEqual(wr.read_map(self.conn), {})
+        done = wr.seed(self.conn, [(2, A), (7, B)], execute=True)
+        self.assertEqual((done["written"], done["curated_numbered_after_tab"]), (3, 1))
+        self.assertEqual(wr.read_map(self.conn), {A: 2, B: 7, C: 8})
+        self.add(D)  # a new entry after the seed: the trigger numbers it like an append to the tab
+        self.assertEqual(wr.read_map(self.conn)[D], 9)
+        self.assertEqual(self.view(), [(*A, 2), (*B, 7), (*C, 8), (*D, 9)])
+
+    def test_seed_is_idempotent_and_blocks_on_a_moved_row(self):
+        self.add(A, B)
+        wr.seed(self.conn, [(2, A), (3, B)], execute=True)
+        again = wr.seed(self.conn, [(2, A), (3, B)], execute=True)
+        self.assertEqual((again["written"], again["blocked"]), (0, False))
+        moved = wr.seed(self.conn, [(2, B), (3, A)], execute=True)
+        self.assertTrue(moved["blocked"])
+        self.assertEqual(moved["written"], 0)
+        self.assertEqual(wr.read_map(self.conn), {A: 2, B: 3})
+
+    def test_upsert_of_an_existing_entry_keeps_its_number(self):
+        self.add(A)
+        wr.seed(self.conn, [(5, A)], execute=True)
+        with self.conn.cursor() as c:
+            c.execute("insert into x_intel.x_watchlist (requesting_chief, type, value, purpose) values (%s, %s, %s, 'x')"
+                      " on conflict (requesting_chief, type, value) do update set purpose = excluded.purpose", A)
+        self.conn.commit()
+        self.assertEqual(wr.read_map(self.conn), {A: 5})
+
+    def test_an_insert_during_the_seed_waits_and_is_numbered(self):
+        """The trigger takes the allocation lock before it checks for an empty map (Codex: lock before checking)."""
+        import threading
+
+        self.add(A)
+        seeder = cur.connect(DB)
+        with seeder.cursor() as c:  # the seed's transaction, holding the lock, map still uncommitted
+            c.execute("select pg_advisory_xact_lock(hashtext('x_intel.watchlist_row_map'))")
+            c.execute("insert into x_intel.watchlist_row_map (row_no, requesting_chief, type, value, origin) "
+                      "values (2, %s, %s, %s, 'sheet')", A)
+        done = threading.Event()
+
+        def bot_insert():
+            bot = cur.connect(DB)
+            with bot.cursor() as c:
+                c.execute("insert into x_intel.x_watchlist (requesting_chief, type, value) values (%s, %s, %s)", B)
+            bot.commit()
+            bot.close()
+            done.set()
+
+        worker = threading.Thread(target=bot_insert)
+        worker.start()
+        self.assertFalse(done.wait(1.0))  # blocked on the lock, not racing past an "empty" map
+        seeder.commit()
+        seeder.close()
+        worker.join(10)
+        self.assertTrue(done.is_set())
+        self.assertEqual(wr.read_map(self.conn), {A: 2, B: 3})
+
+    def test_execute_aborts_when_a_planned_number_was_taken(self):
+        self.add(A, B)
+        with self.conn.cursor() as c:  # another writer took row 3 for B after a dry run planned it for... A at 3
+            c.execute("insert into x_intel.watchlist_row_map (row_no, requesting_chief, type, value) "
+                      "values (3, %s, %s, %s)", B)
+        self.conn.commit()
+        res = wr.seed(self.conn, [(3, A)], execute=True)
+        self.assertTrue(res["blocked"])
+        self.assertEqual(res["written"], 0)
+        self.assertEqual(wr.read_map(self.conn), {B: 3})
+
+    def test_replaces_the_old_view_in_place(self):
+        """Production has the 7-column view ordered by key; the new one only adds sheet_row at the end."""
+        with self.conn.cursor() as c:
+            c.execute("drop view x_intel.v_watchlist_sheet")
+            c.execute("create view x_intel.v_watchlist_sheet as select requesting_chief, type, value, purpose, "
+                      "added_date::text as added_date, last_used::text as last_used, tag from x_intel.x_watchlist "
+                      "order by requesting_chief, type, value")
+        self.conn.commit()
+        ensure_inbox(self.conn)
+        self.assertEqual(self.view(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
