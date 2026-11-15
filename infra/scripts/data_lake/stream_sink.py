@@ -726,27 +726,62 @@ def convert_avro_file(
     }
 
 
+CONVERTED_INDEX_PREFIX = "control/state/stream-converted"
+
+
+def _converted_index_key(avro_key: str) -> str:
+    """Index entry for one landing Avro key (landing objects are immutable, so the key is stable)."""
+    return f"{CONVERTED_INDEX_PREFIX}/{avro_key}.json"
+
+
+def _record_converted(store: ObjectStore, avro_key: str, result: dict[str, Any]) -> None:
+    entry = {
+        "avro_key": avro_key,
+        "bronze_key": result.get("bronze_key"),
+        "manifest_key": result.get("manifest_key"),
+        "record_count": result.get("record_count"),
+    }
+    store.put_bytes(
+        _converted_index_key(avro_key),
+        (canonical_json(entry) + "\n").encode("utf-8"),
+        content_type="application/json",
+    )
+
+
 def convert_pending(
     *,
     data_lake_uri: str,
     iceberg_catalog_uri: str | None = None,
     iceberg_warehouse_uri: str | None = None,
 ) -> dict[str, Any]:
-    """Scan the immutable stream landing prefix and convert pending Avro files."""
+    """Scan the immutable stream landing prefix and convert pending Avro files.
+
+    A landing key that already has an entry under ``control/state/stream-converted/`` is
+    skipped without reading it: one listing replaces three object reads per historical file,
+    which grew past the event-sink job timeout (330 files, ~16 min on 2026-11-15). Keys without
+    an entry go through ``convert_avro_file`` (full manifest and Bronze checksum checks) and get
+    an entry afterwards, so a cancelled run keeps its progress. ``convert --avro-key`` still
+    re-verifies one file end to end.
+    """
     store = ObjectStore(data_lake_uri)
     avro_keys = [key for key in store.list_keys("landing/stream") if key.endswith(".avro")]
+    indexed_keys = set(store.list_keys(CONVERTED_INDEX_PREFIX))
     results: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    indexed = 0
     for avro_key in avro_keys:
+        if _converted_index_key(avro_key) in indexed_keys:
+            indexed += 1
+            continue
         try:
-            results.append(
-                convert_avro_file(
-                    data_lake_uri=data_lake_uri,
-                    avro_key=avro_key,
-                    iceberg_catalog_uri=iceberg_catalog_uri,
-                    iceberg_warehouse_uri=iceberg_warehouse_uri,
-                )
+            result = convert_avro_file(
+                data_lake_uri=data_lake_uri,
+                avro_key=avro_key,
+                iceberg_catalog_uri=iceberg_catalog_uri,
+                iceberg_warehouse_uri=iceberg_warehouse_uri,
             )
+            _record_converted(store, avro_key, result)
+            results.append(result)
         except (AvroUnavailable, IcebergUnavailable, ParquetUnavailable, StorageError, ValueError) as exc:
             # Keep polling other files, but expose a degraded status for the
             # healthcheck instead of silently dropping a poison object.
@@ -756,7 +791,8 @@ def convert_pending(
         "data_lake": store.describe(),
         "scanned": len(avro_keys),
         "converted": sum(result["status"] == "success" for result in results),
-        "already_converted": sum(result["status"] == "already_converted" for result in results),
+        "already_converted": indexed + sum(result["status"] == "already_converted" for result in results),
+        "indexed": indexed,
         "errors": errors,
         "results": results,
     }

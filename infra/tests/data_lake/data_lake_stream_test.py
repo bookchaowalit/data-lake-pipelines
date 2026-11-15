@@ -137,5 +137,61 @@ class StreamLakeContractTests(unittest.TestCase):
             self.assertTrue(retry["checkpoint_existed"])
 
 
+    def test_convert_pending_skips_indexed_avro_without_reading_it(self):
+        messages = [StreamMessage("events", 0, 30, {"id": "evt-30", "payload": {"value": 1}})]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sunk = run_once(
+                FakeConsumer(messages.copy()),
+                data_lake_uri=temp_dir,
+                source="sensor",
+                domain="operations",
+                dataset="events",
+                poll_ms=1,
+                max_records=10,
+            )
+            first = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual(first["converted"], 1)
+            self.assertEqual(first["indexed"], 0)
+            index_keys = ObjectStore(temp_dir).list_keys("control/state/stream-converted")
+            self.assertEqual(len(index_keys), 1)
+
+            original_get = ObjectStore.get_bytes
+            reads: list[str] = []
+
+            def counting_get(store, key):
+                reads.append(key)
+                return original_get(store, key)
+
+            with patch.object(ObjectStore, "get_bytes", counting_get):
+                second = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual(second["status"], "healthy")
+            self.assertEqual(second["scanned"], 1)
+            self.assertEqual(second["already_converted"], 1)
+            self.assertEqual(second["indexed"], 1)
+            self.assertNotIn(sunk["avro_key"], reads)
+            self.assertEqual(reads, [])
+
+    def test_convert_pending_backfills_index_for_previously_converted_avro(self):
+        messages = [StreamMessage("events", 0, 40, {"id": "evt-40", "payload": {"value": 1}})]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sunk = run_once(
+                FakeConsumer(messages.copy()),
+                data_lake_uri=temp_dir,
+                source="sensor",
+                domain="operations",
+                dataset="events",
+                poll_ms=1,
+                max_records=10,
+            )
+            # Converted before the index existed (single-file path writes no index entry).
+            convert_avro_file(data_lake_uri=temp_dir, avro_key=sunk["avro_key"])
+            store = ObjectStore(temp_dir)
+            self.assertEqual(store.list_keys("control/state/stream-converted"), [])
+            backfill = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual(backfill["already_converted"], 1)
+            self.assertEqual(backfill["indexed"], 0)
+            self.assertEqual(len(store.list_keys("control/state/stream-converted")), 1)
+            self.assertEqual(convert_pending(data_lake_uri=temp_dir)["indexed"], 1)
+
 if __name__ == "__main__":
     unittest.main()

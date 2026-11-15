@@ -116,7 +116,7 @@ jobs:
         run: |
           if .venv/bin/python infra/scripts/data_lake/stream_sink.py convert --watch --once --json \
               > "$RUNNER_TEMP/convert.json" 2> "$RUNNER_TEMP/convert.err"; then
-            jq '{status, scanned, converted, already_converted, errors: (.errors | length)}' "$RUNNER_TEMP/convert.json" \
+            jq '{status, scanned, converted, already_converted, indexed, errors: (.errors | length)}' "$RUNNER_TEMP/convert.json" \
               | tee -a "$GITHUB_STEP_SUMMARY"
             echo "status=$(jq -r .status "$RUNNER_TEMP/convert.json")" >> "$GITHUB_OUTPUT"
           else
