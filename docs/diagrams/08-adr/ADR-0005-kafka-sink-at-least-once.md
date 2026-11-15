@@ -12,7 +12,7 @@ ADR-0008 (architecture-docs) วาง Aiven Kafka เป็น event plane แ�
 - `stream_sink.py` ใช้ confluent-kafka (librdkafka) ผ่าน adapter เล็ก เพราะ kafka-python-ng ยืนยันตัวตนกับ Kafka 4.x ไม่ได้; SASL_SSL เมื่อมี `STREAM_KAFKA_USERNAME`, PLAINTEXT สำหรับ Redpanda ในเครื่อง
 - ทุก micro-batch: เขียน Avro, manifest, checkpoint แบบ immutable ก่อน แล้วค่อย commit offset (at-least-once); batch id มาจาก topic/partition/offset จึง retry ได้
 - `convert` แปลง Avro เป็น Bronze Parquet (`occurred_at` → `event_time`)
-- `convert --watch` ข้าม landing Avro ที่มี entry ใน `control/state/stream-converted/<avro_key>.json` โดยไม่อ่านไฟล์ (2026-11-15: เดิมอ่าน 3 object ต่อไฟล์ทุกรอบ 330 ไฟล์ใช้ ~16 นาที จน job เกิน timeout 20 นาที); ไฟล์ที่ยังไม่มี entry ผ่าน `convert_avro_file` เต็มรูปแบบแล้วจึงเขียน entry ส่วน `convert --avro-key` ยังตรวจ checksum ครบ
+- `convert --watch` ข้าม landing Avro ที่มี entry ใน `control/state/stream-converted/<avro_key>/conversion_id=<id>.json` โดยไม่อ่านไฟล์ ถ้า Bronze part ของ id นั้นยังอยู่ใน listing (หายเมื่อไร = degraded) (2026-11-15: เดิมอ่าน 3 object ต่อไฟล์ทุกรอบ 330 ไฟล์ใช้ ~16 นาที จน job เกิน timeout 20 นาที); ไฟล์ที่ยังไม่มี entry ผ่าน `convert_avro_file` เต็มรูปแบบแล้วจึงเขียน entry ส่วน `convert --avro-key` ยังตรวจ checksum ครบ
 - e2e: `event_heartbeat.py` ส่ง `ops.heartbeat.emitted` แล้วตรวจว่า event นั้น (`--expect-id`) กลับมาถึง lake ในรอบเดียวกัน
 - group `lake-sink` เริ่มที่ปลาย topic ณ 2026-11-04 (ข้าม smoke data ของ M3)
 - fail เมื่อ group join timeout หรือ commit ต่อ partition ล้ม (`a175820`)

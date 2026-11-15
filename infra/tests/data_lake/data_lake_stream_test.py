@@ -193,5 +193,24 @@ class StreamLakeContractTests(unittest.TestCase):
             self.assertEqual(len(store.list_keys("control/state/stream-converted")), 1)
             self.assertEqual(convert_pending(data_lake_uri=temp_dir)["indexed"], 1)
 
+    def test_convert_pending_degrades_when_indexed_bronze_part_is_gone(self):
+        messages = [StreamMessage("events", 0, 50, {"id": "evt-50", "payload": {"value": 1}})]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_once(
+                FakeConsumer(messages.copy()),
+                data_lake_uri=temp_dir,
+                source="sensor",
+                domain="operations",
+                dataset="events",
+                poll_ms=1,
+                max_records=10,
+            )
+            first = convert_pending(data_lake_uri=temp_dir)
+            Path(temp_dir, first["results"][0]["bronze_key"]).unlink()
+            after = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual(after["status"], "degraded")
+            self.assertEqual(after["indexed"], 0)
+            self.assertEqual(after["errors"][0]["error"], "IndexedBronzeMissing")
+
 if __name__ == "__main__":
     unittest.main()

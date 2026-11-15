@@ -727,22 +727,52 @@ def convert_avro_file(
 
 
 CONVERTED_INDEX_PREFIX = "control/state/stream-converted"
+_BRONZE_PART_PREFIX = "part-"
+_BRONZE_PART_SUFFIX = ".parquet"
 
 
-def _converted_index_key(avro_key: str) -> str:
-    """Index entry for one landing Avro key (landing objects are immutable, so the key is stable)."""
-    return f"{CONVERTED_INDEX_PREFIX}/{avro_key}.json"
+def _converted_index_key(avro_key: str, conversion_id: str) -> str:
+    """Index entry for one landing Avro key, bound to the conversion id of its Bronze part.
+
+    Landing objects are written once (``--if-none-match``), so the key stays bound to its bytes.
+    """
+    return f"{CONVERTED_INDEX_PREFIX}/{avro_key}/conversion_id={conversion_id}.json"
+
+
+def _parse_index_key(key: str) -> tuple[str, str] | None:
+    prefix = CONVERTED_INDEX_PREFIX + "/"
+    if not key.startswith(prefix) or not key.endswith(".json"):
+        return None
+    avro_key, _, leaf = key[len(prefix) : -len(".json")].rpartition("/")
+    if not avro_key or not leaf.startswith("conversion_id="):
+        return None
+    return avro_key, leaf[len("conversion_id=") :]
+
+
+def _bronze_conversion_ids(store: ObjectStore) -> set[str]:
+    ids: set[str] = set()
+    for key in store.list_keys("bronze"):
+        leaf = key.rsplit("/", 1)[-1]
+        if leaf.startswith(_BRONZE_PART_PREFIX) and leaf.endswith(_BRONZE_PART_SUFFIX):
+            ids.add(leaf[len(_BRONZE_PART_PREFIX) : -len(_BRONZE_PART_SUFFIX)])
+    return ids
 
 
 def _record_converted(store: ObjectStore, avro_key: str, result: dict[str, Any]) -> None:
+    bronze_key = str(result.get("bronze_key") or "")
+    leaf = bronze_key.rsplit("/", 1)[-1]
+    if not (leaf.startswith(_BRONZE_PART_PREFIX) and leaf.endswith(_BRONZE_PART_SUFFIX)):
+        raise StorageError("Stream conversion result has no Bronze part key")
+    conversion_id = leaf[len(_BRONZE_PART_PREFIX) : -len(_BRONZE_PART_SUFFIX)]
     entry = {
         "avro_key": avro_key,
-        "bronze_key": result.get("bronze_key"),
+        "conversion_id": conversion_id,
+        "bronze_key": bronze_key,
         "manifest_key": result.get("manifest_key"),
         "record_count": result.get("record_count"),
     }
     store.put_bytes(
-        _converted_index_key(avro_key),
+        _converted_index_key(avro_key, conversion_id),
         (canonical_json(entry) + "\n").encode("utf-8"),
         content_type="application/json",
     )
@@ -756,22 +786,32 @@ def convert_pending(
 ) -> dict[str, Any]:
     """Scan the immutable stream landing prefix and convert pending Avro files.
 
-    A landing key that already has an entry under ``control/state/stream-converted/`` is
-    skipped without reading it: one listing replaces three object reads per historical file,
-    which grew past the event-sink job timeout (330 files, ~16 min on 2026-11-15). Keys without
-    an entry go through ``convert_avro_file`` (full manifest and Bronze checksum checks) and get
-    an entry afterwards, so a cancelled run keeps its progress. ``convert --avro-key`` still
-    re-verifies one file end to end.
+    A landing key with an entry under ``control/state/stream-converted/`` is skipped without
+    reading it, as long as the Bronze part named by the entry's conversion id still appears in
+    the Bronze listing; a missing part is reported as an error (status ``degraded``). Listings
+    replace three object reads per historical file, which grew past the event-sink job timeout
+    (330 files, ~16 min on 2026-11-15). Keys without an entry go through ``convert_avro_file``
+    (full manifest and Bronze checksum checks) and get an entry afterwards, so a cancelled run
+    keeps its progress. ``convert --avro-key`` still re-verifies one file end to end.
     """
     store = ObjectStore(data_lake_uri)
     avro_keys = [key for key in store.list_keys("landing/stream") if key.endswith(".avro")]
-    indexed_keys = set(store.list_keys(CONVERTED_INDEX_PREFIX))
+    index: dict[str, set[str]] = {}
+    for key in store.list_keys(CONVERTED_INDEX_PREFIX):
+        parsed = _parse_index_key(key)
+        if parsed:
+            index.setdefault(parsed[0], set()).add(parsed[1])
+    bronze_ids = _bronze_conversion_ids(store) if index else set()
     results: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     indexed = 0
     for avro_key in avro_keys:
-        if _converted_index_key(avro_key) in indexed_keys:
-            indexed += 1
+        conversion_ids = index.get(avro_key)
+        if conversion_ids:
+            if conversion_ids <= bronze_ids:
+                indexed += 1
+            else:
+                errors.append({"avro_key": avro_key, "error": "IndexedBronzeMissing"})
             continue
         try:
             result = convert_avro_file(
