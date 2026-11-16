@@ -446,16 +446,27 @@ def _a(title: str, link: str) -> str:
 
 def render(facts: Facts, answer: dict[str, Any] | None) -> str:
     w, t = facts.window, facts.totals
-    lines = [f"<b>X Intelligence · {_e(KIND_TITLE[w.kind])}</b>",
-             f"{w.start.astimezone(TZ):%d/%m %H:%M} – {w.end.astimezone(TZ):%d/%m %H:%M} น.",
-             f"สัญญาณ {t['signals']} · แจ้งเตือน {t['alerts']} (ด่วน {t['urgent']}) · โอกาส {t['opportunities']} "
-             f"· แหล่ง T1/T2 {t['strong_sources']}"]
+    lines = [f"<b>📡 X · {_e(KIND_TITLE[w.kind])}</b> · "
+             f"{w.start.astimezone(TZ):%d/%m %H:%M}–{w.end.astimezone(TZ):%d/%m %H:%M}"]
     ft = facts.feed_totals
-    if ft["posts"]:
-        lines.append(f"โพสต์ดิบ {ft['posts']} · บัญชี {ft['authors']} · watch {ft['watches']}")
+    feed_only = not t["signals"]
+    if feed_only:
+        # No screened signal: one count line, the AI headline and at most three points (no watch codes).
+        lines.append("ยังไม่มีสัญญาณใหม่" + (f" · โพสต์ดิบ {ft['posts']} จาก {ft['authors']} บัญชี" if ft["posts"] else ""))
+    else:
+        lines.append(f"สัญญาณ {t['signals']} · 🔔 {t['alerts']} (ด่วน {t['urgent']}) · 💡 {t['opportunities']} "
+                     f"· T1/T2 {t['strong_sources']}" + (f" · โพสต์ดิบ {ft['posts']}" if ft["posts"] else ""))
     if not facts.has_data:
-        lines.append("\nช่วงนี้ยังไม่มีสัญญาณใหม่ และไม่มีโพสต์ใหม่")
+        lines[-1] = "ยังไม่มีสัญญาณใหม่ และไม่มีโพสต์ใหม่"
         return "\n".join(lines + _meta_lines(facts))
+    if answer and feed_only:
+        lines += ["", f"<b>{_e(answer['headline_th'])}</b>"] + [f"• {_e(s)}" for s in answer["summary_th"][:3]]
+        if answer["alerts"]:
+            lines += [f"🔔 {_a(i['title'], i['link'])} — {_e(i['why'])}" for i in answer["alerts"][:2]]
+        lines += _meta_lines(facts)
+        if facts.withheld:
+            lines.append(f"<i>ซ่อน {facts.withheld} รายการ (ตรงรายชื่อลูกค้า)</i>")
+        return "\n".join(lines)
     if answer:
         lines += ["", f"<b>{_e(answer['headline_th'])}</b>"] + [f"• {_e(s)}" for s in answer["summary_th"]]
         for part, label in (("alerts", "🔔 แจ้งเตือน"), ("opportunities", "💡 โอกาส")):
@@ -485,7 +496,7 @@ def render(facts: Facts, answer: dict[str, Any] | None) -> str:
         lines += ["", f"<b>Claims รอตรวจ</b> {len(facts.claims)}+"]
     lines += _meta_lines(facts)
     if facts.withheld:
-        lines.append(f"\n<i>ซ่อน {facts.withheld} รายการที่ตรงรายชื่อลูกค้า</i>")
+        lines.append(f"\n<i>ซ่อน {facts.withheld} รายการ (ตรงรายชื่อลูกค้า)</i>")
     return "\n".join(lines)
 
 

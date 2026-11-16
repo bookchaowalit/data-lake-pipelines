@@ -245,7 +245,18 @@ class DigestTests(unittest.TestCase):
         self.assertIn("โพสต์ที่คนสนใจมากสุด", text)
         self.assertIn('href="https://x.com/a/status/2"', text)
         self.assertNotIn("<b>⁠", text.replace("&lt;b&gt;", ""))  # post text is escaped
-        self.assertNotIn("ยังไม่มีสัญญาณใหม่", text)
+        self.assertIn("ยังไม่มีสัญญาณใหม่ · โพสต์ดิบ 1", text)
+        self.assertNotIn("และไม่มีโพสต์ใหม่", text)
+
+    def test_feed_only_ai_digest_is_short(self):
+        f = self.facts([row("2", START + timedelta(hours=1), likes=5, text="duckdb")])
+        answer = {"headline_th": "หัวข้อ", "summary_th": ["a", "b", "c", "d"], "alerts": [], "opportunities": [],
+                  "watch": ["w"]}
+        text = digest.render(f, answer)
+        self.assertIn("• c", text)
+        self.assertNotIn("• d", text)
+        self.assertNotIn("ติดตาม", text)
+        self.assertNotIn("watch ที่เจอโพสต์มากสุด", text)
 
     def test_empty_feed_and_no_signals_is_the_short_note(self):
         self.assertIn("ยังไม่มีสัญญาณใหม่", digest.render(self.facts([]), None))
