@@ -79,7 +79,9 @@ def plan(store: Store, prefix: str) -> dict[str, Any]:
         for i, rk in enumerate(cols["_row_key"]):
             # A value that failed to coerce is null here with its source text in _coerce_errors: two such
             # rows may differ, so a row with an error in a fetch column is never grouped (always kept).
-            if set(json.loads(cols["_coerce_errors"][i] or "{}")) & set(SAME_FETCH):
+            # The same holds for collected_at, which picks the copy to keep (null cannot be ordered).
+            if (set(json.loads(cols["_coerce_errors"][i] or "{}")) & {*SAME_FETCH, "collected_at"}
+                    or cols["collected_at"][i] is None):
                 continue
             fetch = tuple(cols[c][i] for c in SAME_FETCH)
             at = cols["collected_at"][i]

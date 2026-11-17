@@ -183,6 +183,14 @@ class DedupeTest(unittest.TestCase):
         self.send([b], DAY1 + timedelta(hours=9))
         self.assertEqual(dedupe_raw.plan(self.store, "p")["drop"], 0)
 
+    def test_rows_with_an_uncoercible_collected_at_are_kept(self) -> None:
+        self.send([row("8", DAY1)], DAY1)
+        typed = [type_row(DS, row("8", DAY1) | {"collected_at": "yesterday-ish"})]
+        write_raw(DS, typed, [DAY1], store=self.store, prefix="p", source="inbox", execute=True,
+                  run_date=DAY1.date(), now=DAY1.astimezone(timezone.utc))
+        p = dedupe_raw.plan(self.store, "p")
+        self.assertEqual((p["rows"], p["drop"]), (2, 0))
+
     def test_part_numbers_reserved_by_a_manifest_are_skipped(self) -> None:
         self.seed()
         # A drain that crashed after its manifest entry and before its part reserved part-0005.
