@@ -153,6 +153,21 @@ that call replaces every rule, so read the list first and send it back whole). R
 The `_manifests` under `private/` are small and stay. Public `x_spaces` / `x_communities` /
 `x_list_sources` / `x_post_engagers` / `x_news` raw is kept like every other public raw dataset.
 
+### One-off repair: resent `x_home_timeline` rows (owner 2026-11-17)
+
+Until 2026-11-17 Chief Data stamped `collected_at` with the send time, not the fetch time, so one
+fetch sent in two or three runs landed as two or three raw rows (dry run 2026-11-17: 695 of 2,084).
+`python -m x_lakehouse.dedupe_raw` (dry run; `--apply` writes) treats rows with the same `post_id`,
+`likes`, `reposts`, `replies`, `quotes` and `views` as one fetch and keeps the earliest `collected_at`;
+a re-pull whose counts moved stays. It holds the drain lock, refuses while a row to drop was drained
+less than 25 h ago (the run's validate step would count it missing), copies every part it replaces to
+`<prefix>/private/_backup/dedupe-<UTC>/` (read back byte for byte, plus `plan.json`), then per
+partition writes a manifest entry and one new part and deletes the old parts. Rows keep their own
+`_batch_id` / `_ingested_at`. Restore: copy the backup parts back to `private/raw/` and delete the new
+parts named in `plan.json`. The backup prefix gets its own 30-day lifecycle rule
+(`private-backup-30d`), like the timeline itself. A rewritten part is a new object, so the 30-day rule
+restarts for the rows it holds (at most 30 days late).
+
 ## 3. Section 8: dropped (owner 2026-11-12)
 
 The prompt's section 8 asked for small curated tables `x_trends_th`, `x_trends_intl`,
