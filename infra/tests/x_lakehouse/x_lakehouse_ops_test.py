@@ -42,6 +42,14 @@ class IssueTests(unittest.TestCase):
             "digest: error OperationalError",  # the type only, never the library text
         ])
 
+    def test_provider_auth_fallback_is_left_to_the_streak_alert(self):
+        events = [{"event": "digest", "mode": "send", "reports": [
+            {"digest_id": "midday:2026-11-17", "status": "sent", "ai": False,
+             "fallback_reason": "gateway error provider_auth"},
+            {"digest_id": "daily:2026-11-17", "status": "error", "ai": False,
+             "fallback_reason": "gateway error provider_auth"}]}]
+        self.assertEqual(scheduled._issues(events), ["digest daily:2026-11-17: error"])  # delivery still alerts
+
     def test_meta_step_problems_are_reported(self):
         events = [{"event": "meta", "mode": "write", "status": "error", "error": "OperationalError"},
                   {"event": "meta", "mode": "write", "labelling": "error ConfigError", "ocr_done": 0,

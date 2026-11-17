@@ -96,7 +96,9 @@ def _issues(events: list[dict[str, object]]) -> list[str]:
                     continue
                 if r.get("status") in DIGEST_BAD:
                     out.append(f"digest {r.get('digest_id')}: {r.get('status')}")
-                elif r.get("status") == "sent" and r.get("ai") is False and r.get("fallback_reason"):
+                # provider_auth has its own once-per-streak alert (digest._auth_alert): not repeated here.
+                elif (r.get("status") == "sent" and r.get("ai") is False and r.get("fallback_reason")
+                      and digest.AUTH_FAILURE not in str(r["fallback_reason"])):
                     out.append(f"digest {r.get('digest_id')}: facts-only ({str(r['fallback_reason'])[:80]})")
         elif ev == "weekly" and isinstance(e.get("triage"), str) and str(e["triage"]).startswith("error"):
             out.append(f"weekly {e.get('week')}: triage {str(e['triage'])[:80]}")
