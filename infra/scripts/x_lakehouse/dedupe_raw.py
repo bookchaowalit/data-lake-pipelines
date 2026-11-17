@@ -33,7 +33,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from .lake import PART, LakeError, Store, _join, dataset_root, parquet_bytes, raw_dir
+from .lake import MANIFEST_PART, PART, LakeError, Store, _join, dataset_root, parquet_bytes, raw_dir
 from .schemas import DATASETS
 
 DATASET = "x_home_timeline"
@@ -74,9 +74,13 @@ def plan(store: Store, prefix: str) -> dict[str, Any]:
     for key, t in tables.items():
         cols = {
             c: t.column(c).to_pylist()
-            for c in (*SAME_FETCH, "collected_at", "_row_key")
+            for c in (*SAME_FETCH, "collected_at", "_row_key", "_coerce_errors")
         }
         for i, rk in enumerate(cols["_row_key"]):
+            # A value that failed to coerce is null here with its source text in _coerce_errors: two such
+            # rows may differ, so a row with an error in a fetch column is never grouped (always kept).
+            if set(json.loads(cols["_coerce_errors"][i] or "{}")) & set(SAME_FETCH):
+                continue
             fetch = tuple(cols[c][i] for c in SAME_FETCH)
             at = cols["collected_at"][i]
             rows.append((key, rk, fetch, at))
@@ -86,7 +90,7 @@ def plan(store: Store, prefix: str) -> dict[str, Any]:
     keep = {rk for _, rk in best.values()}
     drop: dict[str, set[str]] = defaultdict(set)  # part key -> row keys to drop
     for key, rk, _, _ in rows:
-        if rk not in keep:
+        if rk not in keep:  # rows skipped above are not in ``rows``, so they are never dropped
             drop[key].add(rk)
     days = {}
     for day, keys in sorted(parts.items()):
@@ -148,10 +152,17 @@ def apply(
             store.put_new(copy, data)
             if store.read(copy) != data:
                 raise LakeError(f"backup copy differs: {copy}")
+    # Part numbers a manifest entry already claims stay unused, as in lake.write_raw (a drain that
+    # crashed between its manifest and its part reserved that number).
+    reserved: dict[str, int] = {}
+    for key in store.list(_join(root, "_manifests", DATASET) + "/"):
+        if m := MANIFEST_PART.search(key):
+            reserved[m.group(1)] = max(reserved.get(m.group(1), 0), int(m.group(2)) + 1)
     new_parts: dict[str, str] = {}
     for day, d in changed.items():
         part_dir = _join(raw_dir(prefix, DATASETS[DATASET]), f"date={day}")
-        nxt = 1 + max(int(PART.search(k).group(1)) for k in d["parts"])  # type: ignore[union-attr]
+        nxt = max(1 + max(int(PART.search(k).group(1)) for k in d["parts"]),  # type: ignore[union-attr]
+                  reserved.get(day, 0))
         new_parts[day] = _join(part_dir, f"part-{nxt:04d}.parquet")
     store.put_new(
         _join(backup, "plan.json"),

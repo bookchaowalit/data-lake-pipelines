@@ -176,6 +176,22 @@ class DedupeTest(unittest.TestCase):
                 self.store, "p", p2, now=datetime(2026, 11, 18, 1, tzinfo=timezone.utc)
             )
 
+    def test_rows_with_a_coerce_error_in_a_fetch_column_are_kept(self) -> None:
+        a = row("7", DAY1) | {"views": "100-ish"}
+        b = row("7", DAY1 + timedelta(hours=9)) | {"views": "200-ish"}
+        self.send([a], DAY1)
+        self.send([b], DAY1 + timedelta(hours=9))
+        self.assertEqual(dedupe_raw.plan(self.store, "p")["drop"], 0)
+
+    def test_part_numbers_reserved_by_a_manifest_are_skipped(self) -> None:
+        self.seed()
+        # A drain that crashed after its manifest entry and before its part reserved part-0005.
+        self.store.put_new("p/private/_manifests/x_home_timeline/crashed/date=2026-11-14-part-0005.json", b"{}")
+        out = dedupe_raw.apply(self.store, "p", dedupe_raw.plan(self.store, "p"),
+                               now=datetime(2026, 11, 18, tzinfo=timezone.utc))
+        self.assertTrue(dedupe_raw._parts(self.store, "p")["2026-11-14"][0].endswith("part-0006.parquet"))
+        self.assertEqual(out["dropped"], 3)
+
     @unittest.skipUnless(DB, "X_LAKE_TEST_DB_URL not set")
     def test_recently_drained_rows_block_the_repair(self) -> None:
         from x_lakehouse import curated as cur
