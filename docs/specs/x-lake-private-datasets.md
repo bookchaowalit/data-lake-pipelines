@@ -159,7 +159,11 @@ Until 2026-11-17 Chief Data stamped `collected_at` with the send time, not the f
 fetch sent in two or three runs landed as two or three raw rows (dry run 2026-11-17: 695 of 2,084).
 `python -m x_lakehouse.dedupe_raw` (dry run; `--apply` writes) treats rows with the same `post_id`,
 `likes`, `reposts`, `replies`, `quotes` and `views` as one fetch and keeps the earliest `collected_at`;
-a re-pull whose counts moved stays. It holds the drain lock, refuses while a row to drop is undrained or was drained
+a re-pull whose counts moved stays. Only rows with `collected_at` before 2026-11-17 18:00 ICT are
+grouped (`CUTOFF`): from run1117e on, `collected_at` is the fetch time, and a morning and an evening
+fetch with equal counts are two real rows, so a rerun never merges them. Rows before the fix keep
+the send time as `collected_at` (2–20 min after the real fetch, Chief Data 2026-11-17); the repair
+does not change it. It holds the drain lock, refuses while a row to drop is undrained or was drained
 less than 25 h ago (the run's validate step would count it missing), copies every part it replaces to
 `<prefix>/private/_backup/dedupe-<UTC>/` (read back byte for byte, plus `plan.json`), then per
 partition writes a manifest entry and one new part and deletes the old parts. Rows keep their own
