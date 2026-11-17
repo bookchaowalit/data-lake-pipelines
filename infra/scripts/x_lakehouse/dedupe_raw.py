@@ -4,6 +4,8 @@ Until 2026-11-17 Chief Data stamped ``collected_at`` with the send time instead 
 one fetch sent in two or three runs landed as two or three raw rows with different keys. A copy is a
 row whose ``post_id`` and engagement counts (likes, reposts, replies, quotes, views) equal another
 row's; the copy with the earliest ``collected_at`` is kept. A real re-pull whose counts moved is kept.
+Only rows collected before :data:`CUTOFF` are grouped: from run1117e on, ``collected_at`` is the fetch
+time, and a morning and an evening fetch with equal counts are two real rows (Chief Data 2026-11-17).
 
 The raw layer is append-only, so this is the one sanctioned rewrite, and it runs in this order:
 
@@ -40,6 +42,8 @@ DATASET = "x_home_timeline"
 SAME_FETCH = ("post_id", "likes", "reposts", "replies", "quotes", "views")
 BATCH_PREFIX = "dedupe-"
 VALIDATE_WINDOW = timedelta(hours=25)  # validate checks rows drained in the last 24 h
+# After the 2026-11-17 morning run, before run1117e's timeline call (~18:40 ICT): the first fetch-time rows.
+CUTOFF = datetime(2026, 11, 17, 18, 0, tzinfo=timezone(timedelta(hours=7)))
 
 
 def _parts(store: Store, prefix: str) -> dict[str, list[str]]:
@@ -80,8 +84,10 @@ def plan(store: Store, prefix: str) -> dict[str, Any]:
             # A value that failed to coerce is null here with its source text in _coerce_errors: two such
             # rows may differ, so a row with an error in a fetch column is never grouped (always kept).
             # The same holds for collected_at, which picks the copy to keep (null cannot be ordered).
+            # Rows from CUTOFF on carry the fetch time, so equal counts there are separate fetches.
             if (set(json.loads(cols["_coerce_errors"][i] or "{}")) & {*SAME_FETCH, "collected_at"}
-                    or cols["collected_at"][i] is None):
+                    or cols["collected_at"][i] is None
+                    or cols["collected_at"][i] >= CUTOFF):  # fetch-time rows: never a resend
                 continue
             fetch = tuple(cols[c][i] for c in SAME_FETCH)
             at = cols["collected_at"][i]
@@ -242,6 +248,7 @@ def summary(p: dict[str, Any]) -> dict[str, Any]:
         "rows": p["rows"],
         "drop": p["drop"],
         "half_done": len(p["half_done"]),
+        "cutoff": CUTOFF.isoformat(),
         "days": {
             day: {k: d[k] for k in ("rows", "drop", "keep")}
             | {"parts": len(d["parts"])}

@@ -200,6 +200,18 @@ class DedupeTest(unittest.TestCase):
         self.assertTrue(dedupe_raw._parts(self.store, "p")["2026-11-14"][0].endswith("part-0006.parquet"))
         self.assertEqual(out["dropped"], 3)
 
+    def test_rows_collected_from_the_cutoff_are_never_grouped(self) -> None:
+        # Morning and evening fetches after the fix with equal counts are two real rows.
+        late = dedupe_raw.CUTOFF + timedelta(hours=1)
+        self.send([row("9", late)], late)
+        self.send([row("9", late + timedelta(hours=12))], late + timedelta(hours=12))
+        # A pre-cutoff copy pair still groups, and a post-cutoff row with its counts is not dropped.
+        early = dedupe_raw.CUTOFF - timedelta(hours=2)
+        self.send([row("9", early)], early)
+        self.send([row("9", early + timedelta(minutes=30))], early + timedelta(minutes=30))
+        p = dedupe_raw.plan(self.store, "p")
+        self.assertEqual((p["rows"], p["drop"]), (4, 1))
+
     @unittest.skipUnless(DB, "X_LAKE_TEST_DB_URL not set")
     def test_recently_drained_rows_block_the_repair(self) -> None:
         from x_lakehouse import curated as cur
