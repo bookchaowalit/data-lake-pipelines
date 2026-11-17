@@ -116,7 +116,8 @@ def plan(store: Store, prefix: str) -> dict[str, Any]:
 
 
 def recently_drained(conn: Any, row_keys: set[str], now: datetime) -> int:
-    """Row keys to drop that the private inbox drained inside the validate window."""
+    """Row keys to drop that the private inbox drained inside the validate window or has not drained yet
+    (a drain that wrote raw and stopped before marking would write them back next run)."""
     from .private import P_INBOX
 
     if not row_keys:
@@ -125,7 +126,8 @@ def recently_drained(conn: Any, row_keys: set[str], now: datetime) -> int:
         # identifiers are module constants; values are bound parameters
         # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         c.execute(
-            f"select count(*) from {P_INBOX} where dataset = %s and drained_at >= %s and row_key = any(%s)",
+            f"select count(*) from {P_INBOX} where dataset = %s and (drained_at is null or drained_at >= %s) "
+            "and row_key = any(%s)",
             (DATASET, now - VALIDATE_WINDOW, list(row_keys)),
         )
         n = int(c.fetchone()[0])
@@ -286,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             if recent:
                 out["status"] = "refused"
                 out["note"] = (
-                    f"{recent} rows to drop were drained in the last {VALIDATE_WINDOW}; rerun later"
+                    f"{recent} rows to drop are undrained or were drained in the last {VALIDATE_WINDOW}; rerun after the next drain and window"
                 )
                 print(json.dumps(out, indent=1))
                 return 1

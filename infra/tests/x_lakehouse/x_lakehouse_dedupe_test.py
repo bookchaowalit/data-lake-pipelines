@@ -223,6 +223,10 @@ class DedupeTest(unittest.TestCase):
             self.assertEqual(dedupe_raw.recently_drained(conn, {"old"}, now), 0)
             self.assertEqual(dedupe_raw.recently_drained(conn, {"old", "new"}, now), 1)
             with conn.cursor() as c:
+                c.execute(f"insert into {private.P_INBOX} values ('x_home_timeline', 'pending', null)")
+            conn.commit()
+            self.assertEqual(dedupe_raw.recently_drained(conn, {"old", "pending"}, now), 1)
+            with conn.cursor() as c:
                 c.execute("drop schema x_intel_private cascade")
             conn.commit()
         finally:
