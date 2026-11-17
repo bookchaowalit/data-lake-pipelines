@@ -49,9 +49,10 @@ jobs:
 
       - name: Install runtime from uv.lock
         # Same lock as local runs, so the duckdb/pyarrow versions (part of gold_run_id) match.
+        # The orchestration extra adds Dagster (ADR-0016 P1); no webserver or daemon runs.
         run: |
           python -m pip install --disable-pip-version-check uv==0.13.1
-          uv sync --frozen --no-dev
+          uv sync --frozen --no-dev --extra orchestration
 
       - name: Build Silver and Gold
         id: marts
@@ -65,8 +66,10 @@ jobs:
           SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
         run: |
           set +e
-          # stderr (dbt/aws output) stays in a runner temp file, out of the public log.
-          .venv/bin/python infra/scripts/data_lake/jobs_marts.py --max-invalid-ratio 0.02 --stale-hours 24 --json \
+          # Dagster materializes the jobs assets (jobs_marts.py run + asset checks + lineage JSON)
+          # with the same JSON and exit codes as jobs_marts.py (ADR-0016 P1).
+          # stderr (Dagster/dbt/aws output) stays in a runner temp file, out of the public log.
+          .venv/bin/python infra/scripts/data_lake/dagster_jobs.py --max-invalid-ratio 0.02 --stale-hours 24 --json \
             > "$RUNNER_TEMP/result.json" 2> "$RUNNER_TEMP/stderr.log"
           code=$?
           set -e
@@ -79,7 +82,9 @@ jobs:
                marts: (.marts // {} | map_values({rows, existed})),
                envelope_silver: (.envelope_silver // {} | map_values({record_count,
                  error: (if .error then (.error | split(":")[0]) else null end)})),
-               dbt: .dbt.statuses, freshness}' "$RUNNER_TEMP/result.json" | tee -a "$GITHUB_STEP_SUMMARY"
+               dbt: .dbt.statuses, freshness,
+               checks_failed: (.checks // {} | to_entries | map(select(.value == false) | .key)),
+               lineage_key: .lineage.key, lineage_error: (.lineage.error // null | if . then split(":")[0] else null end)}' "$RUNNER_TEMP/result.json" | tee -a "$GITHUB_STEP_SUMMARY"
           exit $code
 
   bi:

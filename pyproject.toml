@@ -36,6 +36,9 @@ dependencies = [
 sentry = ["sentry-sdk>=2.20,<3"]
 # Google service-account auth for the daily sheet summaries (infra/scripts/sync/sheet_summaries.py).
 sheets = ["google-auth>=2.40,<3"]
+# Dagster as code for the scheduled marts (ADR-0016 P1, infra/scripts/data_lake/dagster_jobs.py).
+# Pinned: a release at least two weeks old; no webserver or daemon is deployed.
+orchestration = ["dagster==1.13.28"]
 
 [dependency-groups]
 dev = ["mypy>=1.13", "ruff>=0.8", "types-jsonschema", "types-PyYAML"]
