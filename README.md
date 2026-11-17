@@ -23,7 +23,7 @@ domain แรกที่ครบทุกชั้น (แผน [`docs/plans/
 
 ```text
 career-job-scraper (Track B, "17 */6")      → Bronze job_postings
-.github/workflows/jobs-marts.yml ("47 */2") → build: jobs_marts.py
+.github/workflows/jobs-marts.yml ("47 */2") → build: dagster_jobs.py (Dagster assets + checks) → jobs_marts.py
     silver.py (job.silver.v2, quarantine ≤ 2 % → job_postings_rejects, ตัด offline_fixture)
     → dbt build +path:models/marts/jobs (Silver part เดียวผ่าน var jobs_silver_part)
     → Gold gold/domain=jobs/dataset=<mart>/schema_version=1 + manifest control/manifests/gold/source=book-job-data/domain=jobs/
@@ -36,6 +36,11 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
 - ผู้อ่าน Gold ใช้ Gold manifest ล่าสุดของ run ที่ต้องการ (BI ใช้ `manifest_key` จาก build job รอบเดียวกัน)
 - run id อิงเนื้อหา (Bronze, model, เวอร์ชัน duckdb/pyarrow) รันซ้ำบนข้อมูลเดิมจึงไม่เขียนอะไรใหม่
 - รันเองในเครื่อง: secret ใน Infisical `/job-data` (`JOB_DATA_*`) map เป็น `AWS_*` / `DATA_LAKE_S3_ENDPOINT` ภายใน `bash -c '…'` และต้องมี `aws` CLI
+- Dagster (ADR-0016 P1, [`docs/specs/jobs-dagster-assets.md`](docs/specs/jobs-dagster-assets.md)): `dagster_jobs.py` ประกาศ asset `jobs/bronze|silver|gold/*` พร้อม asset check
+  (quarantine, has_rows, dbt, fresh) รันใน process แบบ ephemeral (ไม่มี webserver) JSON และ exit code เหมือน `jobs_marts.py` เดิม
+  แล้วเขียน lineage JSON ไป `control/lineage/dagster/domain=jobs/`; ดูกราฟในเครื่องด้วย `uv sync --extra orchestration` แล้ว
+  `PYTHONPATH=infra/scripts uv run --extra orchestration --with dagster-webserver==1.13.28 dagster dev -m data_lake.dagster_jobs`
+  (webserver ใช้ดูในเครื่องเท่านั้น ไม่อยู่ใน lock และ job ตามรอบไม่ติดตั้ง)
 - lineage: `lake.silver-job-postings` → `lake.gold-jobs-marts` → `consumer.jobs-insights-site` ใน metadata catalog ของ architecture-docs
 
 ## Event plane: Kafka → Bronze (ADR-0008 M4)
