@@ -53,7 +53,10 @@ a row to `repository-catalog/registries/open-feeds.yaml`.
   at 15 min + 85 s whatever is still in flight (workers are daemon threads, a stalled connection is
   abandoned), so everything already fetched is written well inside the 25 min workflow cap. Feeds not
   finished are left out (`feeds_deferred`), keep their state and stay due, and the next run starts
-  with the never-fetched and longest-waiting feeds first. The failure ratio counts attempted feeds.
+  with the never-fetched and longest-waiting feeds first; a feed still in flight at the hard stop is
+  recorded as `abandoned at the run deadline` so it cannot jump the queue every run. The failure
+  ratio counts attempted feeds, and a run where feeds were due but none finished exits 3.
+- A 429/503 with a `Retry-After` longer than our 3 s pause is not retried in the same run.
 - Safety: redirects are followed by the collector one hop at a time (a 3xx body is never read), and
   every hop, robots.txt included, must be https and off `BLOCKED_HOSTS` (hostnames normalised). The
   HTTP client's network backend does the only DNS lookup, refuses the connection unless every address
@@ -116,10 +119,14 @@ stored; a parser fix is replayed by re-fetching (feeds keep their recent items) 
   including partial failures). `run --only` fetches the chosen feeds but keeps the state of the
   others; an unknown id is an error. Locally it defaults to `data/runtime/open-feeds/state.json.gz` (`--state-file`,
   `OPEN_FEEDS_STATE`).
-- The state names the lake it belongs to (a hash of the lake URI and S3 endpoint, neither stored);
+- The state names the lake it belongs to (a hash of the lake URI, plus the S3 endpoint when one is
+  set; neither is stored; states written with the earlier URI-only hash are accepted once);
   pointed at another lake it starts empty, so a test lake's dedupe never hides items from the real one.
-- Validators carry the fingerprint of how the feed is read (URL, kind, parser spec, keep, max_items);
-  after a registry or parser change they are not sent, so the next fetch reads the body (replay).
+- Validators carry the fingerprint of how the feed is read (`PARSER_VERSION`, URL, kind, parser spec,
+  keep, max_items); after a registry or parser change they are not sent and the items the feed shows
+  are re-sent with the new normalisation (replay); report keeps the newest row per id. Truncation at
+  `max_items` keeps the newest items when every item has a publish time. An html selector that
+  matches nothing is an error (the page layout changed).
 - Bronze batches are split at 24 MB of JSONL (the lake refuses objects over 64 MiB), so a cache miss
   that brings ~45 k items at once still commits.
 - A lost state (cache evicted after 7 days without runs) only re-sends what the feeds still show:
@@ -172,7 +179,7 @@ year or more a per-day manifest index is the next step if `report` gets slow. An
 
 ## Tests
 
-`infra/tests/data_lake/open_feeds_test.py` (offline, 51 tests): registry validation (https only,
+`infra/tests/data_lake/open_feeds_test.py` (offline, 56 tests): registry validation (https only,
 unknown fields, required json/html specs, duplicate ids, blocked hosts, max_items) and the shipped
 registry (≥ 500 enabled, no blocked host enabled, every disabled row has a note); HTML page is not a
 feed, empty feed is ok, links resolve against the final URL; JSON rows without id skipped, `changes`

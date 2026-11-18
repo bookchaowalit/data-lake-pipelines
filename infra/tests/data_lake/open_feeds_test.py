@@ -652,9 +652,68 @@ class RunTest(unittest.TestCase):
         )
         release.set()
         self.assertLess(_t.monotonic() - started, 2)
+        # The stalled one is recorded as abandoned, so it does not jump the queue next run.
         self.assertEqual(
-            [r.feed.id for r in results], ["ok1"]
-        )  # the stalled one stays due
+            [(r.feed.id, r.status, r.error) for r in results],
+            [("ok1", "ok", None), ("stuck1", "error", "abandoned at the run deadline")],
+        )
+
+    def test_legacy_state_fingerprint_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "s.gz"
+            of.write_state(
+                sp, {"f1": {"seen": ["x"]}}, "t", of._legacy_fingerprint("s3://b/p")
+            )
+            self.assertEqual(
+                of.read_state(sp, "new-fp", of._legacy_fingerprint("s3://b/p")),
+                {"f1": {"seen": ["x"]}},
+            )
+            self.assertEqual(
+                of.lake_fingerprint("/tmp/lake"), of._legacy_fingerprint("/tmp/lake")
+            )
+
+    def test_rule_change_replays_current_items(self):
+        res = fetch_feed(
+            feed(), FakeFetch({"https://ex.test/feed": RSS}), {}, None, retry_pause=0
+        )
+        _, _, state = build_rows([res], {}, "t1")
+        items, _, _ = build_rows([res], state, "t2")
+        self.assertEqual(items, [])
+        state["f1"]["rule"] = "old-parser"
+        items, _, state2 = build_rows([res], state, "t3")
+        self.assertEqual(len(items), 2)  # re-sent with the new normalisation
+        self.assertEqual(state2["f1"]["rule"], of.rule_fingerprint(feed()))
+
+    def test_long_retry_after_is_not_retried(self):
+        fetch = FakeFetch(
+            {
+                "https://ex.test/feed": [
+                    FeedError("HTTP 429", status=429, retry_after=600),
+                    RSS,
+                ]
+            }
+        )
+        res = fetch_feed(feed(), fetch, {}, None, retry_pause=0)
+        self.assertEqual((res.status, len(fetch.calls)), ("error", 1))
+
+    def test_html_selector_matching_nothing_is_an_error(self):
+        f = feed(
+            kind="html", url="https://ex.test/trending", spec={"item": "article.row"}
+        )
+        with self.assertRaises(FeedError):
+            parse_html(b"<html><body>new layout</body></html>", f)
+
+    def test_truncation_keeps_the_newest(self):
+        rows = [{"a": i, "t": f"2026-11-{10 + i:02d}"} for i in range(5)]
+        f = feed(kind="json", max_items=2, spec={"items": "", "id": "a", "time": "t"})
+        res = fetch_feed(
+            f,
+            FakeFetch({"https://ex.test/feed": json.dumps(rows).encode()}),
+            {},
+            None,
+            retry_pause=0,
+        )
+        self.assertEqual([i["guid"] for i in res.items], ["4", "3"])
 
     def test_overdue_feeds_go_first(self):
         feeds = [feed(id="new1"), feed(id="old1"), feed(id="mid1")]

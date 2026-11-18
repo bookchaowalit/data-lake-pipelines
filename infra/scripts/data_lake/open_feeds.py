@@ -68,6 +68,9 @@ MAX_ITEMS_PER_FEED = (
 )
 MAX_ITEMS_CAP = 5000
 FEED_DEADLINE_SECONDS = 60.0  # wall clock for one response (slow-drip bodies included)
+PARSER_VERSION = (
+    "4"  # bump when parsing or normalisation changes: validators reset, items re-sent
+)
 RUN_BUDGET_SECONDS = (
     15 * 60
 )  # fetching stops here; the rest stay due (the workflow cap is 25 min)
@@ -129,9 +132,12 @@ WS_RE = re.compile(r"\s+")
 class FeedError(RuntimeError):
     """A feed answered with an error, an unsafe redirect or a body we refuse to parse."""
 
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(
+        self, message: str, status: int | None = None, retry_after: float | None = None
+    ):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 class RegistryError(ValueError):
@@ -344,7 +350,7 @@ def http_fetch(
 ) -> Fetch:
     import httpx
 
-    transport = httpx.HTTPTransport()
+    transport = httpx.HTTPTransport(trust_env=False)
     pool = getattr(transport, "_pool", None)
     if pool is None or not hasattr(pool, "_network_backend"):
         # Fail closed: without the guarded backend there is no address check at all.
@@ -385,7 +391,20 @@ def http_fetch(
                         ) from None
                     return Response(resp.status_code, b"", final_url=location)
                 if resp.status_code >= 400:
-                    raise FeedError(f"HTTP {resp.status_code}", status=resp.status_code)
+                    header = resp.headers.get("retry-after")
+                    retry_after: float | None = None
+                    if header:
+                        try:
+                            retry_after = float(header)
+                        except ValueError:
+                            retry_after = (
+                                3600.0  # an HTTP date: certainly longer than our pause
+                            )
+                    raise FeedError(
+                        f"HTTP {resp.status_code}",
+                        status=resp.status_code,
+                        retry_after=retry_after,
+                    )
                 chunks: list[bytes] = []
                 size = 0
                 for chunk in resp.iter_bytes():
@@ -736,6 +755,9 @@ def parse_html(
                 "extra": extra,
             }
         )
+    if not items:
+        # A trending page always has entries: none means the layout changed, not an empty day.
+        raise FeedError("html selector matched nothing")
     return items
 
 
@@ -797,6 +819,8 @@ def _get(
             raise
         if stop_at is not None and time.monotonic() + retry_pause >= stop_at:
             raise
+        if exc.retry_after is not None and exc.retry_after > retry_pause:
+            raise  # the host asked for a longer pause than ours: try again next run
     time.sleep(retry_pause)
     return _follow(fetch, url, conditional, robots)
 
@@ -813,7 +837,7 @@ def rule_fingerprint(feed: Feed) -> str:
     """How a feed is read (URL, kind, parser spec, keep, max_items). Validators issued under another
     rule are not sent, so a parser or registry change re-reads the body instead of getting a 304."""
     rule = json.dumps(
-        [feed.url, feed.kind, feed.spec, feed.keep, feed.max_items],
+        [PARSER_VERSION, feed.url, feed.kind, feed.spec, feed.keep, feed.max_items],
         sort_keys=True,
         ensure_ascii=False,
         default=str,
@@ -885,6 +909,10 @@ def fetch_feed(
             )
         parsed = PARSERS[feed.kind](resp.body, feed, resp.final_url or feed.url)
         usable = [i for i in parsed if i.get("guid")]
+        if len(usable) > feed.max_items and all(i.get("published_at") for i in usable):
+            usable.sort(
+                key=lambda i: str(i["published_at"]), reverse=True
+            )  # keep the newest
         items = usable[: feed.max_items]
         _encodable(items)
     except FeedError as exc:
@@ -948,6 +976,7 @@ def fetch_all(
     for group in by_host.values():
         groups.put(group)
     results: list[FeedResult] = []
+    started: dict[str, Feed] = {}
     lock = threading.Lock()
 
     def worker() -> None:
@@ -961,6 +990,8 @@ def fetch_all(
                     time.sleep(max(pause, HOST_MIN_PAUSE.get(feed.host, 0.0)))
                 if time.monotonic() >= stop_at:
                     break
+                with lock:
+                    started[feed.id] = feed
                 res = fetch_feed(
                     feed,
                     fetch,
@@ -983,6 +1014,22 @@ def fetch_all(
         thread.join(max(0.0, hard_stop - time.monotonic()))
     with lock:
         done = list(results)
+        finished = {r.feed.id for r in done}
+        # A feed still in flight at the hard stop is recorded as an error: its last_fetch moves on,
+        # so it does not jump the queue again next run and starve the others.
+        done += [
+            FeedResult(
+                feed=f,
+                status="error",
+                http_status=None,
+                items=[],
+                error="abandoned at the run deadline",
+                duration_ms=int((budget + grace) * 1000),
+                bytes=0,
+            )
+            for fid, f in started.items()
+            if fid not in finished
+        ]
     order = {feed.id: i for i, feed in enumerate(feeds)}
     return sorted(done, key=lambda r: order[r.feed.id])
 
@@ -998,7 +1045,13 @@ def build_rows(
         feed = res.feed
         prev = next_state.get(feed.id) or {}
         seen = list(prev.get("seen") or [])
-        seen_set = set(seen)
+        # After a parser or registry rule change the current items are re-sent with the new
+        # normalisation (a replay); report/Silver keep the newest row per id.
+        replay = res.status == "ok" and prev.get("rule") not in (
+            None,
+            rule_fingerprint(feed),
+        )
+        seen_set = set() if replay else set(seen)
         fresh: list[str] = []
         current: list[str] = []
         for item in res.items:
@@ -1074,11 +1127,24 @@ def lake_fingerprint(data_lake_uri: str) -> str:
             or os.environ.get("AWS_ENDPOINT_URL")
             or ""
         )
-    key = f"{data_lake_uri.strip().rstrip('/')}|{endpoint.strip().rstrip('/')}"
+    uri = data_lake_uri.strip().rstrip("/")
+    endpoint = endpoint.strip().rstrip("/")
+    key = (
+        f"{uri}|{endpoint}" if endpoint else uri
+    )  # no endpoint: the original (URI-only) value
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
-def read_state(path: Path, lake: str | None = None) -> dict[str, Any]:
+def _legacy_fingerprint(data_lake_uri: str) -> str:
+    """URI-only fingerprint written before 2026-11-18 17:00 UTC; accepted once, then rewritten."""
+    return hashlib.sha256(
+        data_lake_uri.strip().rstrip("/").encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def read_state(
+    path: Path, lake: str | None = None, legacy: str | None = None
+) -> dict[str, Any]:
     """The state file, or {} when it is missing, unreadable or belongs to another lake (the run
     then re-sends current items)."""
     import gzip
@@ -1087,7 +1153,9 @@ def read_state(path: Path, lake: str | None = None) -> dict[str, Any]:
         doc = json.loads(gzip.decompress(path.read_bytes()))
     except (OSError, EOFError, ValueError):
         return {}
-    if not isinstance(doc, dict) or (lake is not None and doc.get("lake") != lake):
+    if not isinstance(doc, dict) or (
+        lake is not None and doc.get("lake") not in {lake, legacy or lake}
+    ):
         return {}
     feeds = doc.get("feeds")
     return feeds if isinstance(feeds, dict) else {}
@@ -1148,7 +1216,7 @@ def capture(
     now = now or _now()
     fetched_at = now.isoformat(timespec="seconds")
     lake = lake_fingerprint(data_lake_uri)
-    state = read_state(state_path, lake)
+    state = read_state(state_path, lake, _legacy_fingerprint(data_lake_uri))
     active = [f for f in feeds if f.enabled and (only is None or f.id in only)]
     todo = [f for f in active if force or due(f, state, now)]
     results = fetch_all(todo, fetch, state, workers=workers, pause=pause, budget=budget)
@@ -1327,7 +1395,7 @@ def committed_parts(
 ITEMS_VIEW = """
 WITH raw AS (
   SELECT source_record_id AS id, payload_json AS p, received_at FROM lake_table
-  QUALIFY row_number() OVER (PARTITION BY source_record_id ORDER BY received_at) = 1
+  QUALIFY row_number() OVER (PARTITION BY source_record_id ORDER BY received_at DESC) = 1
 )
 SELECT id,
        json_extract_string(p, '$.feed_id') AS feed_id,
@@ -1580,6 +1648,8 @@ def main(
     print(json.dumps(result, indent=2, sort_keys=True))
     attempted = result["feeds_due"] - result["feeds_deferred"]
     enabled = result["feeds_enabled"]
+    if result["feeds_due"] and not attempted:
+        return 3  # feeds were due but none finished (stalled or out of budget): not a healthy run
     if (attempted and result["errors"] / attempted > FAIL_RATIO) or (
         enabled and result["feeds_failing"] / enabled > FAIL_RATIO
     ):
