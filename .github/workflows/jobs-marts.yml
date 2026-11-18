@@ -201,6 +201,13 @@ jobs:
             echo '{"status": "skipped_no_token"}' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # A re-run of an older workflow run rebuilds Gold with that run's (older) code and a new
+          # publish time; only the revision that is main's head may write the warehouse.
+          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" refs/heads/main | cut -f1)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo '{"status": "skipped_stale_revision"}' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python -m pip install --disable-pip-version-check uv==0.13.1
           uv sync --frozen --no-dev
           set +e

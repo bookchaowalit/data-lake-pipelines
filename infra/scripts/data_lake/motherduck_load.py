@@ -52,9 +52,23 @@ LOAD_LOG = "_gold_loads"
 # Marts cleared to leave R2 (ADR-0016 §2: jobs = public postings and aggregates), reviewed
 # 2026-11-18. Kept apart from JOBS_MARTS on purpose: a mart new to Gold is not exported until it
 # is classified as holding no personal data and added here.
-EXPORT_APPROVED = frozenset(
-    {"jobs_postings_daily", "jobs_board_health", "jobs_skills_demand", "jobs_company_hiring"}
-)
+# Approval covers the columns too: a mart whose columns differ from these is refused, so a new
+# column (say, a contact name) never leaves R2 without a review here.
+EXPORT_APPROVED: dict[str, tuple[str, ...]] = {
+    "jobs_postings_daily": ("posted_date", "board", "postings", "companies", "with_salary"),
+    "jobs_board_health": (
+        "board", "postings_total", "companies", "last_posted_date", "last_seen_at", "postings_7d", "as_of_date",
+    ),
+    "jobs_skills_demand": ("posted_week", "tag", "postings", "demand_rank"),
+    "jobs_company_hiring": (
+        "company_key", "company", "postings_total", "postings_30d", "boards", "first_posted_date", "last_posted_date",
+    ),
+}
+
+
+def _ident(name: str) -> str:
+    """Quote an SQL identifier (doubles any embedded quote)."""
+    return '"' + name.replace('"', '""') + '"'
 
 
 class WarehouseLoadError(RuntimeError):
@@ -81,8 +95,8 @@ def _connect(target: str):
         if not token:
             raise WarehouseLoadError("MOTHERDUCK_TOKEN is not set")
         con = duckdb.connect("md:", config={"motherduck_token": token})
-        con.execute(f'CREATE DATABASE IF NOT EXISTS "{database}"')
-        con.execute(f'USE "{database}"')
+        con.execute(f"CREATE DATABASE IF NOT EXISTS {_ident(database)}")
+        con.execute(f"USE {_ident(database)}")
         return con
     Path(target).parent.mkdir(parents=True, exist_ok=True)
     return duckdb.connect(target)
@@ -99,7 +113,7 @@ def _read_manifest(store: ObjectStore, manifest_key: str) -> tuple[dict[str, Any
         raise WarehouseLoadError("manifest is not jobs Gold")
     if set(listed) != set(JOBS_MARTS):
         raise WarehouseLoadError("manifest does not list exactly the published jobs marts")
-    missing = EXPORT_APPROVED - set(listed)
+    missing = set(EXPORT_APPROVED) - set(listed)
     if missing:
         raise WarehouseLoadError("manifest lacks an export-approved mart")
     # Only export-approved marts leave R2; any other mart is reported, never loaded.
@@ -113,14 +127,14 @@ def _read_manifest(store: ObjectStore, manifest_key: str) -> tuple[dict[str, Any
         )
         if mart.get("key") != expected_key:
             raise WarehouseLoadError(f"{name}: part key is not this mart's part of the Gold run")
-    manifest["_not_exported"] = sorted(set(listed) - EXPORT_APPROVED)
+    manifest["_not_exported"] = sorted(set(listed) - set(EXPORT_APPROVED))
     return manifest, marts
 
 
 def _schema_ref(con) -> str:
     """``"<catalog>"."jobs"``: qualified so an attached database named ``jobs`` cannot shadow it."""
     catalog = con.execute("SELECT current_database()").fetchone()[0]
-    return f'"{catalog}"."{WAREHOUSE_SCHEMA}"'
+    return f"{_ident(catalog)}.{_ident(WAREHOUSE_SCHEMA)}"
 
 
 def _log_exists(con) -> bool:
@@ -133,9 +147,20 @@ def _log_exists(con) -> bool:
     )
 
 
+def _managed_tables(con) -> set[str]:
+    rows = con.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_catalog = current_database() AND table_schema = ?",
+        [WAREHOUSE_SCHEMA],
+    ).fetchall()
+    return {row[0] for row in rows} - {LOAD_LOG}
+
+
 def _already_loaded(con, ref: str, gold_run_id: str, marts: dict[str, dict[str, Any]]) -> bool:
     if not _log_exists(con):
         return False
+    if _managed_tables(con) - set(marts):
+        return False  # a mart whose export was withdrawn is still there: reload to drop it
     row = con.execute(f'SELECT gold_run_id FROM {ref}."{LOAD_LOG}" ORDER BY seq DESC LIMIT 1').fetchone()
     if not row or row[0] != gold_run_id:
         return False
@@ -150,6 +175,16 @@ def _table_counts(con, ref: str, marts: dict[str, dict[str, Any]]) -> dict[str, 
         except Exception:  # noqa: BLE001 - a missing table counts as a mismatch
             counts[name] = None
     return counts
+
+
+def _log_load(con, ref, gold_run_id, manifest_key, published_key, expected, now) -> None:
+    # seq orders loads even when two share a timestamp; it is written in the same
+    # transaction as the tables, so the newest row is what they hold.
+    con.execute(
+        f'INSERT INTO {ref}."{LOAD_LOG}" '
+        f'SELECT coalesce(max(seq), 0) + 1, ?, ?, ?, ?, ? FROM {ref}."{LOAD_LOG}"',
+        [gold_run_id, manifest_key, published_key, json.dumps(expected, sort_keys=True), now],
+    )
 
 
 def load_jobs_gold(
@@ -189,6 +224,18 @@ def load_jobs_gold(
     try:
         ref = _schema_ref(con)
         if _already_loaded(con, ref, gold_run_id, marts):
+            if published_key:
+                # Same run re-published later: advance the publish watermark without rewriting the
+                # marts, so a slower load of a run published in between is still refused.
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    newest = con.execute(f'SELECT max(published_key) FROM {ref}."{LOAD_LOG}"').fetchone()[0]
+                    if not newest or published_key > newest:
+                        _log_load(con, ref, gold_run_id, manifest_key, published_key, expected, now)
+                    con.execute("COMMIT")
+                except BaseException:
+                    con.execute("ROLLBACK")
+                    raise
             return {**result, "status": "unchanged", "loaded_rows": expected}
 
         with tempfile.TemporaryDirectory(prefix="solo-empire-jobs-warehouse-") as temp_dir:
@@ -214,25 +261,30 @@ def load_jobs_gold(
                         con.execute("ROLLBACK")
                         return {**result, "status": "skipped_not_latest"}
                 for name, path in parts.items():
+                    columns = [
+                        row[0]
+                        for row in con.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()
+                    ]
+                    if sorted(columns) != sorted(EXPORT_APPROVED[name]):
+                        raise WarehouseLoadError(f"{name}: columns differ from the export-approved columns")
+                    select = ", ".join(_ident(column) for column in EXPORT_APPROVED[name])
                     con.execute(
-                        f'CREATE OR REPLACE TABLE {ref}."{name}" AS SELECT * FROM read_parquet(?)',
+                        f"CREATE OR REPLACE TABLE {ref}.{_ident(name)} AS SELECT {select} FROM read_parquet(?)",
                         [str(path)],
                     )
+                # Marts whose export was withdrawn leave the warehouse in the same transaction.
+                dropped = sorted(_managed_tables(con) - set(parts))
+                for name in dropped:
+                    con.execute(f"DROP TABLE {ref}.{_ident(name)}")
                 loaded = _table_counts(con, ref, marts)
                 if loaded != expected:
                     raise WarehouseLoadError("loaded row counts do not match the Gold manifest")
-                con.execute(
-                    # seq orders loads even when two share a timestamp; it is written in the
-                    # same transaction as the tables, so the newest row is what they hold.
-                    f'INSERT INTO {ref}."{LOAD_LOG}" '
-                    f'SELECT coalesce(max(seq), 0) + 1, ?, ?, ?, ?, ? FROM {ref}."{LOAD_LOG}"',
-                    [gold_run_id, manifest_key, published_key, json.dumps(expected, sort_keys=True), now],
-                )
+                _log_load(con, ref, gold_run_id, manifest_key, published_key, expected, now)
                 con.execute("COMMIT")
             except BaseException:
                 con.execute("ROLLBACK")
                 raise
-        return {**result, "status": "loaded", "loaded_rows": loaded}
+        return {**result, "status": "loaded", "loaded_rows": loaded, "dropped": dropped}
     finally:
         con.close()
 
