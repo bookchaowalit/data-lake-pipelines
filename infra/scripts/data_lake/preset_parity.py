@@ -97,7 +97,7 @@ DATASET_COLUMNS = {
 BOARD_FIELDS = DATASET_COLUMNS["jobs_boards"]
 PARITY_LOG = "_preset_parity"
 PARITY_DAYS = 14
-# jobs-marts runs every 2 h; one missed or failed check (3 h or more between two) breaks a streak.
+# jobs-marts runs every 2 h; one missed or failed scheduled check (3 h or more between two) breaks a streak.
 MAX_CHECK_GAP = timedelta(hours=3)
 KPI_KEYS = ("postings", "postings_90d", "postings_7d", "boards", "companies")
 
@@ -159,7 +159,11 @@ def site_values(snapshot: Snapshot) -> dict[str, Any]:
 
 def warehouse_values(con: Any) -> dict[str, Any]:
     """The same numbers from the Preset dataset SQL."""
-    kpi = _rows(con, dataset_sql("jobs_kpis"))[0]
+    kpis = _rows(con, dataset_sql("jobs_kpis"))
+    if len(kpis) != 1:
+        # A Big Number chart sums every row, so anything but one row shows a wrong tile.
+        raise ParityError("jobs_kpis must return exactly one row")
+    kpi = kpis[0]
     skills = _rows(con, dataset_sql("jobs_skills_last_week"))
     as_of = kpi["as_of_date"]
     last_week = (
@@ -224,17 +228,23 @@ def _warehouse_run(con: Any, ref: str) -> str | None:
 
 
 def _streak(
-    rows: list[tuple[Any, bool, str]], now: datetime, export_sha256: str | None
+    rows: list[tuple[Any, bool, str, bool]], now: datetime, export_sha256: str | None
 ) -> tuple[Any, float]:
-    """Start and length in days of the newest unbroken run of matching checks.
+    """Start and length in days of the newest unbroken run of matching scheduled checks.
 
-    ``rows`` are (checked_at, ok, export_sha256), newest first. With an export
-    fingerprint, only checks made with that same export count.
+    ``rows`` are (checked_at, ok, export_sha256, scheduled), newest first. Only
+    scheduled (jobs-queue) checks count, so a manual run cannot fill a missed
+    slot; a mismatch from any run breaks the streak. With an export fingerprint,
+    only checks made with that same export count.
     """
     start = None
     previous = now
-    for checked_at, ok, sha in rows:
-        if not ok or previous - checked_at > MAX_CHECK_GAP:
+    for checked_at, ok, sha, scheduled in rows:
+        if not ok:
+            break
+        if not scheduled:
+            continue
+        if previous - checked_at >= MAX_CHECK_GAP:
             break
         if export_sha256 is not None and sha != export_sha256:
             break
@@ -250,18 +260,19 @@ def _record(
     diffs: list[str],
     export_sha256: str | None,
     now: datetime,
+    scheduled: bool,
 ) -> dict[str, Any]:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {ref}."{PARITY_LOG}" ('
         "seq BIGINT, gold_run_id VARCHAR, checked_at TIMESTAMPTZ, ok BOOLEAN, mismatches_json VARCHAR, "
-        "export_sha256 VARCHAR)"
+        "export_sha256 VARCHAR, scheduled BOOLEAN)"
     )
     con.execute(
-        f'INSERT INTO {ref}."{PARITY_LOG}" SELECT coalesce(max(seq), 0) + 1, ?, ?, ?, ?, ? FROM {ref}."{PARITY_LOG}"',
-        [gold_run_id, now, not diffs, json.dumps(diffs), export_sha256],
+        f'INSERT INTO {ref}."{PARITY_LOG}" SELECT coalesce(max(seq), 0) + 1, ?, ?, ?, ?, ?, ? FROM {ref}."{PARITY_LOG}"',
+        [gold_run_id, now, not diffs, json.dumps(diffs), export_sha256, scheduled],
     )
     rows = con.execute(
-        f'SELECT checked_at, ok, export_sha256 FROM {ref}."{PARITY_LOG}" ORDER BY seq DESC'
+        f'SELECT checked_at, ok, export_sha256, scheduled FROM {ref}."{PARITY_LOG}" ORDER BY seq DESC'
     ).fetchall()
     _, dataset_days = _streak(rows, now, None)
     since, dashboard_days = (
@@ -284,8 +295,12 @@ def check_parity(
     data_lake_uri: str = "",
     now: datetime | None = None,
     export_sha256: str | None = None,
+    scheduled: bool = False,
 ) -> dict[str, Any]:
-    """``export_sha256``: the committed dashboard export (default: read from the checkout)."""
+    """``export_sha256``: the committed dashboard export (default: read from the checkout).
+
+    ``scheduled``: this run was started by the jobs queue; only those checks count.
+    """
     from data_lake.preset_export_check import export_fingerprint
 
     now = now or datetime.now(UTC)
@@ -309,7 +324,9 @@ def check_parity(
                 con.execute("ROLLBACK")
                 return {"status": "skipped_run_mismatch", "gold_run_id": gold_run_id}
             diffs = compare(site, warehouse_values(con))
-            streak = _record(con, ref, gold_run_id, diffs, export_sha256, now)
+            streak = _record(
+                con, ref, gold_run_id, diffs, export_sha256, now, scheduled
+            )
             con.execute("COMMIT")
         except Exception:
             con.execute("ROLLBACK")
@@ -336,11 +353,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--data-lake-uri", default=os.environ.get("SOLO_EMPIRE_DATA_LAKE_URI", "")
     )
+    parser.add_argument(
+        "--scheduled",
+        action="store_true",
+        help="run started by the jobs queue (counts toward the streak)",
+    )
     args = parser.parse_args(argv)
     try:
         target = args.target or default_target()
         result = check_parity(
-            args.manifest_key, target, data_lake_uri=args.data_lake_uri
+            args.manifest_key,
+            target,
+            data_lake_uri=args.data_lake_uri,
+            scheduled=args.scheduled,
         )
     except Exception as exc:  # noqa: BLE001 - concise fail-closed CLI boundary
         print(json.dumps({"status": "failed", "error": type(exc).__name__}))

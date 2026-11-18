@@ -69,9 +69,11 @@ Dashboard title: `Jobs insights`.
 - It runs only when the `bi` job of the same run succeeded, so every counted check compares
   against a jobs-insights site built from that Gold run; otherwise it reports
   `skipped_site_not_published`.
-- Two streaks, both broken by a mismatch or by 3 h or more between two checks (jobs-marts runs
+- Two streaks, both counting only scheduled checks (runs the jobs queue started,
+  `source: jobs-queue`; a manual run is recorded but cannot fill a missed slot) and both broken
+  by a mismatch from any run or by 3 h or more between two scheduled checks (jobs-marts runs
   every 2 h, so one missed, failed or skipped check breaks it; time nobody checked is not
-  evidence):
+  evidence). `jobs_kpis` must return exactly one row, or the check fails:
   - `dataset_matching_days`: the dataset SQL alone matched. This says nothing about a dashboard.
   - `dashboard_matching_days`: only checks made with the same committed export count, so it starts
     when the export is first committed and restarts after every re-export.

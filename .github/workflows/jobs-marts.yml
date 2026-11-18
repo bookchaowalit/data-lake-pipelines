@@ -199,6 +199,7 @@ jobs:
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           MANIFEST_KEY: ${{ needs.build.outputs.manifest_key }}
           BI_RESULT: ${{ needs.bi.result }}
+          SOURCE: ${{ inputs.source }}
         run: |
           if [ -z "$MOTHERDUCK_TOKEN" ]; then
             echo '{"status": "skipped_no_token"}' | tee -a "$GITHUB_STEP_SUMMARY"
@@ -241,7 +242,9 @@ jobs:
           # ADR-0016 P3: the Preset dataset SQL must show what jobs-insights shows for this run
           # (preset_parity.py). Mismatch names only, never values; skipped when the load was skipped.
           set +e
-          .venv/bin/python infra/scripts/data_lake/preset_parity.py --manifest-key "$MANIFEST_KEY" \
+          scheduled=()
+          if [ "$SOURCE" = "jobs-queue" ]; then scheduled=(--scheduled); fi
+          .venv/bin/python infra/scripts/data_lake/preset_parity.py --manifest-key "$MANIFEST_KEY" "${scheduled[@]}" \
             > "$RUNNER_TEMP/parity.json" 2> "$RUNNER_TEMP/parity.err"
           code=$?
           set -e

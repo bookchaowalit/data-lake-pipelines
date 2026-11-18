@@ -60,6 +60,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(first["status"], "match", first)
             self.assertEqual(first["mismatches"], [])
@@ -71,6 +72,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW + timedelta(hours=2),
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(later["dashboard_matching_since"], NOW.isoformat())
 
@@ -85,6 +87,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="a",
+                scheduled=True,
             )
             later = check_parity(
                 gold["manifest_key"],
@@ -92,6 +95,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW + timedelta(days=14),
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(
                 (later["dashboard_matching_days"], later["p3_parity_met"]), (0, False)
@@ -102,22 +106,34 @@ class PresetParityTests(unittest.TestCase):
 
         now = NOW + timedelta(days=15)
         every_2h = [
-            (now - timedelta(hours=2 * i), True, "a") for i in range(15 * 12 + 1)
+            (now - timedelta(hours=2 * i), True, "a", True) for i in range(15 * 12 + 1)
         ]
         start, days = _streak(every_2h, now, "a")
         self.assertEqual((start, days), (NOW, 15.0))
         # A newer dashboard export restarts the dashboard streak but not the dataset one.
-        reexported = [(now, True, "b"), *every_2h[1:]]
+        reexported = [(now, True, "b", True), *every_2h[1:]]
         self.assertEqual(_streak(reexported, now, "b")[1], 0.0)
         self.assertEqual(_streak(reexported, now, None)[1], 15.0)
         # A mismatch or a 7 h gap ends the streak at that point.
         broken = list(every_2h)
-        broken[24] = (broken[24][0], False, "a")
+        broken[24] = (broken[24][0], False, "a", True)
         self.assertEqual(_streak(broken, now, "a")[1], 2.0 - 1 / 12)
         gap = every_2h[:12] + [
             (r[0] - timedelta(hours=7), *r[1:]) for r in every_2h[12:]
         ]
         self.assertAlmostEqual(_streak(gap, now, "a")[1], 22 / 24)
+        # A gap of exactly 3 h breaks it too, and a manual run cannot fill a missed slot.
+        exact = every_2h[:12] + [
+            (r[0] - timedelta(hours=1), *r[1:]) for r in every_2h[12:]
+        ]
+        self.assertAlmostEqual(_streak(exact, now, "a")[1], 22 / 24)
+        manual_fill = list(every_2h)
+        manual_fill[12] = (manual_fill[12][0], True, "a", False)
+        self.assertAlmostEqual(_streak(manual_fill, now, "a")[1], 22 / 24)
+        # A manual mismatch still breaks it.
+        manual_bad = list(every_2h)
+        manual_bad[12] = (manual_bad[12][0], False, "a", False)
+        self.assertAlmostEqual(_streak(manual_bad, now, "a")[1], 22 / 24)
 
     def test_no_committed_export_never_meets_p3(self):
         from data_lake.preset_parity import check_parity
@@ -130,6 +146,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="",
+                scheduled=True,
             )
             self.assertEqual(
                 (result["dashboard_export"], result["p3_parity_met"]),
@@ -162,6 +179,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="a",
+                scheduled=True,
             )
             self._sql(
                 target,
@@ -173,6 +191,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW + timedelta(hours=2),
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(bad["status"], "mismatch")
             self.assertEqual(bad["mismatches"], ["kpis.postings_7d", "boards"])
@@ -187,6 +206,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW + timedelta(hours=4),
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(
                 good["dashboard_matching_since"], (NOW + timedelta(hours=4)).isoformat()
@@ -229,6 +249,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(result["mismatches"], ["daily_90d"])
 
@@ -247,6 +268,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(dated["mismatches"], ["companies"])
             self._sql(
@@ -263,6 +285,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(boards["mismatches"], ["companies"])
 
@@ -284,6 +307,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertIn("daily_90d", result["mismatches"])
 
@@ -319,8 +343,36 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(result["mismatches"], ["boards"])
+
+    def test_jobs_kpis_must_return_one_row(self):
+        import duckdb
+
+        from data_lake import preset_parity
+
+        real = preset_parity.dataset_sql
+
+        def doubled(name: str) -> str:
+            sql = real(name)
+            return (
+                f"select * from (\n{sql}\n) union all select * from (\n{sql}\n)"
+                if name == "jobs_kpis"
+                else sql
+            )
+
+        with TEMP() as root, TEMP() as out:
+            _, target = self._loaded(root, out)
+            con = duckdb.connect(target, read_only=True)
+            try:
+                with mock.patch.object(preset_parity, "dataset_sql", doubled):
+                    with self.assertRaisesRegex(
+                        preset_parity.ParityError, "exactly one row"
+                    ):
+                        preset_parity.warehouse_values(con)
+            finally:
+                con.close()
 
     def test_skills_week_and_order_match_the_site(self):
         import duckdb
@@ -370,6 +422,7 @@ class PresetParityTests(unittest.TestCase):
                 data_lake_uri=root,
                 now=NOW,
                 export_sha256="a",
+                scheduled=True,
             )
             self.assertEqual(result["status"], "skipped_run_mismatch")
 
