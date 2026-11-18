@@ -19,7 +19,7 @@
 # paywall or CAPTCHA bypass, no more personal data than needed (PDPA/GDPR). Unsure about legal = ask the owner.
 # No secrets here: names, URLs and Infisical paths only.
 schema_version: data-lake-pipelines.source-coverage.v1
-updated: '2026-11-12'
+updated: '2026-11-18'
 current_batch: 4
 batches:
   1: {checked_at: '2026-11-12', report: docs/source-coverage/batch-01.md}
@@ -1926,8 +1926,8 @@ sources:
     - users
     - updates
     bulk_or_webhook: walk ids or updates.json; Firebase streaming
-    coverage_pct: 0
-    current_status: missing
+    coverage_pct: 20
+    current_status: partial
     tos_notes: API repo is MIT; no data terms, comments belong to their authors (content rights unverified)
     pii_level: low
     scores:
@@ -1935,12 +1935,20 @@ sources:
       cost: 1
       effort: 1
       risk: 2
-    verdict: later
-    verdict_reason: easy and credential-free, but content rights are unverified; story ids, scores and titles only once the owner is fine with that
-    owner_action: say whether keeping HN titles (not comments) is acceptable
+    verdict: ingest-now
+    verdict_reason: owner asked 2026-11-18 to collect every free source; open-feeds keeps story id, title, link, points and comment count of the front page (hourly) and Show HN (3 h) via the Algolia HN API, never comments or user names
+    pipeline:
+      workflow: .github/workflows/open-feeds.yml
+      heartbeat: open-feeds
+      jobs_queue: open-feeds
+      datasets:
+      - feed_items
+      - feed_runs
+      registry_rows: [hn-front, hn-show]
+    owner_action: null
     evidence:
     - https://github.com/HackerNews/API
-    checked_at: '2026-11-12'
+    checked_at: '2026-11-18'
   - id: arxiv
     name: arXiv
     batch: 4
@@ -1957,8 +1965,8 @@ sources:
     - abstracts
     - categories
     bulk_or_webhook: OAI-PMH incremental harvest; S3 bulk (requester pays)
-    coverage_pct: 0
-    current_status: missing
+    coverage_pct: 20
+    current_status: partial
     tos_notes: metadata CC0; full text and PDFs must not be stored and served (link to abstract pages)
     pii_level: low
     scores:
@@ -1966,12 +1974,20 @@ sources:
       cost: 1
       effort: 2
       risk: 1
-    verdict: later
-    verdict_reason: daily cs.AI/cs.CL metadata via OAI-PMH fits the AI governance learning plan; metadata only, never PDFs
+    verdict: ingest-now
+    verdict_reason: open-feeds reads the daily RSS of 11 categories (cs.AI, cs.CL, cs.LG, cs.CV, cs.CR, cs.SE, cs.CY, cs.HC, stat.ML, econ.GN, q-fin.ST; q-fin.TR is in the registry but returned no items on 2026-11-18) with title, link and abstract (CC0 metadata), 3 s between requests; never PDFs. OAI-PMH backfill is the next 80 %
+    pipeline:
+      workflow: .github/workflows/open-feeds.yml
+      heartbeat: open-feeds
+      jobs_queue: open-feeds
+      datasets:
+      - feed_items
+      - feed_runs
+      registry_rows: [arxiv-cs-ai, arxiv-cs-cl, arxiv-cs-lg, arxiv-cs-cv, arxiv-cs-cr, arxiv-cs-se, arxiv-cs-cy, arxiv-cs-hc, arxiv-stat-ml, arxiv-econ-gn, arxiv-q-fin-st]
     owner_action: null
     evidence:
     - https://info.arxiv.org/help/api/tou.html
-    checked_at: '2026-11-12'
+    checked_at: '2026-11-18'
   - id: openalex
     name: OpenAlex
     batch: 4
@@ -2244,8 +2260,8 @@ sources:
     - countries
     - time_series
     bulk_or_webhook: paged JSON; bulk files in the data catalog
-    coverage_pct: 0
-    current_status: missing
+    coverage_pct: 10
+    current_status: partial
     tos_notes: catalog datasets CC BY 4.0 with no-endorsement condition (partly unverified); check per-dataset licence
     pii_level: low
     scores:
@@ -2253,13 +2269,21 @@ sources:
       cost: 1
       effort: 1
       risk: 1
-    verdict: later
-    verdict_reason: yearly data; a monthly pull of a Thailand indicator set is enough when finance products need it
+    verdict: ingest-now
+    verdict_reason: open-feeds pulls 10 Thailand indicators weekly (GDP, growth, CPI, unemployment, population, exports, FDI, internet use, debt, GNI per capita); a row is new only when a value changes. More countries and indicators are the next 90 %
+    pipeline:
+      workflow: .github/workflows/open-feeds.yml
+      heartbeat: open-feeds
+      jobs_queue: open-feeds
+      datasets:
+      - feed_items
+      - feed_runs
+      registry_rows: [wb-tha-ny-gdp-mktp-cd, wb-tha-ny-gdp-mktp-kd-zg, wb-tha-fp-cpi-totl-zg, wb-tha-sl-uem-totl-zs, wb-tha-sp-pop-totl, wb-tha-ne-exp-gnfs-zs, wb-tha-bx-klt-dinv-cd-wd, wb-tha-it-net-user-zs, wb-tha-gc-dod-totl-gd-zs, wb-tha-ny-gnp-pcap-cd]
     owner_action: null
     evidence:
     - https://datahelpdesk.worldbank.org/knowledgebase/articles/889392-about-the-indicators-api-documentation
     - https://www.worldbank.org/en/about/legal/terms-of-use-for-datasets
-    checked_at: '2026-11-12'
+    checked_at: '2026-11-18'
   - id: imf-data
     name: IMF Data API
     batch: 4

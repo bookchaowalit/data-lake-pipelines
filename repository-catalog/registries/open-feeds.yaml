@@ -1,0 +1,1480 @@
+# Open feeds registry: every free feed the open-feeds collector fetches (spec: docs/specs/open-feeds.md).
+#
+# One row per feed. Adding a feed = adding a row; the hourly run picks it up. Check offline:
+#   .venv/bin/python infra/scripts/data_lake/open_feeds.py check
+# and live before committing new rows:
+#   .venv/bin/python infra/scripts/data_lake/open_feeds.py probe --only <id>[,<id>...]
+#
+# Fields
+#   id           [a-z0-9-], unique; Bronze item ids are "<id>:<sha256(guid)[:16]>"
+#   kind         rss (RSS/Atom/RDF) | json (keyless API) | html (page scrape; robots.txt is checked every run)
+#   url          https only (redirects must stay https)
+#   category     free-text topic; subcategory optional
+#   every_hours  1 | 2 | 3 | 6 | 12 | 24 | 168 (default 1)
+#   keep         headline (title, link, time, tags; default) | full (also the summary; only for open licences)
+#   json         items: dot path to the list ("" = root), id: field(s), title, link | link_template, time, keep: [dot paths]
+#                or snapshot: true (whole document, stored when its content changes), path, time
+#   html         item: CSS selector, title / link: selectors inside the item, fields: {name: selector}
+#   enabled      false keeps a row documented but not fetched; say why in `note`
+#
+# Rules (same guardrails as source-coverage.yaml): free, keyless, public data only; no login, paywall, CAPTCHA or
+# rate-limit bypass; never turn TLS verification off; no author names or user content (personal data);
+# publisher RSS keeps headline + link only. Sources with verdict skip / blocked-legal in source-coverage.yaml
+# (Reddit, CoinGecko, Product Hunt, LinkedIn, ...) are not added here.
+#
+# Seed 2026-11-18: hand-picked feeds and APIs (Thai and world news, AI, arXiv, security, earth, economy,
+# government, platform status, GitHub releases/trending) + the CC0 lists of github.com/plenaryapp/awesome-rss-feeds
+# (recommended + countries, with_category). Every enabled row answered with items on the 2026-11-18 probe.
+schema_version: data-lake-pipelines.open-feeds.v1
+updated: '2026-11-18'
+feeds:
+- {id: bangkokpost-top, name: Bangkok Post top stories, kind: rss, url: 'https://www.bangkokpost.com/rss/data/topstories.xml', category: news-thailand, lang: th}
+- {id: bangkokpost-thailand, name: Bangkok Post Thailand, kind: rss, url: 'https://www.bangkokpost.com/rss/data/thailand.xml', category: news-thailand, lang: th}
+- {id: bangkokpost-business, name: Bangkok Post business, kind: rss, url: 'https://www.bangkokpost.com/rss/data/business.xml', category: news-thailand, lang: th}
+- {id: bangkokpost-tech, name: Bangkok Post tech, kind: rss, url: 'https://www.bangkokpost.com/rss/data/tech.xml', category: news-thailand, lang: th, enabled: false,
+  note: 'disabled on 2026-11-18 probe: HTTP 404'}
+- {id: bangkokpost-property, name: Bangkok Post property, kind: rss, url: 'https://www.bangkokpost.com/rss/data/property.xml', category: news-thailand, lang: th}
+- {id: matichon, name: Matichon, kind: rss, url: 'https://www.matichon.co.th/feed', category: news-thailand, lang: th}
+- {id: khaosod, name: Khaosod, kind: rss, url: 'https://www.khaosod.co.th/feed', category: news-thailand, lang: th}
+- {id: khaosod-english, name: Khaosod English, kind: rss, url: 'https://www.khaosodenglish.com/feed/', category: news-thailand, lang: en}
+- {id: prachatai, name: Prachatai, kind: rss, url: 'https://prachatai.com/rss.xml', category: news-thailand, lang: th}
+- {id: blognone, name: Blognone, kind: rss, url: 'https://www.blognone.com/atom.xml', category: news-thailand, lang: th}
+- {id: thestandard, name: The Standard, kind: rss, url: 'https://thestandard.co/feed/', category: news-thailand, lang: th}
+- {id: nationthailand, name: Nation Thailand, kind: rss, url: 'https://www.nationthailand.com/rss', category: news-thailand, lang: th, enabled: false, note: 'disabled
+    on 2026-11-18 probe: answered but no items'}
+- {id: thairath, name: Thairath, kind: rss, url: 'https://www.thairath.co.th/rss/news', category: news-thailand, lang: th}
+- {id: thaipbs, name: Thai PBS, kind: rss, url: 'https://www.thaipbs.or.th/rss/news', category: news-thailand, lang: th, enabled: false, note: 'disabled on 2026-11-18
+    probe: HTTP 404'}
+- {id: brandinside, name: Brand Inside, kind: rss, url: 'https://brandinside.asia/feed/', category: news-thailand, lang: th}
+- {id: beartai, name: Beartai, kind: rss, url: 'https://www.beartai.com/feed', category: news-thailand, lang: th}
+- {id: workpointtoday, name: Workpoint Today, kind: rss, url: 'https://workpointtoday.com/feed/', category: news-thailand, lang: th}
+- {id: positioningmag, name: Positioning Magazine, kind: rss, url: 'https://positioningmag.com/feed', category: news-thailand, lang: th, enabled: false, note: 'disabled
+    on 2026-11-18 probe: HTTP 404'}
+- {id: marketeer, name: Marketeer Online, kind: rss, url: 'https://marketeeronline.co/feed', category: news-thailand, lang: th}
+- {id: thaienquirer, name: Thai Enquirer, kind: rss, url: 'https://www.thaienquirer.com/feed/', category: news-thailand, lang: en}
+- {id: thethaiger, name: The Thaiger, kind: rss, url: 'https://thethaiger.com/feed', category: news-thailand, lang: en}
+- {id: prachachat, name: Prachachat, kind: rss, url: 'https://www.prachachat.net/feed', category: news-thailand, lang: th}
+- {id: techsauce, name: Techsauce, kind: rss, url: 'https://techsauce.co/feed', category: news-thailand, lang: th}
+- {id: springnews, name: Spring News, kind: rss, url: 'https://www.springnews.co.th/feed', category: news-thailand, lang: th, enabled: false, note: 'disabled on 2026-11-18
+    probe: answered but no items'}
+- {id: thansettakij, name: Thansettakij, kind: rss, url: 'https://www.thansettakij.com/rss', category: news-thailand, lang: th, enabled: false, note: 'disabled on
+    2026-11-18 probe: answered but no items'}
+- {id: bangkokbiznews, name: Bangkok Biz News, kind: rss, url: 'https://www.bangkokbiznews.com/rss', category: news-thailand, lang: th, enabled: false, note: 'disabled
+    on 2026-11-18 probe: answered but no items'}
+- {id: mgronline, name: MGR Online, kind: rss, url: 'https://mgronline.com/rss', category: news-thailand, lang: th, enabled: false, note: 'disabled on 2026-11-18
+    probe: HTTP 404'}
+- {id: sanook-news, name: Sanook News, kind: rss, url: 'https://www.sanook.com/news/rss/', category: news-thailand, lang: th, enabled: false, note: 'disabled on 2026-11-18
+    probe: HTTP 404'}
+- {id: pptv, name: PPTV, kind: rss, url: 'https://www.pptvhd36.com/rss', category: news-thailand, lang: th, enabled: false, note: 'disabled on 2026-11-18 probe: HTTP
+    404'}
+- {id: thaiquote, name: Thaiquote, kind: rss, url: 'https://www.thaiquote.org/feed', category: news-thailand, lang: th}
+- {id: droidsans, name: Droidsans, kind: rss, url: 'https://droidsans.com/feed/', category: news-thailand, lang: th}
+- {id: macthai, name: MacThai, kind: rss, url: 'https://www.macthai.com/feed/', category: news-thailand, lang: th}
+- {id: thaiware, name: Thaiware news, kind: rss, url: 'https://news.thaiware.com/rss', category: news-thailand, lang: th, enabled: false, note: 'disabled on 2026-11-18
+    probe: answered but no items'}
+- {id: ddproperty-guide, name: DDproperty guide, kind: rss, url: 'https://www.ddproperty.com/guide/feed', category: news-thailand, lang: th, enabled: false, note: 'disabled
+    on 2026-11-18 probe: HTTP 403'}
+- {id: thinkofliving, name: Think of Living, kind: rss, url: 'https://thinkofliving.com/feed/', category: news-thailand, lang: th, enabled: false, note: 'disabled
+    on 2026-11-18 probe: HTTP 403'}
+- {id: tmd-earthquake, name: TMD earthquake reports, kind: rss, url: 'https://earthquake.tmd.go.th/feed/rss_tmd.xml', category: news-thailand, lang: th}
+- {id: thaicert, name: ThaiCERT, kind: rss, url: 'https://www.thaicert.or.th/feed/', category: news-thailand, lang: th}
+- {id: google-news-th-top, name: Google News TH top, kind: rss, url: 'https://news.google.com/rss?hl=th&gl=TH&ceid=TH:th', category: news-aggregator, lang: th}
+- {id: google-news-us-top, name: Google News US top, kind: rss, url: 'https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en', category: news-aggregator, lang: en}
+- {id: google-news-th-world, name: Google News TH world, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/WORLD?hl=th&gl=TH&ceid=TH:th', category: news-aggregator,
+  lang: th}
+- {id: google-news-us-world, name: Google News US world, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en', category: news-aggregator,
+  lang: en}
+- {id: google-news-th-business, name: Google News TH business, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=th&gl=TH&ceid=TH:th',
+  category: news-aggregator, lang: th}
+- {id: google-news-us-business, name: Google News US business, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en',
+  category: news-aggregator, lang: en}
+- {id: google-news-th-technology, name: Google News TH technology, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=th&gl=TH&ceid=TH:th',
+  category: news-aggregator, lang: th}
+- {id: google-news-us-technology, name: Google News US technology, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en',
+  category: news-aggregator, lang: en}
+- {id: google-news-th-entertainment, name: Google News TH entertainment, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/ENTERTAINMENT?hl=th&gl=TH&ceid=TH:th',
+  category: news-aggregator, lang: th}
+- {id: google-news-us-entertainment, name: Google News US entertainment, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/ENTERTAINMENT?hl=en-US&gl=US&ceid=US:en',
+  category: news-aggregator, lang: en}
+- {id: google-news-th-sports, name: Google News TH sports, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/SPORTS?hl=th&gl=TH&ceid=TH:th', category: news-aggregator,
+  lang: th}
+- {id: google-news-us-sports, name: Google News US sports, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/SPORTS?hl=en-US&gl=US&ceid=US:en',
+  category: news-aggregator, lang: en}
+- {id: google-news-th-science, name: Google News TH science, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=th&gl=TH&ceid=TH:th',
+  category: news-aggregator, lang: th}
+- {id: google-news-us-science, name: Google News US science, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=en-US&gl=US&ceid=US:en',
+  category: news-aggregator, lang: en}
+- {id: google-news-th-health, name: Google News TH health, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/HEALTH?hl=th&gl=TH&ceid=TH:th', category: news-aggregator,
+  lang: th}
+- {id: google-news-us-health, name: Google News US health, kind: rss, url: 'https://news.google.com/rss/headlines/section/topic/HEALTH?hl=en-US&gl=US&ceid=US:en',
+  category: news-aggregator, lang: en}
+- {id: google-trends-th, name: Google Trends daily TH, kind: rss, url: 'https://trends.google.com/trending/rss?geo=TH', category: trends}
+- {id: google-trends-us, name: Google Trends daily US, kind: rss, url: 'https://trends.google.com/trending/rss?geo=US', category: trends}
+- {id: google-trends-gb, name: Google Trends daily GB, kind: rss, url: 'https://trends.google.com/trending/rss?geo=GB', category: trends}
+- {id: google-trends-jp, name: Google Trends daily JP, kind: rss, url: 'https://trends.google.com/trending/rss?geo=JP', category: trends}
+- {id: google-trends-sg, name: Google Trends daily SG, kind: rss, url: 'https://trends.google.com/trending/rss?geo=SG', category: trends}
+- {id: bbc-top, name: BBC News, kind: rss, url: 'https://feeds.bbci.co.uk/news/rss.xml', category: news-world, lang: en}
+- {id: bbc-world, name: BBC World, kind: rss, url: 'https://feeds.bbci.co.uk/news/world/rss.xml', category: news-world, lang: en}
+- {id: bbc-asia, name: BBC Asia, kind: rss, url: 'https://feeds.bbci.co.uk/news/world/asia/rss.xml', category: news-world, lang: en}
+- {id: bbc-business, name: BBC Business, kind: rss, url: 'https://feeds.bbci.co.uk/news/business/rss.xml', category: news-world, lang: en}
+- {id: bbc-tech, name: BBC Technology, kind: rss, url: 'https://feeds.bbci.co.uk/news/technology/rss.xml', category: news-world, lang: en}
+- {id: bbc-science, name: BBC Science, kind: rss, url: 'https://feeds.bbci.co.uk/news/science_and_environment/rss.xml', category: news-world, lang: en}
+- {id: bbc-thai, name: BBC Thai, kind: rss, url: 'https://feeds.bbci.co.uk/thai/rss.xml', category: news-world, lang: en}
+- {id: aljazeera, name: Al Jazeera, kind: rss, url: 'https://www.aljazeera.com/xml/rss/all.xml', category: news-world, lang: en}
+- {id: guardian-world, name: Guardian world, kind: rss, url: 'https://www.theguardian.com/world/rss', category: news-world, lang: en}
+- {id: guardian-tech, name: Guardian technology, kind: rss, url: 'https://www.theguardian.com/technology/rss', category: news-world, lang: en}
+- {id: guardian-business, name: Guardian business, kind: rss, url: 'https://www.theguardian.com/business/rss', category: news-world, lang: en}
+- {id: nyt-home, name: NYT home, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml', category: news-world, lang: en}
+- {id: nyt-world, name: NYT world, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/World.xml', category: news-world, lang: en}
+- {id: nyt-tech, name: NYT technology, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml', category: news-world, lang: en}
+- {id: nyt-business, name: NYT business, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/Business.xml', category: news-world, lang: en}
+- {id: npr, name: NPR news, kind: rss, url: 'https://feeds.npr.org/1001/rss.xml', category: news-world, lang: en}
+- {id: dw, name: DW, kind: rss, url: 'https://rss.dw.com/rdf/rss-en-all', category: news-world, lang: en}
+- {id: france24, name: France 24, kind: rss, url: 'https://www.france24.com/en/rss', category: news-world, lang: en}
+- {id: cnbc-top, name: CNBC top news, kind: rss, url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html', category: news-world, lang: en}
+- {id: cnbc-tech, name: CNBC technology, kind: rss, url: 'https://www.cnbc.com/id/19854910/device/rss/rss.html', category: news-world, lang: en}
+- {id: nikkei-asia, name: Nikkei Asia, kind: rss, url: 'https://asia.nikkei.com/rss/feed/nar', category: news-world, lang: en}
+- {id: scmp, name: SCMP, kind: rss, url: 'https://www.scmp.com/rss/91/feed', category: news-world, lang: en}
+- {id: cna-asia, name: CNA Asia, kind: rss, url: 'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511', category: news-world, lang: en}
+- {id: thediplomat, name: The Diplomat, kind: rss, url: 'https://thediplomat.com/feed/', category: news-world, lang: en}
+- {id: un-news, name: UN News, kind: rss, url: 'https://news.un.org/feed/subscribe/en/news/all/rss.xml', category: news-world, lang: en}
+- {id: who-news, name: WHO news, kind: rss, url: 'https://www.who.int/rss-feeds/news-english.xml', category: news-world, lang: en}
+- {id: abc-au, name: ABC Australia, kind: rss, url: 'https://www.abc.net.au/news/feed/2942460/rss.xml', category: news-world, lang: en}
+- {id: japantimes, name: Japan Times, kind: rss, url: 'https://www.japantimes.co.jp/feed/', category: news-world, lang: en}
+- {id: straitstimes-asia, name: Straits Times Asia, kind: rss, url: 'https://www.straitstimes.com/news/asia/rss.xml', category: news-world, lang: en}
+- {id: vnexpress-intl, name: VnExpress International, kind: rss, url: 'https://e.vnexpress.net/rss/news.rss', category: news-world, lang: en}
+- {id: rappler, name: Rappler, kind: rss, url: 'https://www.rappler.com/feed/', category: news-world, lang: en}
+- {id: jakartaglobe, name: Jakarta Globe, kind: rss, url: 'https://jakartaglobe.id/feed', category: news-world, lang: en, enabled: false, note: 'disabled on 2026-11-18
+    probe: HTTP 404'}
+- {id: economist-world, name: The Economist world, kind: rss, url: 'https://www.economist.com/the-world-this-week/rss.xml', category: news-world, lang: en}
+- {id: politico, name: Politico, kind: rss, url: 'https://rss.politico.com/politics-news.xml', category: news-world, lang: en}
+- {id: lobsters, name: Lobsters hottest, kind: rss, url: 'https://lobste.rs/hottest.rss', category: tech, lang: en, enabled: false, note: 'disabled on 2026-11-18
+    probe: HTTP 404'}
+- {id: techcrunch, name: TechCrunch, kind: rss, url: 'https://techcrunch.com/feed/', category: tech, lang: en}
+- {id: theverge, name: The Verge, kind: rss, url: 'https://www.theverge.com/rss/index.xml', category: tech, lang: en}
+- {id: arstechnica, name: Ars Technica, kind: rss, url: 'https://feeds.arstechnica.com/arstechnica/index', category: tech, lang: en}
+- {id: wired, name: Wired, kind: rss, url: 'https://www.wired.com/feed/rss', category: tech, lang: en}
+- {id: engadget, name: Engadget, kind: rss, url: 'https://www.engadget.com/rss.xml', category: tech, lang: en}
+- {id: github-blog, name: GitHub blog, kind: rss, url: 'https://github.blog/feed/', category: tech, lang: en}
+- {id: github-changelog, name: GitHub changelog, kind: rss, url: 'https://github.blog/changelog/feed/', category: tech, lang: en}
+- {id: devto, name: DEV Community, kind: rss, url: 'https://dev.to/feed', category: tech, lang: en}
+- {id: infoq, name: InfoQ, kind: rss, url: 'https://feed.infoq.com/', category: tech, lang: en}
+- {id: restofworld, name: Rest of World, kind: rss, url: 'https://restofworld.org/feed/latest', category: tech, lang: en}
+- {id: mit-tech-review, name: MIT Technology Review, kind: rss, url: 'https://www.technologyreview.com/feed/', category: tech, lang: en}
+- {id: aws-whats-new, name: AWS What's New, kind: rss, url: 'https://aws.amazon.com/about-aws/whats-new/recent/feed/', category: tech, lang: en}
+- {id: cloudflare-blog, name: Cloudflare blog, kind: rss, url: 'https://blog.cloudflare.com/rss/', category: tech, lang: en}
+- {id: vercel-blog, name: Vercel blog, kind: rss, url: 'https://vercel.com/atom', category: tech, lang: en}
+- {id: kubernetes-blog, name: Kubernetes blog, kind: rss, url: 'https://kubernetes.io/feed.xml', category: tech, lang: en}
+- {id: python-insider, name: Python Insider, kind: rss, url: 'https://blog.python.org/feeds/posts/default', category: tech, lang: en}
+- {id: pypi-new, name: PyPI newest packages, kind: rss, url: 'https://pypi.org/rss/packages.xml', category: tech, lang: en}
+- {id: pypi-updates, name: PyPI latest updates, kind: rss, url: 'https://pypi.org/rss/updates.xml', category: tech, lang: en}
+- {id: hackaday, name: Hackaday, kind: rss, url: 'https://hackaday.com/blog/feed/', category: tech, lang: en}
+- {id: stratechery, name: Stratechery, kind: rss, url: 'https://stratechery.com/feed/', category: tech, lang: en}
+- {id: techmeme, name: Techmeme, kind: rss, url: 'https://www.techmeme.com/feed.xml', category: tech, lang: en}
+- {id: thenewstack, name: The New Stack, kind: rss, url: 'https://thenewstack.io/feed/', category: tech, lang: en}
+- {id: martinfowler, name: Martin Fowler, kind: rss, url: 'https://martinfowler.com/feed.atom', category: tech, lang: en}
+- {id: netflix-tech, name: Netflix TechBlog, kind: rss, url: 'https://netflixtechblog.com/feed', category: tech, lang: en}
+- {id: uber-eng, name: Uber engineering, kind: rss, url: 'https://www.uber.com/blog/engineering/rss/', category: tech, lang: en, enabled: false, note: 'disabled on
+    2026-11-18 probe: HTTP 406'}
+- {id: stackoverflow-blog, name: Stack Overflow blog, kind: rss, url: 'https://stackoverflow.blog/feed/', category: tech, lang: en}
+- {id: postgres-news, name: PostgreSQL news, kind: rss, url: 'https://www.postgresql.org/news.rss', category: tech, lang: en}
+- {id: rust-blog, name: Rust blog, kind: rss, url: 'https://blog.rust-lang.org/feed.xml', category: tech, lang: en}
+- {id: go-blog, name: Go blog, kind: rss, url: 'https://go.dev/blog/feed.atom', category: tech, lang: en}
+- {id: nodejs-blog, name: Node.js blog, kind: rss, url: 'https://nodejs.org/en/feed/blog.xml', category: tech, lang: en}
+- {id: chrome-dev, name: Chrome for Developers, kind: rss, url: 'https://developer.chrome.com/static/blog/feed.xml', category: tech, lang: en}
+- {id: webkit-blog, name: WebKit blog, kind: rss, url: 'https://webkit.org/feed/', category: tech, lang: en}
+- {id: mozilla-hacks, name: Mozilla Hacks, kind: rss, url: 'https://hacks.mozilla.org/feed/', category: tech, lang: en}
+- {id: gh-rel-microsoft-vscode, name: microsoft/vscode releases, kind: rss, url: 'https://github.com/microsoft/vscode/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-nodejs-node, name: nodejs/node releases, kind: rss, url: 'https://github.com/nodejs/node/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-vercel-next-js, name: vercel/next.js releases, kind: rss, url: 'https://github.com/vercel/next.js/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-facebook-react, name: facebook/react releases, kind: rss, url: 'https://github.com/facebook/react/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-langchain-ai-langchain, name: langchain-ai/langchain releases, kind: rss, url: 'https://github.com/langchain-ai/langchain/releases.atom', category: releases,
+  every_hours: 6}
+- {id: gh-rel-ollama-ollama, name: ollama/ollama releases, kind: rss, url: 'https://github.com/ollama/ollama/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-anthropics-claude-code, name: anthropics/claude-code releases, kind: rss, url: 'https://github.com/anthropics/claude-code/releases.atom', category: releases,
+  every_hours: 6}
+- {id: gh-rel-openai-openai-python, name: openai/openai-python releases, kind: rss, url: 'https://github.com/openai/openai-python/releases.atom', category: releases,
+  every_hours: 6}
+- {id: gh-rel-anthropics-anthropic-sdk-python, name: anthropics/anthropic-sdk-python releases, kind: rss, url: 'https://github.com/anthropics/anthropic-sdk-python/releases.atom',
+  category: releases, every_hours: 6}
+- {id: gh-rel-huggingface-transformers, name: huggingface/transformers releases, kind: rss, url: 'https://github.com/huggingface/transformers/releases.atom', category: releases,
+  every_hours: 6}
+- {id: gh-rel-pytorch-pytorch, name: pytorch/pytorch releases, kind: rss, url: 'https://github.com/pytorch/pytorch/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-duckdb-duckdb, name: duckdb/duckdb releases, kind: rss, url: 'https://github.com/duckdb/duckdb/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-astral-sh-uv, name: astral-sh/uv releases, kind: rss, url: 'https://github.com/astral-sh/uv/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-astral-sh-ruff, name: astral-sh/ruff releases, kind: rss, url: 'https://github.com/astral-sh/ruff/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-denoland-deno, name: denoland/deno releases, kind: rss, url: 'https://github.com/denoland/deno/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-oven-sh-bun, name: oven-sh/bun releases, kind: rss, url: 'https://github.com/oven-sh/bun/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-rust-lang-rust, name: rust-lang/rust releases, kind: rss, url: 'https://github.com/rust-lang/rust/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-kubernetes-kubernetes, name: kubernetes/kubernetes releases, kind: rss, url: 'https://github.com/kubernetes/kubernetes/releases.atom', category: releases,
+  every_hours: 6}
+- {id: gh-rel-cloudflare-workers-sdk, name: cloudflare/workers-sdk releases, kind: rss, url: 'https://github.com/cloudflare/workers-sdk/releases.atom', category: releases,
+  every_hours: 6}
+- {id: gh-rel-supabase-supabase, name: supabase/supabase releases, kind: rss, url: 'https://github.com/supabase/supabase/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-n8n-io-n8n, name: n8n-io/n8n releases, kind: rss, url: 'https://github.com/n8n-io/n8n/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-vllm-project-vllm, name: vllm-project/vllm releases, kind: rss, url: 'https://github.com/vllm-project/vllm/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-ggml-org-llama-cpp, name: ggml-org/llama.cpp releases, kind: rss, url: 'https://github.com/ggml-org/llama.cpp/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-modelcontextprotocol-servers, name: modelcontextprotocol/servers releases, kind: rss, url: 'https://github.com/modelcontextprotocol/servers/releases.atom',
+  category: releases, every_hours: 6}
+- {id: gh-rel-microsoft-typescript, name: microsoft/TypeScript releases, kind: rss, url: 'https://github.com/microsoft/TypeScript/releases.atom', category: releases,
+  every_hours: 6}
+- {id: gh-rel-python-cpython, name: python/cpython releases, kind: rss, url: 'https://github.com/python/cpython/tags.atom', category: releases, every_hours: 6}
+- {id: gh-rel-golang-go, name: golang/go releases, kind: rss, url: 'https://github.com/golang/go/tags.atom', category: releases, every_hours: 6}
+- {id: gh-rel-tailwindlabs-tailwindcss, name: tailwindlabs/tailwindcss releases, kind: rss, url: 'https://github.com/tailwindlabs/tailwindcss/releases.atom', category: releases,
+  every_hours: 6}
+- {id: gh-rel-vitejs-vite, name: vitejs/vite releases, kind: rss, url: 'https://github.com/vitejs/vite/releases.atom', category: releases, every_hours: 6}
+- {id: gh-rel-grafana-grafana, name: grafana/grafana releases, kind: rss, url: 'https://github.com/grafana/grafana/releases.atom', category: releases, every_hours: 6}
+- id: hn-front
+  name: Hacker News front page
+  kind: json
+  url: https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=60
+  category: tech
+  json:
+    items: hits
+    id: objectID
+    title: title
+    link: url
+    time: created_at_i
+    keep: [points, num_comments, objectID]
+- id: hn-show
+  name: Show HN newest
+  kind: json
+  url: https://hn.algolia.com/api/v1/search_by_date?tags=show_hn&hitsPerPage=60
+  category: tech
+  json:
+    items: hits
+    id: objectID
+    title: title
+    link: url
+    time: created_at_i
+    keep: [points, num_comments, objectID]
+  every_hours: 3
+- id: npm-mcp
+  name: npm packages tagged mcp
+  kind: json
+  url: https://registry.npmjs.org/-/v1/search?text=keywords:mcp&size=100
+  category: dev-ecosystem
+  json:
+    items: objects
+    id: [package.name, package.version]
+    title: package.name
+    link: package.links.npm
+    time: package.date
+    keep: [package.description, package.version, score.final]
+  every_hours: 24
+- id: npm-ai
+  name: npm packages tagged ai
+  kind: json
+  url: https://registry.npmjs.org/-/v1/search?text=keywords:ai&size=100
+  category: dev-ecosystem
+  json:
+    items: objects
+    id: [package.name, package.version]
+    title: package.name
+    link: package.links.npm
+    time: package.date
+    keep: [package.description, package.version]
+  every_hours: 24
+- id: mcp-registry
+  name: MCP registry servers
+  kind: json
+  url: https://registry.modelcontextprotocol.io/v0/servers?limit=100
+  category: dev-ecosystem
+  json:
+    items: servers
+    id: [server.name, server.version]
+    title: server.name
+    link: server.repository.url
+    time: _meta.io.modelcontextprotocol.registry/official.publishedAt
+    keep: [server.description, server.version]
+  every_hours: 24
+- id: crates-summary
+  name: crates.io new and updated
+  kind: json
+  url: https://crates.io/api/v1/summary
+  category: dev-ecosystem
+  json:
+    items: new_crates
+    id: [name, newest_version]
+    title: name
+    link_template: https://crates.io/crates/{name}
+    time: created_at
+    keep: [description, newest_version]
+  every_hours: 24
+- id: hf-daily-papers
+  name: Hugging Face daily papers
+  kind: json
+  url: https://huggingface.co/api/daily_papers
+  category: ai
+  json:
+    items: ''
+    id: paper.id
+    title: title
+    link_template: https://huggingface.co/papers/{paper.id}
+    time: publishedAt
+    keep: [paper.upvotes, paper.id]
+  every_hours: 6
+- id: gh-trending
+  name: GitHub trending (daily)
+  kind: html
+  url: https://github.com/trending
+  category: dev-ecosystem
+  every_hours: 24
+  html:
+    item: article.Box-row
+    title: h2 a
+    link: h2 a
+    fields: {description: p, language: '[itemprop=programmingLanguage]', stars_today: span.d-inline-block.float-sm-right}
+- id: gh-trending-python
+  name: GitHub trending python
+  kind: html
+  url: https://github.com/trending/python
+  category: dev-ecosystem
+  every_hours: 24
+  html:
+    item: article.Box-row
+    title: h2 a
+    link: h2 a
+    fields: {description: p, stars_today: span.d-inline-block.float-sm-right}
+- id: gh-trending-typescript
+  name: GitHub trending typescript
+  kind: html
+  url: https://github.com/trending/typescript
+  category: dev-ecosystem
+  every_hours: 24
+  html:
+    item: article.Box-row
+    title: h2 a
+    link: h2 a
+    fields: {description: p, stars_today: span.d-inline-block.float-sm-right}
+- id: gh-trending-rust
+  name: GitHub trending rust
+  kind: html
+  url: https://github.com/trending/rust
+  category: dev-ecosystem
+  every_hours: 24
+  html:
+    item: article.Box-row
+    title: h2 a
+    link: h2 a
+    fields: {description: p, stars_today: span.d-inline-block.float-sm-right}
+- id: gh-trending-go
+  name: GitHub trending go
+  kind: html
+  url: https://github.com/trending/go
+  category: dev-ecosystem
+  every_hours: 24
+  html:
+    item: article.Box-row
+    title: h2 a
+    link: h2 a
+    fields: {description: p, stars_today: span.d-inline-block.float-sm-right}
+- {id: openai-news, name: OpenAI news, kind: rss, url: 'https://openai.com/news/rss.xml', category: ai, lang: en}
+- {id: deepmind-blog, name: Google DeepMind blog, kind: rss, url: 'https://deepmind.google/blog/rss.xml', category: ai, lang: en}
+- {id: google-ai-blog, name: Google AI blog, kind: rss, url: 'https://blog.google/technology/ai/rss/', category: ai, lang: en}
+- {id: google-research, name: Google Research blog, kind: rss, url: 'https://research.google/blog/rss/', category: ai, lang: en}
+- {id: msr-blog, name: Microsoft Research, kind: rss, url: 'https://www.microsoft.com/en-us/research/feed/', category: ai, lang: en}
+- {id: nvidia-blog, name: NVIDIA blog, kind: rss, url: 'https://blogs.nvidia.com/feed/', category: ai, lang: en}
+- {id: aws-ml-blog, name: AWS ML blog, kind: rss, url: 'https://aws.amazon.com/blogs/machine-learning/feed/', category: ai, lang: en}
+- {id: hf-blog, name: Hugging Face blog, kind: rss, url: 'https://huggingface.co/blog/feed.xml', category: ai, lang: en}
+- {id: simonwillison, name: Simon Willison, kind: rss, url: 'https://simonwillison.net/atom/everything/', category: ai, lang: en}
+- {id: importai, name: Import AI, kind: rss, url: 'https://importai.substack.com/feed', category: ai, lang: en}
+- {id: latent-space, name: Latent Space, kind: rss, url: 'https://www.latent.space/feed', category: ai, lang: en}
+- {id: the-gradient, name: The Gradient, kind: rss, url: 'https://thegradient.pub/rss/', category: ai, lang: en}
+- {id: bair-blog, name: BAIR blog, kind: rss, url: 'https://bair.berkeley.edu/blog/feed.xml', category: ai, lang: en}
+- {id: meta-ai-blog, name: Meta engineering, kind: rss, url: 'https://engineering.fb.com/feed/', category: ai, lang: en}
+- {id: nist-news, name: NIST news, kind: rss, url: 'https://www.nist.gov/news-events/news/rss.xml', category: ai, lang: en}
+- {id: eff-updates, name: EFF updates, kind: rss, url: 'https://www.eff.org/rss/updates.xml', category: ai, lang: en}
+- {id: venturebeat-ai, name: VentureBeat AI, kind: rss, url: 'https://venturebeat.com/category/ai/feed/', category: ai, lang: en, enabled: false, note: 'disabled
+    on 2026-11-18 probe: HTTP 429'}
+- {id: marktechpost, name: MarkTechPost, kind: rss, url: 'https://www.marktechpost.com/feed/', category: ai, lang: en}
+- {id: arxiv-cs-ai, name: arXiv cs.AI, kind: rss, url: 'https://rss.arxiv.org/rss/cs.AI', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
+    metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-cs-cl, name: arXiv cs.CL, kind: rss, url: 'https://rss.arxiv.org/rss/cs.CL', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
+    metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-cs-lg, name: arXiv cs.LG, kind: rss, url: 'https://rss.arxiv.org/rss/cs.LG', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
+    metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-cs-cv, name: arXiv cs.CV, kind: rss, url: 'https://rss.arxiv.org/rss/cs.CV', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
+    metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-cs-cr, name: arXiv cs.CR, kind: rss, url: 'https://rss.arxiv.org/rss/cs.CR', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
+    metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-cs-se, name: arXiv cs.SE, kind: rss, url: 'https://rss.arxiv.org/rss/cs.SE', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
+    metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-cs-cy, name: arXiv cs.CY, kind: rss, url: 'https://rss.arxiv.org/rss/cs.CY', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
+    metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-cs-hc, name: arXiv cs.HC, kind: rss, url: 'https://rss.arxiv.org/rss/cs.HC', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
+    metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-stat-ml, name: arXiv stat.ML, kind: rss, url: 'https://rss.arxiv.org/rss/stat.ML', category: research-papers, every_hours: 24, keep: full, lang: en,
+  licence: arXiv metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-econ-gn, name: arXiv econ.GN, kind: rss, url: 'https://rss.arxiv.org/rss/econ.GN', category: research-papers, every_hours: 24, keep: full, lang: en,
+  licence: arXiv metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-q-fin-st, name: arXiv q-fin.ST, kind: rss, url: 'https://rss.arxiv.org/rss/q-fin.ST', category: research-papers, every_hours: 24, keep: full, lang: en,
+  licence: arXiv metadata CC0-1.0 (no PDFs)}
+- {id: arxiv-q-fin-tr, name: arXiv q-fin.TR, kind: rss, url: 'https://rss.arxiv.org/rss/q-fin.TR', category: research-papers, every_hours: 24, keep: full, lang: en,
+  licence: arXiv metadata CC0-1.0 (no PDFs), enabled: false, note: 'disabled on 2026-11-18 probe: answered but no items'}
+- {id: cisa-advisories, name: CISA advisories, kind: rss, url: 'https://www.cisa.gov/cybersecurity-advisories/all.xml', category: security, lang: en}
+- {id: krebs, name: Krebs on Security, kind: rss, url: 'https://krebsonsecurity.com/feed/', category: security, lang: en}
+- {id: bleepingcomputer, name: BleepingComputer, kind: rss, url: 'https://www.bleepingcomputer.com/feed/', category: security, lang: en}
+- {id: thehackernews, name: The Hacker News, kind: rss, url: 'https://feeds.feedburner.com/TheHackersNews', category: security, lang: en}
+- {id: schneier, name: Schneier on Security, kind: rss, url: 'https://www.schneier.com/feed/atom/', category: security, lang: en}
+- {id: darkreading, name: Dark Reading, kind: rss, url: 'https://www.darkreading.com/rss.xml', category: security, lang: en}
+- {id: securityweek, name: SecurityWeek, kind: rss, url: 'https://www.securityweek.com/feed/', category: security, lang: en}
+- {id: portswigger-research, name: PortSwigger research, kind: rss, url: 'https://portswigger.net/research/rss', category: security, lang: en}
+- {id: google-security, name: Google security blog, kind: rss, url: 'https://security.googleblog.com/feeds/posts/default', category: security, lang: en, enabled: false,
+  note: 'disabled on 2026-11-18 probe: redirect left https'}
+- {id: msrc-blog, name: MSRC blog, kind: rss, url: 'https://msrc.microsoft.com/blog/feed', category: security, lang: en, enabled: false, note: 'disabled on 2026-11-18
+    probe: answered but no items'}
+- {id: ncsc-uk, name: NCSC UK news, kind: rss, url: 'https://www.ncsc.gov.uk/api/1/services/v1/news-rss-feed.xml', category: security, lang: en}
+- id: cisa-kev
+  name: CISA known exploited vulnerabilities
+  kind: json
+  url: https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+  category: security
+  json:
+    items: vulnerabilities
+    id: cveID
+    title: vulnerabilityName
+    link_template: https://nvd.nist.gov/vuln/detail/{cveID}
+    time: dateAdded
+    keep: [cveID, vendorProject, product, knownRansomwareCampaignUse, dueDate]
+  every_hours: 6
+  licence: US Government public domain
+- {id: nasa-news, name: NASA news releases, kind: rss, url: 'https://www.nasa.gov/news-release/feed/', category: science, lang: en}
+- {id: sciencedaily, name: ScienceDaily, kind: rss, url: 'https://www.sciencedaily.com/rss/all.xml', category: science, lang: en}
+- {id: nature, name: Nature, kind: rss, url: 'https://www.nature.com/nature.rss', category: science, lang: en}
+- {id: science-news, name: Science news, kind: rss, url: 'https://www.science.org/rss/news_current.xml', category: science, lang: en}
+- {id: physorg, name: Phys.org, kind: rss, url: 'https://phys.org/rss-feed/', category: science, lang: en}
+- {id: quanta, name: Quanta Magazine, kind: rss, url: 'https://api.quantamagazine.org/feed/', category: science, lang: en}
+- {id: gdacs, name: GDACS disaster alerts, kind: rss, url: 'https://www.gdacs.org/xml/rss.xml', category: science, lang: en}
+- {id: reliefweb, name: ReliefWeb updates, kind: rss, url: 'https://reliefweb.int/updates/rss.xml', category: science, lang: en}
+- {id: esa, name: ESA top news, kind: rss, url: 'https://www.esa.int/rssfeed/TopNews', category: science, lang: en}
+- {id: newscientist, name: New Scientist, kind: rss, url: 'https://www.newscientist.com/feed/home/', category: science, lang: en}
+- id: usgs-quakes
+  name: USGS earthquakes M2.5+ (past day)
+  kind: json
+  url: https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson
+  category: earth
+  json:
+    items: features
+    id: id
+    title: properties.title
+    link: properties.url
+    time: properties.time
+    keep: [properties.mag, properties.place, properties.tsunami, properties.alert, geometry.coordinates]
+  licence: USGS public domain
+- id: nasa-eonet
+  name: NASA EONET open natural events
+  kind: json
+  url: https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=200
+  category: earth
+  json:
+    items: events
+    id: id
+    title: title
+    link: link
+    time: geometry.0.date
+    keep: [categories.0.title, geometry.0.coordinates, geometry.0.date]
+  every_hours: 6
+  licence: NASA public domain
+- id: swpc-alerts
+  name: NOAA space weather alerts
+  kind: json
+  url: https://services.swpc.noaa.gov/products/alerts.json
+  category: earth
+  json:
+    items: ''
+    id: [product_id, issue_datetime]
+    title: product_id
+    time: issue_datetime
+    keep: [message]
+  every_hours: 3
+  licence: NOAA public domain
+- id: swpc-kp
+  name: NOAA planetary K-index
+  kind: json
+  url: https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json
+  category: earth
+  json: {snapshot: true}
+  every_hours: 3
+  licence: NOAA public domain
+- id: launches-upcoming
+  name: Upcoming space launches
+  kind: json
+  url: https://ll.thespacedevs.com/2.3.0/launches/upcoming/?limit=30&mode=list
+  category: space
+  json:
+    items: results
+    id: id
+    title: name
+    time: net
+    keep: [status.name, location, net]
+  every_hours: 12
+- id: metno-bangkok
+  name: met.no forecast bangkok
+  kind: json
+  url: https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=13.75&lon=100.5
+  category: weather
+  json: {snapshot: true, path: properties.timeseries, time: properties.meta.updated_at}
+  every_hours: 6
+  licence: CC BY 4.0 (MET Norway)
+- id: metno-chiangmai
+  name: met.no forecast chiangmai
+  kind: json
+  url: https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=18.79&lon=98.98
+  category: weather
+  json: {snapshot: true, path: properties.timeseries, time: properties.meta.updated_at}
+  every_hours: 6
+  licence: CC BY 4.0 (MET Norway)
+- id: metno-phuket
+  name: met.no forecast phuket
+  kind: json
+  url: https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=7.88&lon=98.39
+  category: weather
+  json: {snapshot: true, path: properties.timeseries, time: properties.meta.updated_at}
+  every_hours: 6
+  licence: CC BY 4.0 (MET Norway)
+- id: air4thai
+  name: Air4Thai station AQI
+  kind: json
+  url: https://air4thai.pcd.go.th/services/getNewAQI_JSON.php
+  category: air-quality
+  json:
+    items: stations
+    id: [stationID, AQILast.date, AQILast.time]
+    title: nameEN
+    keep: [stationID, areaEN, lat, long, AQILast.date, AQILast.time, AQILast.PM25.value, AQILast.PM10.value, AQILast.AQI.aqi]
+  enabled: false
+  note: 'disabled: the server sends an incomplete TLS chain (verify fails); never turn TLS checks off. Re-enable when the chain verifies from the runner.'
+- id: fx-usd
+  name: ECB reference rates base USD (Frankfurter)
+  kind: json
+  url: https://api.frankfurter.dev/v1/latest?base=USD
+  category: economy
+  json: {snapshot: true, time: date}
+  every_hours: 6
+  licence: ECB reference rates
+- id: fx-thb
+  name: ECB reference rates base THB (Frankfurter)
+  kind: json
+  url: https://api.frankfurter.dev/v1/latest?base=THB
+  category: economy
+  json: {snapshot: true, time: date}
+  every_hours: 6
+  licence: ECB reference rates
+- id: wb-tha-ny-gdp-mktp-cd
+  name: World Bank Thailand NY.GDP.MKTP.CD
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/NY.GDP.MKTP.CD?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: wb-tha-ny-gdp-mktp-kd-zg
+  name: World Bank Thailand NY.GDP.MKTP.KD.ZG
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/NY.GDP.MKTP.KD.ZG?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: wb-tha-fp-cpi-totl-zg
+  name: World Bank Thailand FP.CPI.TOTL.ZG
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/FP.CPI.TOTL.ZG?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: wb-tha-sl-uem-totl-zs
+  name: World Bank Thailand SL.UEM.TOTL.ZS
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/SL.UEM.TOTL.ZS?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: wb-tha-sp-pop-totl
+  name: World Bank Thailand SP.POP.TOTL
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/SP.POP.TOTL?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: wb-tha-ne-exp-gnfs-zs
+  name: World Bank Thailand NE.EXP.GNFS.ZS
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/NE.EXP.GNFS.ZS?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: wb-tha-bx-klt-dinv-cd-wd
+  name: World Bank Thailand BX.KLT.DINV.CD.WD
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/BX.KLT.DINV.CD.WD?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: wb-tha-it-net-user-zs
+  name: World Bank Thailand IT.NET.USER.ZS
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/IT.NET.USER.ZS?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: wb-tha-gc-dod-totl-gd-zs
+  name: World Bank Thailand GC.DOD.TOTL.GD.ZS
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/GC.DOD.TOTL.GD.ZS?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: wb-tha-ny-gnp-pcap-cd
+  name: World Bank Thailand NY.GNP.PCAP.CD
+  kind: json
+  url: https://api.worldbank.org/v2/country/THA/indicator/NY.GNP.PCAP.CD?format=json&per_page=70
+  category: economy-thailand
+  json:
+    items: '1'
+    id: [indicator.id, date]
+    title: indicator.value
+    keep: [date, value, countryiso3code]
+  every_hours: 168
+  licence: CC BY 4.0 (World Bank)
+- id: ust-avg-rates
+  name: US Treasury average interest rates
+  kind: json
+  url: https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/avg_interest_rates?sort=-record_date&page%5Bsize%5D=50
+  category: economy
+  json:
+    items: data
+    id: [record_date, security_desc]
+    title: security_desc
+    time: record_date
+    keep: [avg_interest_rate_amt, security_type_desc, record_date]
+  every_hours: 24
+  licence: US Government public domain
+- id: ust-debt
+  name: US debt to the penny
+  kind: json
+  url: https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/debt_to_penny?sort=-record_date&page%5Bsize%5D=10
+  category: economy
+  json:
+    items: data
+    id: record_date
+    title: record_date
+    time: record_date
+    keep: [tot_pub_debt_out_amt, record_date]
+  every_hours: 24
+  licence: US Government public domain
+- {id: fed-press, name: Federal Reserve press releases, kind: rss, url: 'https://www.federalreserve.gov/feeds/press_all.xml', category: economy, lang: en}
+- {id: ecb-press, name: ECB press, kind: rss, url: 'https://www.ecb.europa.eu/rss/press.html', category: economy, lang: en}
+- {id: imf-news, name: IMF news, kind: rss, url: 'https://www.imf.org/en/News/rss?language=eng', category: economy, lang: en, enabled: false, note: 'disabled on 2026-11-18
+    probe: HTTP 404'}
+- {id: sec-press, name: SEC press releases, kind: rss, url: 'https://www.sec.gov/news/pressreleases.rss', category: economy, lang: en}
+- {id: bis-press, name: BIS press releases, kind: rss, url: 'https://www.bis.org/doclist/all_pressrels.rss', category: economy, lang: en}
+- {id: worldbank-news, name: World Bank news, kind: rss, url: 'https://www.worldbank.org/en/news/all?format=rss', category: economy, lang: en, enabled: false, note: 'disabled
+    on 2026-11-18 probe: answered but no items'}
+- {id: marketwatch-top, name: MarketWatch top stories, kind: rss, url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories', category: economy, lang: en}
+- {id: yahoo-finance, name: Yahoo Finance, kind: rss, url: 'https://finance.yahoo.com/news/rssindex', category: economy, lang: en, enabled: false, note: 'disabled
+    on 2026-11-18 probe: HTTP 404'}
+- {id: ft-world, name: Financial Times world, kind: rss, url: 'https://www.ft.com/world?format=rss', category: economy, lang: en}
+- id: federal-register
+  name: US Federal Register newest documents
+  kind: json
+  url: https://www.federalregister.gov/api/v1/documents.json?per_page=100&order=newest
+  category: government
+  json:
+    items: results
+    id: document_number
+    title: title
+    link: html_url
+    time: publication_date
+    keep: [type, agencies.0.name]
+  every_hours: 12
+  licence: US Government public domain
+- id: datagov-us
+  name: data.gov newest datasets
+  kind: json
+  url: https://catalog.data.gov/api/3/action/package_search?sort=metadata_modified%20desc&rows=100
+  category: government
+  json:
+    items: result.results
+    id: [id, metadata_modified]
+    title: title
+    link_template: https://catalog.data.gov/dataset/{name}
+    time: metadata_modified
+    keep: [organization.title]
+  every_hours: 24
+  enabled: false
+  note: 'disabled on 2026-11-18 probe: HTTP 404'
+- id: datagov-th
+  name: data.go.th newest datasets
+  kind: json
+  url: https://data.go.th/api/3/action/package_search?sort=metadata_modified%20desc&rows=100
+  category: government-thailand
+  json:
+    items: result.results
+    id: [id, metadata_modified]
+    title: title
+    link_template: https://data.go.th/dataset/{name}
+    time: metadata_modified
+    keep: [organization.title]
+  every_hours: 24
+- id: govuk-latest
+  name: GOV.UK latest publications
+  kind: json
+  url: https://www.gov.uk/api/search.json?order=-public_timestamp&count=100
+  category: government
+  json:
+    items: results
+    id: link
+    title: title
+    link_template: https://www.gov.uk{link}
+    time: public_timestamp
+    keep: [format]
+  every_hours: 6
+  licence: OGL v3
+- id: mastodon-trend-links
+  name: Mastodon trending links
+  kind: json
+  url: https://mastodon.social/api/v1/trends/links?limit=40
+  category: trends
+  json:
+    items: ''
+    id: url
+    title: title
+    link: url
+    keep: [provider_name, history.0.uses, history.0.accounts]
+  every_hours: 3
+- id: mastodon-trend-tags
+  name: Mastodon trending tags
+  kind: json
+  url: https://mastodon.social/api/v1/trends/tags?limit=20
+  category: trends
+  json:
+    items: ''
+    id: [name, history.0.day]
+    title: name
+    link: url
+    keep: [history.0.uses, history.0.accounts]
+  every_hours: 3
+- {id: status-github, name: GitHub status, kind: rss, url: 'https://www.githubstatus.com/history.rss', category: platform-status}
+- {id: status-cloudflare, name: Cloudflare status, kind: rss, url: 'https://www.cloudflarestatus.com/history.rss', category: platform-status}
+- {id: status-vercel, name: Vercel status, kind: rss, url: 'https://www.vercel-status.com/history.rss', category: platform-status}
+- {id: status-openai, name: OpenAI status, kind: rss, url: 'https://status.openai.com/history.rss', category: platform-status}
+- {id: status-anthropic, name: Anthropic status, kind: rss, url: 'https://status.anthropic.com/history.rss', category: platform-status}
+- {id: status-railway, name: Railway status, kind: rss, url: 'https://status.railway.com/feed.rss', category: platform-status, enabled: false, note: 'disabled on
+    2026-11-18 probe: answered but no items'}
+- {id: status-neon, name: Neon status, kind: rss, url: 'https://neonstatus.com/feed.rss', category: platform-status, enabled: false, note: 'disabled on 2026-11-18
+    probe: HTTP 404'}
+- {id: status-supabase, name: Supabase status, kind: rss, url: 'https://status.supabase.com/history.rss', category: platform-status}
+- {id: status-sentry, name: Sentry status, kind: rss, url: 'https://status.sentry.io/history.rss', category: platform-status}
+- {id: sydney-morning-herald-latest-news, name: Sydney Morning Herald - Latest News, kind: rss, url: 'https://www.smh.com.au/rss/feed.xml', category: news-australia}
+- {id: abc-news, name: ABC News, kind: rss, url: 'https://www.abc.net.au/news/feed/1948/rss.xml', category: news-australia}
+- {id: the-age-latest-news, name: The Age - Latest News, kind: rss, url: 'https://www.theage.com.au/rss/feed.xml', category: news-australia}
+- {id: perthnow, name: PerthNow, kind: rss, url: 'https://www.perthnow.com.au/news/feed', category: news-australia}
+- {id: the-canberra-times-local-news, name: The Canberra Times - Local News, kind: rss, url: 'https://www.canberratimes.com.au/rss.xml', category: news-australia}
+- {id: brisbane-times-latest-news, name: Brisbane Times - Latest News, kind: rss, url: 'https://www.brisbanetimes.com.au/rss/feed.xml', category: news-australia}
+- {id: independent-australia, name: Independent Australia, kind: rss, url: 'https://feeds.feedburner.com/IndependentAustralia', category: news-australia}
+- {id: business-news-latest-headlines, name: Business News - Latest Headlines, kind: rss, url: 'https://www.businessnews.com.au/rssfeed/latest.rss', category: news-australia}
+- {id: crikey, name: Crikey, kind: rss, url: 'https://feeds.feedburner.com/com/rCTl', category: news-australia}
+- {id: the-daily-star, name: The Daily Star, kind: rss, url: 'https://www.thedailystar.net/frontpage/rss.xml', category: news-bangladesh}
+- {id: bd24live-com, name: BD24Live.com, kind: rss, url: 'https://www.bd24live.com/feed', category: news-bangladesh}
+- {id: jagonews24-com-rss-feed, name: jagonews24.com | rss Feed, kind: rss, url: 'https://www.jagonews24.com/rss/rss.xml', category: news-bangladesh}
+- {id: feed, name: প্রথম আলো, kind: rss, url: 'https://www.prothomalo.com/feed/', category: news-bangladesh}
+- {id: folha-de-s-paulo-em-cima-da-hora-principal, name: Folha de S.Paulo - Em cima da hora - Principal, kind: rss, url: 'https://feeds.folha.uol.com.br/emcimadahora/rss091.xml',
+  category: news-brazil}
+- {id: uol, name: UOL, kind: rss, url: 'https://rss.home.uol.com.br/index.xml', category: news-brazil}
+- {id: the-rio-times, name: The Rio Times, kind: rss, url: 'https://riotimesonline.com/feed/', category: news-brazil}
+- {id: brasil-wire, name: Brasil Wire, kind: rss, url: 'https://www.brasilwire.com/feed/', category: news-brazil}
+- {id: jornal-de-bras-lia, name: Jornal de Brasília, kind: rss, url: 'https://jornaldebrasilia.com.br/feed/', category: news-brazil}
+- {id: https-globalnews-ca-feed, name: 'https://globalnews.ca/feed/', kind: rss, url: 'https://globalnews.ca/feed/', category: news-canada}
+- {id: ottawa-citizen, name: Ottawa Citizen, kind: rss, url: 'https://ottawacitizen.com/feed/', category: news-canada}
+- {id: the-province, name: The Province, kind: rss, url: 'https://theprovince.com/feed/', category: news-canada}
+- {id: lapresse-ca-actualit-s, name: LaPresse.ca - Actualités, kind: rss, url: 'https://www.lapresse.ca/actualites/rss', category: news-canada}
+- {id: toronto-sun-rss-feed, name: Toronto Sun - RSS Feed, kind: rss, url: 'https://torontosun.com/category/news/feed', category: news-canada}
+- {id: mediapart, name: Mediapart, kind: rss, url: 'https://www.mediapart.fr/articles/feed', category: news-france}
+- {id: paris-star, name: Paris Star, kind: rss, url: 'https://www.parisstaronline.com/feed', category: news-france}
+- {id: le-monde-fr-actualit-s-et-infos-en-france-et-dans-le-mon, name: Le Monde.fr - Actualités et Infos en France et dans le monde, kind: rss, url: 'https://www.lemonde.fr/rss/une.xml',
+  category: news-france}
+- {id: l-obs-a-la-une, name: L'Obs - A la une, kind: rss, url: 'https://www.nouvelobs.com/a-la-une/rss.xml', category: news-france}
+- {id: franceinfo-les-titres, name: Franceinfo - Les Titres, kind: rss, url: 'https://www.francetvinfo.fr/titres.rss', category: news-france}
+- {id: le-huffington-post, name: Le Huffington Post, kind: rss, url: 'https://www.huffingtonpost.fr/feeds/index.xml', category: news-france}
+- {id: la-d-p-che-du-midi-actualit-s-et-info-en-direct-de-la-r-, name: 'La Dépêche du Midi : actualités et info en direct de la région Occitanie et des environs -
+    ladepeche.fr', kind: rss, url: 'https://www.ladepeche.fr/rss.xml', category: news-france}
+- {id: l-essentiel, name: L'essentiel, kind: rss, url: 'https://www.sudouest.fr/essentiel/rss.xml', category: news-france}
+- {id: ouest-france-actualit, name: Ouest-France - Actualité, kind: rss, url: 'https://www.ouest-france.fr/rss-en-continu.xml', category: news-france}
+- {id: zeit-online-nachrichten-hintergr-nde-und-debatten, name: 'ZEIT ONLINE | Nachrichten, Hintergründe und Debatten', kind: rss, url: 'https://newsfeed.zeit.de/index',
+  category: news-germany}
+- {id: aktuell-faz-net, name: Aktuell - FAZ.NET, kind: rss, url: 'https://www.faz.net/rss/aktuell/', category: news-germany}
+- {id: tagesschau-de-die-nachrichten-der-ard, name: tagesschau.de - Die Nachrichten der ARD, kind: rss, url: 'https://www.tagesschau.de/xml/rss2', category: news-germany}
+- {id: hong-kong-free-press-hkfp, name: Hong Kong Free Press HKFP, kind: rss, url: 'https://www.hongkongfp.com/feed/', category: news-hong-kong-sar-china}
+- {id: hongkongnews-net-latest-rss-headlines, name: hongkongnews.net latest rss headlines, kind: rss, url: 'https://feeds.hongkongnews.net/rss/b82693edf38ebff8',
+  category: news-hong-kong-sar-china}
+- {id: bbc-news-india, name: BBC News - India, kind: rss, url: 'https://feeds.bbci.co.uk/news/world/asia/india/rss.xml', category: news-india}
+- {id: india-the-guardian, name: India | The Guardian, kind: rss, url: 'https://www.theguardian.com/world/india/rss', category: news-india}
+- {id: times-of-india, name: Times of India, kind: rss, url: 'https://timesofindia.indiatimes.com/rssfeedstopstories.cms', category: news-india}
+- {id: the-hindu-home, name: The Hindu - Home, kind: rss, url: 'https://www.thehindu.com/feeder/default.rss', category: news-india}
+- {id: ndtv-news-topstories, name: NDTV News -   Topstories, kind: rss, url: 'https://feeds.feedburner.com/ndtvnews-top-stories', category: news-india}
+- {id: india-today-latest-stories, name: India Today | Latest Stories, kind: rss, url: 'https://www.indiatoday.in/rss/home', category: news-india}
+- {id: top-world-news-news18-com, name: Top World News- News18.com, kind: rss, url: 'https://www.news18.com/rss/world.xml', category: news-india}
+- {id: india-news, name: India News, kind: rss, url: 'https://www.dnaindia.com/feeds/india.xml', category: news-india}
+- {id: free-press-journal, name: Free Press Journal, kind: rss, url: 'https://www.freepressjournal.in/stories.rss', category: news-india}
+- {id: moneycontrol-latest-news, name: Moneycontrol Latest News, kind: rss, url: 'https://www.moneycontrol.com/rss/latestnews.xml', category: news-india}
+- {id: economic-times, name: Economic Times, kind: rss, url: 'https://economictimes.indiatimes.com/rssfeedsdefault.cms', category: news-india}
+- {id: news-latest-news-today-s-news-headlines-breaking-news-li, name: 'News, Latest News, Today''s News Headlines, Breaking News, LIVE News - Oneindia', kind: rss,
+  url: 'https://www.oneindia.com/rss/news-fb.xml', category: news-india}
+- {id: scroll-in, name: Scroll.in, kind: rss, url: 'https://feeds.feedburner.com/ScrollinArticles.rss', category: news-india}
+- {id: business-line-home, name: Business Line - Home, kind: rss, url: 'https://www.thehindubusinessline.com/feeder/default.rss', category: news-india}
+- {id: techgenyz, name: TechGenyz, kind: rss, url: 'https://feeds.feedburner.com/techgenyz', category: news-india}
+- {id: opindia, name: OpIndia, kind: rss, url: 'https://feeds.feedburner.com/opindia', category: news-india}
+- {id: swarajya, name: Swarajya, kind: rss, url: 'https://prod-qt-images.s3.amazonaws.com/production/swarajya/feed.xml', category: news-india}
+- {id: latest-and-breaking-hindi-news-headlines-news-in-hindi-a, name: 'Latest And Breaking Hindi News Headlines, News In Hindi | अमर उजाला हिंदी न्यूज़ | - Amar Ujala',
+  kind: rss, url: 'https://www.amarujala.com/rss/breaking-news.xml', category: news-india}
+- {id: feed-2, name: देश | दैनिक भास्कर, kind: rss, url: 'https://www.bhaskar.com/rss-feed/1061/', category: news-india}
+- {id: feed-3, name: ઈન્ડિયા | દિવ્ય ભાસ્કર, kind: rss, url: 'https://www.divyabhaskar.co.in/rss-feed/1037/', category: news-india}
+- {id: republika-online-rss-feed, name: Republika Online RSS Feed, kind: rss, url: 'https://www.republika.co.id/rss/', category: news-indonesia}
+- {id: yjc, name: خبرگزاری باشگاه خبرنگاران | آخرین اخبار ایران و جهان | YJC, kind: rss, url: 'https://www.yjc.ir/fa/rss/allnews', category: news-iran}
+- {id: tabnak, name: تابناک | TABNAK, kind: rss, url: 'https://www.tabnak.ir/fa/rss/allnews', category: news-iran}
+- {id: isna-news-agency, name: خبرگزاری ایسنا | صفحه اصلی |  ISNA News Agency, kind: rss, url: 'https://www.isna.ir/rss', category: news-iran}
+- {id: mehr-news-agency, name: خبرگزاری مهر | اخبار ایران و جهان | Mehr News Agency, kind: rss, url: 'https://www.mehrnews.com/rss', category: news-iran}
+- {id: khabaronline, name: خبرگزاری خبرآنلاین - آخرین اخبار ایران و جهان | Khabaronline, kind: rss, url: 'https://www.khabaronline.ir/rss', category: news-iran}
+- {id: feed-5, name: عصر ايران, kind: rss, url: 'https://www.asriran.com/fa/rss/allnews', category: news-iran}
+- {id: thejournal-ie, name: TheJournal.ie, kind: rss, url: 'https://www.thejournal.ie/feed/', category: news-ireland}
+- {id: all-breakingnews-ie, name: 'All: BreakingNews.ie', kind: rss, url: 'https://feeds.breakingnews.ie/bntopstories', category: news-ireland}
+- {id: the42, name: The42, kind: rss, url: 'https://www.the42.ie/feed/', category: news-ireland}
+- {id: irishexaminer-com, name: IrishExaminer.com, kind: rss, url: 'https://feeds.feedburner.com/ietopstories', category: news-ireland}
+- {id: irishcentral-com-top-stories, name: IrishCentral.com - Top Stories, kind: rss, url: 'https://feeds.feedburner.com/IrishCentral', category: news-ireland}
+- {id: irish-mirror-home, name: Irish Mirror - Home, kind: rss, url: 'https://www.irishmirror.ie/?service=rss', category: news-ireland}
+- {id: rss-di-ansa-it, name: RSS di   - ANSA.it, kind: rss, url: 'https://www.ansa.it/sito/ansait_rss.xml', category: news-italy}
+- {id: the-local, name: The Local, kind: rss, url: 'https://feeds.thelocal.com/rss/it', category: news-italy}
+- {id: rss-diariodelweb-it, name: RSS DiariodelWeb.it, kind: rss, url: 'https://www.diariodelweb.it/rss/home/', category: news-italy}
+- {id: il-mattino-web, name: Il Mattino Web, kind: rss, url: 'https://www.ilmattino.it/?sez=XML&args&p=search&args[box]=Home&limit=20&layout=rss', category: news-italy}
+- {id: adnkronos-ultimoratop, name: Adnkronos - ultimoratop, kind: rss, url: 'https://rss.adnkronos.com/RSS_PrimaPagina.xml', category: news-italy}
+- {id: milan-news, name: Milan News, kind: rss, url: 'https://www.milannews.it/rss/', category: news-italy}
+- {id: internazionale, name: Internazionale, kind: rss, url: 'https://www.internazionale.it/sitemaps/rss.xml', category: news-italy}
+- {id: panorama, name: Panorama, kind: rss, url: 'https://www.panorama.it/feeds/feed.rss', category: news-italy}
+- {id: italy-the-guardian, name: Italy | The Guardian, kind: rss, url: 'https://www.theguardian.com/world/italy/rss', category: news-italy}
+- {id: japan-times-latest-articles, name: Japan Times latest articles, kind: rss, url: 'https://www.japantimes.co.jp/feed/topstories/', category: news-japan}
+- {id: japan-today, name: Japan Today, kind: rss, url: 'https://japantoday.com/feed', category: news-japan}
+- {id: news-on-japan, name: News On Japan, kind: rss, url: 'https://www.newsonjapan.com/rss/top.xml', category: news-japan}
+- {id: bridge, name: BRIDGE（ブリッジ）テクノロジー＆スタートアップ情報, kind: rss, url: 'https://feeds.feedburner.com/SdJapan', category: news-japan}
+- {id: nyt-japan, name: NYT > Japan, kind: rss, url: 'https://www.nytimes.com/svc/collections/v1/publish/http://www.nytimes.com/topic/destination/japan/rss.xml',
+  category: news-japan}
+- {id: feed-7, name: 朝日新聞デジタル, kind: rss, url: 'https://rss.asahi.com/rss/asahi/newsheadlines.rdf', category: news-japan}
+- {id: mexico-the-guardian, name: Mexico | The Guardian, kind: rss, url: 'https://www.theguardian.com/world/mexico/rss', category: news-mexico}
+- {id: reforma, name: Reforma, kind: rss, url: 'https://www.reforma.com/rss/portada.xml', category: news-mexico}
+- {id: lo-ltimo-en-vanguardia-mx, name: Lo último en Vanguardia MX, kind: rss, url: 'https://vanguardia.com.mx/rss.xml', category: news-mexico}
+- {id: portada-el-siglo-de-torre-n, name: 'Portada, El Siglo de Torreón', kind: rss, url: 'https://www.elsiglodetorreon.com.mx/index.xml', category: news-mexico}
+- {id: el-financiero, name: El Financiero, kind: rss, url: 'https://www.elfinanciero.com.mx/arc/outboundfeeds/rss/?outputType=xml', category: news-mexico}
+- {id: elnorte, name: ElNorte, kind: rss, url: 'https://www.elnorte.com/rss/portada.xml', category: news-mexico}
+- {id: 24-horas, name: 24 Horas, kind: rss, url: 'https://www.24-horas.mx/feed/', category: news-mexico}
+- {id: mexico-news-daily, name: Mexico News Daily, kind: rss, url: 'https://mexiconewsdaily.com/feed/', category: news-mexico}
+- {id: 8-columnas, name: 8 Columnas, kind: rss, url: 'https://8columnas.com.mx/feed/', category: news-mexico}
+- {id: nigerian-news-latest-nigeria-news-your-online-nigerian-n, name: Nigerian News. Latest Nigeria News. Your online Nigerian Newspaper., kind: rss, url: 'https://feeds.feedburner.com/Nigerianeye',
+  category: news-nigeria}
+- {id: legit-ng, name: Legit.ng, kind: rss, url: 'https://www.legit.ng/rss/all.rss', category: news-nigeria}
+- {id: daily-post-nigeria, name: Daily Post Nigeria, kind: rss, url: 'https://dailypost.ng/feed', category: news-nigeria}
+- {id: premium-times-nigeria, name: Premium Times Nigeria, kind: rss, url: 'https://www.premiumtimesng.com/feed', category: news-nigeria}
+- {id: information-nigeria, name: Information Nigeria, kind: rss, url: 'https://www.informationng.com/feed', category: news-nigeria}
+- {id: tribune-online, name: Tribune Online, kind: rss, url: 'https://tribuneonlineng.com/feed/', category: news-nigeria}
+- {id: the-express-tribune, name: The Express Tribune, kind: rss, url: 'https://tribune.com.pk/feed/home', category: news-pakistan}
+- {id: the-nation-top-stories, name: The Nation - Top Stories, kind: rss, url: 'https://nation.com.pk/rss/top-stories', category: news-pakistan}
+- {id: feed-8, name: قومی خبریں, kind: rss, url: 'https://jang.com.pk/rss/1/1', category: news-pakistan}
+- {id: the-news-international-pakistan, name: The News International - Pakistan, kind: rss, url: 'https://www.thenews.com.pk/rss/1/1', category: news-pakistan}
+- {id: news-blog, name: News Blog, kind: rss, url: 'https://newsnblogs.com/feed/', category: news-pakistan}
+- {id: urdupoint-com-all-urdu-news, name: UrduPoint.com All Urdu News, kind: rss, url: 'https://www.urdupoint.com/rss/urdupoint.rss', category: news-pakistan}
+- {id: feed-9, name: ایکسپریس اردو, kind: rss, url: 'https://www.express.pk/feed/', category: news-pakistan}
+- {id: inquirer-net, name: INQUIRER.net, kind: rss, url: 'https://www.inquirer.net/fullfeed', category: news-philippines}
+- {id: interaksyon, name: Interaksyon, kind: rss, url: 'https://www.interaksyon.com/feed/', category: news-philippines}
+- {id: philstar-com-rss-headlines, name: philstar.com - RSS Headlines, kind: rss, url: 'https://www.philstar.com/rss/headlines', category: news-philippines}
+- {id: businessworld, name: BusinessWorld, kind: rss, url: 'https://www.bworldonline.com/feed/', category: news-philippines}
+- {id: philnews-xyz, name: PhilNews.XYZ, kind: rss, url: 'https://www.philnews.xyz/feeds/posts/default?alt=rss', category: news-philippines}
+- {id: gma-news-online-news, name: GMA News Online / News, kind: rss, url: 'https://data.gmanews.tv/gno/rss/news/feed.xml', category: news-philippines}
+- {id: current-ph, name: Current PH, kind: rss, url: 'https://currentph.com/feed/', category: news-philippines}
+- {id: top-gear-the-philippine-authority-on-cars-and-the-automo, name: 'Top Gear: The Philippine authority on cars and the automotive industry', kind: rss, url: 'https://www.topgear.com.ph/feed/rss1',
+  category: news-philippines}
+- {id: eagle-news, name: Eagle News, kind: rss, url: 'https://www.eaglenews.ph/feed/', category: news-philippines}
+- {id: unbox-ph, name: UNBOX PH, kind: rss, url: 'https://www.unbox.ph/feed/', category: news-philippines}
+- {id: abante-tonite, name: Abante Tonite, kind: rss, url: 'https://tonite.abante.com.ph/feed/', category: news-philippines}
+- {id: techpinas-philippines-technology-news-tips-and-reviews-b, name: 'TechPinas : Philippines'' Technology News, Tips and Reviews Blog', kind: rss, url: 'https://feeds.feedburner.com/Techpinas',
+  category: news-philippines}
+- {id: najnowsze, name: Najnowsze, kind: rss, url: 'https://feeds.feedburner.com/wPolitycepl', category: news-poland}
+- {id: newsweek-polska, name: Newsweek Polska, kind: rss, url: 'https://www.newsweek.pl/rss.xml', category: news-poland}
+- {id: https-www-rp-pl, name: 'https://www.rp.pl', kind: rss, url: 'https://www.rp.pl/rss/1019', category: news-poland}
+- {id: rmf24-pl, name: RMF24.pl, kind: rss, url: 'https://www.rmf24.pl/feed', category: news-poland}
+- {id: lenta-ru, name: 'Lenta.ru : Новости', kind: rss, url: 'https://lenta.ru/rss', category: news-russia}
+- {id: ru-2, name: Газета.Ru - Первая полоса, kind: rss, url: 'https://www.gazeta.ru/export/rss/first.xml', category: news-russia}
+- {id: feed-10, name: Все материалы - Московский Комсомолец, kind: rss, url: 'https://www.mk.ru/rss/index.xml', category: news-russia}
+- {id: feed-11, name: Российская Газета, kind: rss, url: 'https://rg.ru/xml/index.xml', category: news-russia}
+- {id: newsru-com, name: 'NEWSru.com :: Главные новости', kind: rss, url: 'https://rss.newsru.com/top/big/', category: news-russia}
+- {id: rt-daily-news, name: RT - Daily news, kind: rss, url: 'https://www.rt.com/rss/', category: news-russia}
+- {id: meduza-io, name: Meduza.io, kind: rss, url: 'https://meduza.io/rss/all', category: news-russia}
+- {id: russia-insider-daily-headlines, name: Russia Insider Daily Headlines, kind: rss, url: 'https://russia-insider.com/en/all-content/rss', category: news-russia}
+- {id: tass, name: TASS, kind: rss, url: 'https://tass.com/rss/v2.xml', category: news-russia}
+- {id: the-moscow-times-independent-news-from-russia, name: The Moscow Times - Independent News From Russia, kind: rss, url: 'https://www.themoscowtimes.com/rss/news',
+  category: news-russia}
+- {id: feed-12, name: Газета, kind: rss, url: 'https://www.kommersant.ru/RSS/main.xml', category: news-russia}
+- {id: pravdareport, name: PravdaReport, kind: rss, url: 'https://www.pravdareport.com/export.xml', category: news-russia}
+- {id: techcentral, name: TechCentral, kind: rss, url: 'https://techcentral.co.za/feed', category: news-south-africa}
+- {id: daily-maverick, name: Daily Maverick, kind: rss, url: 'https://www.dailymaverick.co.za/dmrss/', category: news-south-africa}
+- {id: moneyweb, name: Moneyweb, kind: rss, url: 'https://www.moneyweb.co.za/feed/', category: news-south-africa}
+- {id: iol-section-feed-for-news, name: IOL section feed for News, kind: rss, url: 'https://rss.iol.io/iol/news', category: news-south-africa}
+- {id: the-south-african, name: The South African, kind: rss, url: 'https://www.thesouthafrican.com/feed/', category: news-south-africa}
+- {id: axios, name: Axios, kind: rss, url: 'https://api.axios.com/feed/', category: news-south-africa}
+- {id: the-local-2, name: The Local, kind: rss, url: 'https://feeds.thelocal.com/rss/es', category: news-spain}
+- {id: el-pa-s-el-peri-dico-global, name: 'EL PAÍS: el periódico global', kind: rss, url: 'https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada', category: news-spain}
+- {id: espa-a, name: España, kind: rss, url: 'https://rss.elconfidencial.com/espana/', category: news-spain}
+- {id: eldiario-es-eldiario-es, name: ElDiario.es - ElDiario.es, kind: rss, url: 'https://www.eldiario.es/rss/', category: news-spain}
+- {id: portada-expansion, name: Portada // expansion, kind: rss, url: 'https://e00-expansion.uecdn.es/rss/portada.xml', category: news-spain}
+- {id: huffingtonpost-es, name: huffingtonpost.es, kind: rss, url: 'https://www.huffingtonpost.es/feeds/index.xml', category: news-spain}
+- {id: euro-weekly-news-spain, name: Euro Weekly News Spain, kind: rss, url: 'https://www.euroweeklynews.com/feed/', category: news-spain}
+- {id: news-agency-unian, name: News Agency UNIAN, kind: rss, url: 'https://rss.unian.net/site/news_eng.rss', category: news-ukraine}
+- {id: tsn-ua, name: Новини на tsn.ua, kind: rss, url: 'https://tsn.ua/rss/full.rss', category: news-ukraine}
+- {id: feed-15, name: Українська правда, kind: rss, url: 'https://www.pravda.com.ua/rss/', category: news-ukraine}
+- {id: feed-16, name: Гордон - Самые популярные материалы, kind: rss, url: 'https://gordonua.com/xml/rss_category/top.html', category: news-ukraine}
+- {id: feed-17, name: НВ, kind: rss, url: 'https://nv.ua/rss/all.xml', category: news-ukraine}
+- {id: feed-18, name: Информационное агентство УНИАН, kind: rss, url: 'https://rss.unian.net/site/news_rus.rss', category: news-ukraine}
+- {id: feed-19, name: Еспресо - український погляд на світ!, kind: rss, url: 'https://espreso.tv/rss', category: news-ukraine}
+- {id: the-independent, name: The Independent, kind: rss, url: 'https://www.independent.co.uk/news/uk/rss', category: news-united-kingdom}
+- {id: world-news-breaking-news-top-stories, name: 'World News - Breaking News, Top Stories', kind: rss, url: 'https://www.huffpost.com/section/world-news/feed',
+  category: news-united-states}
+- {id: fox-news, name: FOX News, kind: rss, url: 'https://feeds.foxnews.com/foxnews/latest', category: news-united-states}
+- {id: world, name: World, kind: rss, url: 'https://feeds.washingtonpost.com/rss/world', category: news-united-states}
+- {id: wsj-com-world-news, name: 'WSJ.com: World News', kind: rss, url: 'https://feeds.a.dj.com/rss/RSSWorldNews.xml', category: news-united-states}
+- {id: world-nation, name: World & Nation, kind: rss, url: 'https://www.latimes.com/world-nation/rss2.0.xml', category: news-united-states}
+- {id: playbook, name: Playbook, kind: rss, url: 'https://rss.politico.com/playbook.xml', category: news-united-states}
+- {id: https-www-cyanogenmods-org-feed, name: 'https://www.cyanogenmods.org/feed', kind: rss, url: 'https://www.cyanogenmods.org/feed', category: android}
+- {id: all-about-android-audio, name: All About Android (Audio), kind: rss, url: 'https://feeds.twit.tv/aaa.xml', category: android}
+- {id: android, name: Android, kind: rss, url: 'https://blog.google/products/android/rss', category: android}
+- {id: android-authority, name: Android Authority, kind: rss, url: 'https://www.androidauthority.com/feed', category: android}
+- {id: android-authority-2, name: Android Authority, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=AndroidAuthority', category: android}
+- {id: android-authority-podcast, name: Android Authority Podcast, kind: rss, url: 'https://androidauthority.libsyn.com/rss', category: android}
+- {id: android-central-podcast, name: Android Central Podcast, kind: rss, url: 'https://feeds.feedburner.com/AndroidCentralPodcast', category: android}
+- {id: blind-android-users-podcast, name: Blind Android Users Podcast, kind: rss, url: 'https://anchor.fm/s/4495abac/podcast/rss', category: android}
+- {id: cult-of-android, name: Cult of Android, kind: rss, url: 'https://www.cultofandroid.com/feed', category: android}
+- {id: droid-life-opinionated-android-news, name: Droid Life – Opinionated Android news., kind: rss, url: 'https://www.droid-life.com/feed', category: android}
+- {id: gsmarena-com-latest-articles, name: GSMArena.com - Latest articles, kind: rss, url: 'https://www.gsmarena.com/rss-news-reviews.php3', category: android}
+- {id: phandroid, name: Phandroid, kind: rss, url: 'https://feeds2.feedburner.com/AndroidPhoneFans', category: android}
+- {id: talkandroid, name: TalkAndroid, kind: rss, url: 'https://feeds.feedburner.com/AndroidNewsGoogleAndroidForums', category: android}
+- {id: android-developers, name: Android Developers, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=androiddevelopers', category: android-development}
+- {id: android-developers-medium, name: Android Developers - Medium, kind: rss, url: 'https://medium.com/feed/androiddevelopers', category: android-development}
+- {id: android-developers-backstage, name: Android Developers Backstage, kind: rss, url: 'https://feeds.feedburner.com/blogspot/androiddevelopersbackstage', category: android-development}
+- {id: android-developers-blog, name: Android Developers Blog, kind: rss, url: 'https://feeds.feedburner.com/blogspot/hsDu', category: android-development}
+- {id: android-in-mindorks-on-medium, name: Android in MindOrks on Medium, kind: rss, url: 'https://medium.com/feed/mindorks/tagged/android', category: android-development}
+- {id: android-in-the-airbnb-tech-blog-on-medium, name: Android in The Airbnb Tech Blog on Medium, kind: rss, url: 'https://medium.com/feed/airbnb-engineering/tagged/android',
+  category: android-development}
+- {id: chris-keenan-codes, name: Chris Keenan Codes, kind: rss, url: 'https://chrynan.codes/rss/', category: android-development}
+- {id: company-the-jetbrains-blog, name: Company | The JetBrains Blog, kind: rss, url: 'https://blog.jetbrains.com/blog/feed', category: android-development}
+- {id: dan-lew-codes, name: Dan Lew Codes, kind: rss, url: 'https://blog.danlew.net/rss/', category: android-development}
+- {id: fragmented-ai-developer-podcast, name: Fragmented - AI Developer Podcast, kind: rss, url: 'https://feeds.simplecast.com/LpAGSLnY', category: android-development}
+- {id: handstand-sam, name: Handstand Sam, kind: rss, url: 'https://handstandsam.com/feed/', category: android-development}
+- {id: jake-wharton, name: Jake Wharton, kind: rss, url: 'https://jakewharton.com/atom.xml', category: android-development}
+- {id: kotlin, name: Kotlin, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?playlist_id=PLQ176FUIyIUa6SChjajjVc-LMzxWiz6dy', category: android-development}
+- {id: okkotlin, name: OkKotlin, kind: rss, url: 'https://okkotlin.com/rss.xml', category: android-development}
+- {id: proandroiddev-medium, name: ProAndroidDev - Medium, kind: rss, url: 'https://proandroiddev.com/feed', category: android-development}
+- {id: public-object, name: Public Object, kind: rss, url: 'https://publicobject.com/rss/', category: android-development}
+- {id: saket-narayan, name: Saket Narayan, kind: rss, url: 'https://saket.me/feed/', category: android-development}
+- {id: zac-sweers, name: Zac Sweers, kind: rss, url: 'https://www.zacsweers.dev/rss/', category: android-development}
+- {id: zarah-dominguez, name: Zarah Dominguez, kind: rss, url: 'https://zarah.dev/feed.xml', category: android-development}
+- {id: droidcon-sf, name: droidcon SF, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCKubKoe1CBw_-n_GXetEQbg', category: android-development}
+- {id: zsmb-co, name: zsmb.co, kind: rss, url: 'https://zsmb.co/index.xml', category: android-development}
+- {id: active-wild, name: Active Wild, kind: rss, url: 'https://www.activewild.com/feed/', category: animal-wildlife}
+- {id: love-nature, name: Love Nature, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCRZPkuHwaoKwTP3CYPdVldg', category: animal-wildlife}
+- {id: real-wild, name: Real Wild, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCbq-4OJxnziD3awH-aTezeA', category: animal-wildlife}
+- {id: wildlife-the-guardian, name: Wildlife | The Guardian, kind: rss, url: 'https://www.theguardian.com/environment/wildlife/rss', category: animal-wildlife}
+- {id: 9to5mac, name: 9to5Mac, kind: rss, url: 'https://9to5mac.com/feed', category: apple}
+- {id: apple, name: Apple, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=Apple', category: apple}
+- {id: apple-newsroom, name: Apple Newsroom, kind: rss, url: 'https://www.apple.com/newsroom/rss-feed.rss', category: apple}
+- {id: appleinsider-news, name: AppleInsider News, kind: rss, url: 'https://appleinsider.com/rss/news/', category: apple}
+- {id: cult-of-mac, name: Cult of Mac, kind: rss, url: 'https://www.cultofmac.com/feed', category: apple}
+- {id: daring-fireball, name: Daring Fireball, kind: rss, url: 'https://daringfireball.net/feeds/main', category: apple}
+- {id: macrumors, name: MacRumors, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=macrumors', category: apple}
+- {id: macrumors-mac-news-and-rumors-mac-blog, name: 'MacRumors: Mac News and Rumors - Mac Blog', kind: rss, url: 'https://feeds.macrumors.com/MacRumors-Mac', category: apple}
+- {id: macstories, name: MacStories, kind: rss, url: 'https://www.macstories.net/feed', category: apple}
+- {id: macworld, name: Macworld, kind: rss, url: 'https://www.macworld.com/index.rss', category: apple}
+- {id: marco-org, name: Marco.org, kind: rss, url: 'https://marco.org/rss', category: apple}
+- {id: os-x-daily, name: OS X Daily, kind: rss, url: 'https://feeds.feedburner.com/osxdaily', category: apple}
+- {id: the-loop, name: The Loop, kind: rss, url: 'https://www.loopinsight.com/feed', category: apple}
+- {id: imore-the-1-iphone-ipad-and-ipod-touch-blog, name: 'iMore - The #1 iPhone, iPad, and iPod touch blog', kind: rss, url: 'https://feeds.feedburner.com/TheiPhoneBlog',
+  category: apple}
+- {id: a-weekly-dose-of-architecture-books, name: A Weekly Dose of Architecture Books, kind: rss, url: 'https://feeds.feedburner.com/archidose', category: architecture}
+- {id: archdaily-global, name: ArchDaily Global, kind: rss, url: 'https://feeds.feedburner.com/Archdaily', category: architecture}
+- {id: architectural-digest, name: Architectural Digest, kind: rss, url: 'https://www.architecturaldigest.com/feed/rss', category: architecture}
+- {id: architectural-digest-2, name: Architectural Digest, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=ArchitecturalDigest', category: architecture}
+- {id: architecture-news-and-projects-dezeen, name: Architecture news and projects | Dezeen, kind: rss, url: 'https://www.dezeen.com/architecture/feed/', category: architecture}
+- {id: design-milkarchitecture-architectural-designs-and-house-, name: 'Design MilkArchitecture, Architectural Designs, and House Designs | Design Milk', kind: rss,
+  url: 'https://design-milk.com/category/architecture/feed/', category: architecture}
+- {id: living-big-in-a-tiny-house, name: Living Big In A Tiny House, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=livingbigtinyhouse', category: architecture}
+- {id: the-architect-s-newspaper, name: The Architect’s Newspaper, kind: rss, url: 'https://archpaper.com/feed', category: architecture}
+- {id: architecture-archives-designboom-architecture-design-mag, name: architecture archives | designboom | architecture & design magazine, kind: rss, url: 'https://www.designboom.com/architecture/feed/',
+  category: architecture}
+- {id: beauty-elle, name: Beauty - ELLE, kind: rss, url: 'https://www.elle.com/rss/beauty.xml/', category: beauty}
+- {id: fashionista-full, name: Fashionista Full, kind: rss, url: 'https://fashionista.com/.rss/excerpt/beauty', category: beauty}
+- {id: from-head-to-toe, name: From Head To Toe, kind: rss, url: 'https://feeds.feedburner.com/frmheadtotoe', category: beauty}
+- {id: into-the-gloss-beauty-tips-trends-and-product-reviews, name: 'Into The Gloss - Beauty Tips, Trends, And Product Reviews', kind: rss, url: 'https://feeds.feedburner.com/intothegloss/oqoU',
+  category: beauty}
+- {id: popsugar-beauty, name: POPSUGAR Beauty, kind: rss, url: 'https://www.popsugar.com/beauty/feed', category: beauty}
+- {id: refinery29, name: Refinery29, kind: rss, url: 'https://www.refinery29.com/beauty/rss.xml', category: beauty}
+- {id: the-beauty-look-book, name: The Beauty Look Book, kind: rss, url: 'https://thebeautylookbook.com/feed', category: beauty}
+- {id: a-year-of-reading-the-world, name: A year of reading the world, kind: rss, url: 'https://ayearofreadingtheworld.com/feed/', category: books}
+- {id: aestas-book-blog, name: Aestas Book Blog, kind: rss, url: 'https://aestasbookblog.com/feed/', category: books}
+- {id: book-riot, name: BOOK RIOT, kind: rss, url: 'https://bookriot.com/feed/', category: books}
+- {id: harry-potter-and-the-sacred-text, name: Harry Potter and the Sacred Text, kind: rss, url: 'https://rss.acast.com/harrypottersacredtext', category: books}
+- {id: kirkus-reviews, name: Kirkus Reviews, kind: rss, url: 'https://www.kirkusreviews.com/feeds/rss/', category: books}
+- {id: newinbooks, name: NewInBooks, kind: rss, url: 'https://www.newinbooks.com/feed/', category: books}
+- {id: wokeread, name: Wokeread, kind: rss, url: 'https://wokeread.home.blog/feed/', category: books}
+- {id: all-news, name: All News, kind: rss, url: 'https://www.investing.com/rss/news.rss', category: business-economy}
+- {id: bloomberg-originals, name: Bloomberg Originals, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=Bloomberg', category: business-economy}
+- {id: breaking-news-on-seeking-alpha, name: Breaking News on Seeking Alpha, kind: rss, url: 'https://seekingalpha.com/market_currents.xml', category: business-economy}
+- {id: business-insider, name: Business Insider, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=businessinsider', category: business-economy}
+- {id: econtalk, name: EconTalk, kind: rss, url: 'https://feeds.simplecast.com/wgl4xEgL', category: business-economy}
+- {id: forbes-business, name: Forbes - Business, kind: rss, url: 'https://www.forbes.com/business/feed/', category: business-economy}
+- {id: fortune-fortune, name: Fortune | FORTUNE, kind: rss, url: 'https://fortune.com/feed', category: business-economy}
+- {id: how-i-built-this-with-guy-raz, name: How I Built This with Guy Raz, kind: rss, url: 'https://feeds.npr.org/510313/podcast.xml', category: business-economy}
+- {id: planet-money, name: Planet Money, kind: rss, url: 'https://feeds.npr.org/510289/podcast.xml', category: business-economy}
+- {id: startup-stories-mixergy, name: Startup Stories - Mixergy, kind: rss, url: 'https://feeds.feedburner.com/Mixergy-main-podcast', category: business-economy}
+- {id: the-blog-of-author-tim-ferriss, name: The Blog of Author Tim Ferriss, kind: rss, url: 'https://tim.blog/feed/', category: business-economy}
+- {id: the-duct-tape-marketing-podcast, name: The Duct Tape Marketing Podcast, kind: rss, url: 'https://ducttape.libsyn.com/rss', category: business-economy}
+- {id: bmwblog, name: BMWBLOG, kind: rss, url: 'https://feeds.feedburner.com/BmwBlog', category: cars}
+- {id: bikeexif, name: BikeEXIF, kind: rss, url: 'https://www.bikeexif.com/feed', category: cars}
+- {id: car-body-design, name: Car Body Design, kind: rss, url: 'https://www.carbodydesign.com/feed/', category: cars}
+- {id: carscoops, name: Carscoops, kind: rss, url: 'https://www.carscoops.com/feed/', category: cars}
+- {id: jalopnik-obsessed-with-the-culture-of-cars, name: Jalopnik - Obsessed with the culture of cars, kind: rss, url: 'https://jalopnik.com/rss', category: cars}
+- {id: latest-content-car-and-driver, name: Latest Content - Car and Driver, kind: rss, url: 'https://www.caranddriver.com/rss/all.xml/', category: cars}
+- {id: speedhunters, name: Speedhunters, kind: rss, url: 'https://feeds.feedburner.com/speedhunters', category: cars}
+- {id: the-best-vintage-and-classic-cars-for-sale-online-bring-, name: The best vintage and classic cars for sale online | Bring a Trailer, kind: rss, url: 'https://bringatrailer.com/feed/',
+  category: cars}
+- {id: better-chess, name: Better Chess, kind: rss, url: 'https://betterchess.net/feed/', category: chess}
+- {id: chess-news, name: Chess News, kind: rss, url: 'https://en.chessbase.com/feed', category: chess}
+- {id: chess-talk, name: Chess Talk, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UC6HDXr-sNPnWLF_Q-y3KduA', category: chess}
+- {id: chess-the-guardian, name: Chess | The Guardian, kind: rss, url: 'https://www.theguardian.com/sport/chess/rss', category: chess}
+- {id: chess-com, name: Chess.com, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=wwwChesscom', category: chess}
+- {id: chess-com-news, name: Chess.com News, kind: rss, url: 'https://www.chess.com/rss/news', category: chess}
+- {id: chessbase-india, name: ChessBase India, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCIsEhwBMPkRHsEgqYAPQHsA', category: chess}
+- {id: chessable-blog, name: Chessable Blog, kind: rss, url: 'https://www.chessable.com/blog/feed/', category: chess}
+- {id: lichess-s-blog, name: Lichess's Blog, kind: rss, url: 'https://lichess.org/blog.atom', category: chess}
+- {id: perpetual-chess-podcast, name: Perpetual Chess Podcast, kind: rss, url: 'https://feeds.megaphone.fm/BLU4811105299', category: chess}
+- {id: the-week-in-chess, name: The Week in Chess, kind: rss, url: 'https://theweekinchess.com/twic-rss-feed', category: chess}
+- {id: agadmator-s-chess-channel, name: agadmator's Chess Channel, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCL5YbN5WLFD8dLIegT5QAbA',
+  category: chess}
+- {id: chess24, name: chess24, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=chess24media', category: chess}
+- {id: thechesswebsite, name: thechesswebsite, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=thechesswebsite', category: chess}
+- {id: bbc-sport, name: BBC Sport, kind: rss, url: 'https://feeds.bbci.co.uk/sport/cricket/rss.xml', category: cricket}
+- {id: can-t-bowl-can-t-throw-cricket-show, name: Can't Bowl Can't Throw Cricket Show, kind: rss, url: 'https://feeds.feedburner.com/cantbowlcantthrow', category: cricket}
+- {id: cricbuzz, name: Cricbuzz, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCSRQXk5yErn4e14vN76upOw', category: cricket}
+- {id: cricket-news-today-latest-cricket-updates-cricket-live-s, name: 'Cricket News Today, Latest Cricket Updates, Cricket Live Score, Upcoming Matches | Times of
+    India', kind: rss, url: 'https://timesofindia.indiatimes.com/rssfeeds/54829575.cms', category: cricket}
+- {id: cricket-news-stories-features-interviews-opinion-reports, name: 'Cricket News: Stories, Features, Interviews, Opinion, Reports | Wisden', kind: rss, url: 'https://www.wisden.com/feed',
+  category: cricket}
+- {id: cricket-news-from-espn-cricinfo-com, name: Cricket news from ESPN Cricinfo.com, kind: rss, url: 'https://www.espncricinfo.com/rss/content/story/feeds/0.xml',
+  category: cricket}
+- {id: cricket-the-guardian, name: Cricket | The Guardian, kind: rss, url: 'https://www.theguardian.com/sport/cricket/rss', category: cricket}
+- {id: cricket-the-indian-express, name: Cricket | The Indian Express, kind: rss, url: 'https://indianexpress.com/section/sports/cricket/feed/', category: cricket}
+- {id: england-wales-cricket-board, name: England & Wales Cricket Board, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=ecbcricket', category: cricket}
+- {id: ndtv-news-search-records-found-1000, name: NDTV News Search Records Found 1000, kind: rss, url: 'https://feeds.feedburner.com/ndtvsports-cricket', category: cricket}
+- {id: pakistan-cricket, name: Pakistan Cricket, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCiWrjBhlICf_L_RK5y6Vrxw', category: cricket}
+- {id: sri-lanka-cricket, name: Sri Lanka Cricket, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=TheOfficialSLC', category: cricket}
+- {id: stumped, name: Stumped, kind: rss, url: 'https://podcasts.files.bbci.co.uk/p02gsrmh.rss', category: cricket}
+- {id: switch-hit-podcast, name: Switch Hit Podcast, kind: rss, url: 'https://feeds.megaphone.fm/ESP9247246951', category: cricket}
+- {id: tailenders, name: Tailenders, kind: rss, url: 'https://podcasts.files.bbci.co.uk/p02pcb4w.rss', category: cricket}
+- {id: test-match-special, name: Test Match Special, kind: rss, url: 'https://podcasts.files.bbci.co.uk/p02nrsl2.rss', category: cricket}
+- {id: cricket-com-au, name: cricket.com.au, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=cricketaustraliatv', category: cricket}
+- {id: bitcoin-crypto-trading-ledger-cast, name: 'Bitcoin & Crypto Trading: Ledger Cast', kind: rss, url: 'https://feeds.simplecast.com/j5Cx9jps', category: cryptocurrency}
+- {id: bitcoin-audible, name: Bitcoin Audible, kind: rss, url: 'https://bitcoinaudible.com/feed/', category: cryptocurrency}
+- {id: bitcoin-news, name: Bitcoin News, kind: rss, url: 'https://news.bitcoin.com/feed/', category: cryptocurrency}
+- {id: buyucoin-talks-medium, name: BuyUcoin Talks - Medium, kind: rss, url: 'https://medium.com/feed/buyucoin-talks', category: cryptocurrency}
+- {id: cointelegraph-com-news, name: Cointelegraph.com News, kind: rss, url: 'https://cointelegraph.com/rss', category: cryptocurrency}
+- {id: cryptocurrency-finance-magnates-financial-and-business-n, name: CryptoCurrency – Finance Magnates | Financial and business news, kind: rss, url: 'https://www.financemagnates.com/cryptocurrency/feed/',
+  category: cryptocurrency}
+- {id: cryptoninjas, name: CryptoNinjas, kind: rss, url: 'https://www.cryptoninjas.net/feed/', category: cryptocurrency}
+- {id: cryptopotato, name: CryptoPotato, kind: rss, url: 'https://cryptopotato.com/feed/', category: cryptocurrency}
+- {id: dailycoin, name: DailyCoin, kind: rss, url: 'https://dailycoin.com/feed/', category: cryptocurrency}
+- {id: epicenter-learn-about-crypto-blockchain-ethereum-bitcoin, name: 'Epicenter - Learn about Crypto, Blockchain, Ethereum, Bitcoin and Distributed Technologies',
+  kind: rss, url: 'https://feeds.simplecast.com/lKmQDG9R', category: cryptocurrency}
+- {id: ethereum-foundation-blog, name: Ethereum Foundation Blog, kind: rss, url: 'https://blog.ethereum.org/feed.xml', category: cryptocurrency}
+- {id: incrypted, name: INCRYPTED, kind: rss, url: 'https://incrypted.net/feed/', category: cryptocurrency}
+- {id: interviews, name: Interviews, kind: rss, url: 'https://feed.podbean.com/nuggetsnews/feed.xml', category: cryptocurrency}
+- {id: kraken-blog, name: Kraken Blog, kind: rss, url: 'https://blog.kraken.com/feed/', category: cryptocurrency}
+- {id: news-cryptonews, name: News - Cryptonews, kind: rss, url: 'https://cryptonews.com/news/feed', category: cryptocurrency}
+- {id: newsbtc, name: NewsBTC, kind: rss, url: 'https://www.newsbtc.com/feed/', category: cryptocurrency}
+- {id: stephan-livera-podcast, name: Stephan Livera Podcast, kind: rss, url: 'https://anchor.fm/s/7d083a4/podcast/rss', category: cryptocurrency}
+- {id: the-bad-crypto-podcast, name: The Bad Crypto Podcast, kind: rss, url: 'https://badcryptopodcast.com/feed/', category: cryptocurrency}
+- {id: the-bitcoin-knowledge-podcast, name: The Bitcoin Knowledge Podcast, kind: rss, url: 'https://www.bitcoin.kn/feed/podcast/', category: cryptocurrency}
+- {id: the-bitcoin-podcast, name: The Bitcoin Podcast, kind: rss, url: 'https://feeds.simplecast.com/xCQr3ykc', category: cryptocurrency}
+- {id: the-market-s-compass-technical-view, name: The Market's Compass Technical View, kind: rss, url: 'https://themarketscompass.substack.com/feed', category: cryptocurrency}
+- {id: today-in-web-3, name: Today in Web 3, kind: rss, url: 'https://feeds.soundcloud.com/users/soundcloud:users:844321453/sounds.rss', category: cryptocurrency}
+- {id: cryptocurrency-techcrunch, name: cryptocurrency | TechCrunch, kind: rss, url: 'https://techcrunch.com/tag/cryptocurrency/feed', category: cryptocurrency}
+- {id: darknet-diaries, name: Darknet Diaries, kind: rss, url: 'https://feeds.megaphone.fm/darknetdiaries', category: cyber-security}
+- {id: hacking-humans, name: Hacking Humans, kind: rss, url: 'https://feeds.megaphone.fm/hacking-humans', category: cyber-security}
+- {id: isf-podcast, name: ISF Podcast, kind: rss, url: 'https://audioboom.com/channels/4991893.rss', category: cyber-security}
+- {id: latest-news, name: Latest news, kind: rss, url: 'https://www.zdnet.com/topic/security/rss.xml', category: cyber-security}
+- {id: malicious-life, name: Malicious Life, kind: rss, url: 'https://malicious.life/feed/podcast/', category: cyber-security}
+- {id: risky-business, name: Risky Business, kind: rss, url: 'https://risky.biz/feeds/risky-business', category: cyber-security}
+- {id: schneier-on-security, name: Schneier on Security, kind: rss, url: 'https://www.schneier.com/blog/index.rdf', category: cyber-security}
+- {id: security-affairs, name: Security Affairs, kind: rss, url: 'https://securityaffairs.co/wordpress/feed', category: cyber-security}
+- {id: the-hacker-news, name: The Hacker News, kind: rss, url: 'https://thehackernews.com/feeds/posts/default', category: cyber-security}
+- {id: threatpost, name: Threatpost, kind: rss, url: 'https://threatpost.com/feed', category: cyber-security}
+- {id: cybersecurity-techcrunch, name: cybersecurity | TechCrunch, kind: rss, url: 'https://techcrunch.com/tag/cybersecurity/feed/', category: cyber-security}
+- {id: www-theregister-com-articles, name: www.theregister.com - Articles, kind: rss, url: 'https://www.theregister.co.uk/security/headlines.atom', category: cyber-security}
+- {id: a-beautiful-mess, name: A Beautiful Mess, kind: rss, url: 'https://abeautifulmess.com/feed', category: diy}
+- {id: centsational-style, name: Centsational Style, kind: rss, url: 'https://centsationalstyle.com/feed/', category: diy}
+- {id: how-to-geek, name: How-To Geek, kind: rss, url: 'https://www.howtogeek.com/feed/', category: diy}
+- {id: ikea-hackers, name: IKEA Hackers, kind: rss, url: 'https://www.ikeahackers.net/feed', category: diy}
+- {id: makeuseof, name: MakeUseOf, kind: rss, url: 'https://www.makeuseof.com/feed/', category: diy}
+- {id: oh-happy-day, name: Oh Happy Day!, kind: rss, url: 'https://ohhappyday.com/feed/', category: diy}
+- {id: wonderhowto, name: WonderHowTo, kind: rss, url: 'https://www.wonderhowto.com/rss.xml', category: diy}
+- {id: human-nature-blog-feed, name: '"Human Nature" Blog Feed', kind: rss, url: 'https://feeds.feedburner.com/ConservationInternationalBlog', category: environment}
+- {id: bionic-planet-reversing-climate-change-by-restoring-natu, name: 'Bionic Planet: Reversing Climate Change by Restoring Nature', kind: rss, url: 'https://bionicplanet.libsyn.com/rss',
+  category: environment}
+- {id: conservation-international, name: Conservation International, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCam5sCp6mzGBcn8ZBB2RBJg',
+  category: environment}
+- {id: environment-energy-the-conversation, name: Environment + Energy – The Conversation, kind: rss, url: 'https://theconversation.com/au/environment/articles.atom',
+  category: environment}
+- {id: environment-news-earth-news-global-warming-wild-life-car, name: 'Environment News, Earth News, Global Warming, Wild Life, Carbon Trading, Climate Business,
+    Climate Change & Pollution News', kind: rss, url: 'https://timesofindia.indiatimes.com/rssfeeds/2647163.cms', category: environment}
+- {id: environment-the-guardian, name: Environment | The Guardian, kind: rss, url: 'https://www.theguardian.com/us/environment/rss', category: environment}
+- {id: good-good-good, name: Good Good Good, kind: rss, url: 'https://www.goodgoodgood.co/articles/rss.xml', category: environment}
+- {id: npr-topics-environment, name: 'NPR Topics: Environment', kind: rss, url: 'https://feeds.npr.org/1025/rss.xml', category: environment}
+- {id: nyt-climate-and-environment, name: NYT > Climate and Environment, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/Climate.xml', category: environment}
+- {id: prakati-india, name: Prakati India, kind: rss, url: 'https://www.prakati.in/feed/', category: environment}
+- {id: https-www-fashionbeans-com-rss-feed-category-fashion, name: 'https://www.fashionbeans.com/rss-feed/?category=fashion', kind: rss, url: 'https://www.fashionbeans.com/rss-feed/?category=fashion',
+  category: fashion}
+- {id: fashion-elle, name: Fashion - ELLE, kind: rss, url: 'https://www.elle.com/rss/fashion.xml/', category: fashion}
+- {id: fashion-the-guardian, name: Fashion | The Guardian, kind: rss, url: 'https://www.theguardian.com/fashion/rss', category: fashion}
+- {id: fashionista-full-2, name: Fashionista Full, kind: rss, url: 'https://fashionista.com/.rss/excerpt/', category: fashion}
+- {id: nyt-style, name: NYT > Style, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/FashionandStyle.xml', category: fashion}
+- {id: popsugar-fashion, name: POPSUGAR Fashion, kind: rss, url: 'https://www.popsugar.com/fashion/feed', category: fashion}
+- {id: refinery29-2, name: Refinery29, kind: rss, url: 'https://www.refinery29.com/fashion/rss.xml', category: fashion}
+- {id: binging-with-babish, name: Binging with Babish, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=bgfilms', category: food}
+- {id: bon-app-tit, name: Bon Appétit, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=BonAppetitDotCom', category: food}
+- {id: chocolate-zucchini, name: Chocolate & Zucchini, kind: rss, url: 'https://cnz.to/feed/', category: food}
+- {id: david-lebovitz, name: David Lebovitz, kind: rss, url: 'https://www.davidlebovitz.com/feed/', category: food}
+- {id: dinner-a-love-story, name: 'Dinner: A Love Story', kind: rss, url: 'https://www.dinneralovestory.com/feed/', category: food}
+- {id: food52, name: Food52, kind: rss, url: 'https://feeds.feedburner.com/food52-TheAandMBlog', category: food}
+- {id: green-kitchen-stories, name: Green Kitchen Stories, kind: rss, url: 'https://greenkitchenstories.com/feed/', category: food}
+- {id: how-sweet-eats, name: How Sweet Eats, kind: rss, url: 'https://www.howsweeteats.com/feed/', category: food}
+- {id: kitchn-inspiring-cooks-nourishing-homes, name: 'Kitchn | Inspiring cooks, nourishing homes', kind: rss, url: 'https://www.thekitchn.com/main.rss', category: food}
+- {id: laura-in-the-kitchen, name: Laura in the Kitchen, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=LauraVitalesKitchen', category: food}
+- {id: love-and-lemons, name: Love and Lemons, kind: rss, url: 'https://www.loveandlemons.com/feed/', category: food}
+- {id: love-and-olive-oil, name: Love and Olive Oil, kind: rss, url: 'https://www.loveandoliveoil.com/feed', category: food}
+- {id: nyt-food, name: NYT > Food, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/DiningandWine.xml', category: food}
+- {id: serious-eats, name: Serious Eats, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=SeriousEats', category: food}
+- {id: serious-eats-recipes, name: 'Serious Eats: Recipes', kind: rss, url: 'https://feeds.feedburner.com/seriouseats/recipes', category: food}
+- {id: shutterbean, name: Shutterbean, kind: rss, url: 'https://www.shutterbean.com/feed/', category: food}
+- {id: sprouted-kitchen, name: Sprouted Kitchen, kind: rss, url: 'https://www.sproutedkitchen.com/home?format=rss', category: food}
+- {id: smitten-kitchen, name: smitten kitchen, kind: rss, url: 'https://feeds.feedburner.com/smittenkitchen', category: food}
+- {id: bbc-sport-2, name: BBC Sport, kind: rss, url: 'https://feeds.bbci.co.uk/sport/football/rss.xml', category: football}
+- {id: football-news-football-scores-premier-league-la-liga-isl, name: 'Football News, Football Scores, Premier League, La Liga, ISL | The Hindu', kind: rss, url: 'https://www.thehindu.com/sport/football/feeder/default.rss',
+  category: football}
+- {id: football-the-guardian, name: Football | The Guardian, kind: rss, url: 'https://www.theguardian.com/football/rss', category: football}
+- {id: nyt-sports-soccer, name: NYT > Sports > Soccer, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/Soccer.xml', category: football}
+- {id: soccer-news, name: Soccer News, kind: rss, url: 'https://www.soccernews.com/feed', category: football}
+- {id: cracked-all-posts, name: 'Cracked: All Posts', kind: rss, url: 'https://feeds.feedburner.com/CrackedRSS', category: funny}
+- {id: explosm-net, name: Explosm.net, kind: rss, url: 'https://feeds.feedburner.com/Explosm', category: funny}
+- {id: fail-blog, name: FAIL Blog, kind: rss, url: 'https://feeds.feedburner.com/failblog', category: funny}
+- {id: i-can-has-cheezburger, name: 'I Can Has Cheezburger?', kind: rss, url: 'https://feeds.feedburner.com/icanhascheezburger', category: funny}
+- {id: phd-comics, name: PHD Comics, kind: rss, url: 'https://phdcomics.com/gradfeed.php', category: funny}
+- {id: penny-arcade, name: Penny Arcade, kind: rss, url: 'https://www.penny-arcade.com/feed', category: funny}
+- {id: postsecret, name: PostSecret, kind: rss, url: 'https://postsecret.com/feed/?alt=rss', category: funny}
+- {id: saturday-morning-breakfast-cereal, name: Saturday Morning Breakfast Cereal, kind: rss, url: 'https://www.smbc-comics.com/comic/rss', category: funny}
+- {id: the-bloggess, name: The Bloggess, kind: rss, url: 'https://thebloggess.com/feed/', category: funny}
+- {id: the-oatmeal-comics-by-matthew-inman, name: The Oatmeal - Comics by Matthew Inman, kind: rss, url: 'https://feeds.feedburner.com/oatmealfeed', category: funny}
+- {id: the-onion, name: The Onion, kind: rss, url: 'https://www.theonion.com/rss', category: funny}
+- {id: xkcd-com, name: xkcd.com, kind: rss, url: 'https://xkcd.com/rss.xml', category: funny}
+- {id: eurogamer-net-latest-articles-feed, name: Eurogamer.net Latest Articles Feed, kind: rss, url: 'https://www.eurogamer.net/?format=rss', category: gaming}
+- {id: gamespot-all-content, name: GameSpot - All Content, kind: rss, url: 'https://www.gamespot.com/feeds/mashup/', category: gaming}
+- {id: ign-articles, name: IGN Articles, kind: rss, url: 'https://feeds.ign.com/ign/all', category: gaming}
+- {id: indie-games-plus, name: Indie Games Plus, kind: rss, url: 'https://indiegamesplus.com/feed', category: gaming}
+- {id: kotaku, name: Kotaku, kind: rss, url: 'https://kotaku.com/rss', category: gaming}
+- {id: makeup-and-beauty-blog-makeup-reviews-swatches-and-how-t, name: 'Makeup and Beauty Blog | Makeup Reviews, Swatches and How-To Makeup', kind: rss, url: 'https://www.makeupandbeautyblog.com/feed/',
+  category: gaming}
+- {id: playstation-blog, name: PlayStation.Blog, kind: rss, url: 'https://feeds.feedburner.com/psblog', category: gaming}
+- {id: polygon-com, name: Polygon.com, kind: rss, url: 'https://www.polygon.com/rss/index.xml', category: gaming}
+- {id: rock-paper-shotgun, name: 'Rock, Paper, Shotgun', kind: rss, url: 'https://feeds.feedburner.com/RockPaperShotgun', category: gaming}
+- {id: steam-rss-news-feed, name: Steam RSS News Feed, kind: rss, url: 'https://store.steampowered.com/feeds/news.xml', category: gaming}
+- {id: the-ancient-gaming-noob, name: The Ancient Gaming Noob, kind: rss, url: 'https://feeds.feedburner.com/TheAncientGamingNoob', category: gaming}
+- {id: the-escapist, name: The Escapist, kind: rss, url: 'https://www.escapistmagazine.com/v2/feed/', category: gaming}
+- {id: 30-for-30-podcasts, name: 30 for 30 Podcasts, kind: rss, url: 'https://feeds.megaphone.fm/ESP5765452710', category: history}
+- {id: dan-carlin-s-hardcore-history, name: Dan Carlin's Hardcore History, kind: rss, url: 'https://feeds.feedburner.com/dancarlin/history?format=xml', category: history}
+- {id: history-in-28-minutes, name: History in 28-minutes, kind: rss, url: 'https://www.historyisnowmagazine.com/blog?format=RSS', category: history}
+- {id: historynet, name: HistoryNet, kind: rss, url: 'https://www.historynet.com/feed', category: history}
+- {id: throughline, name: Throughline, kind: rss, url: 'https://feeds.npr.org/510333/podcast.xml', category: history}
+- {id: you-must-remember-this, name: You Must Remember This, kind: rss, url: 'https://feeds.megaphone.fm/YMRT7068253588', category: history}
+- {id: blog-decor8, name: BLOG - decor8, kind: rss, url: 'https://www.decor8blog.com/blog?format=rss', category: interior-design}
+- {id: core77, name: Core77, kind: rss, url: 'https://feeds.feedburner.com/core77/blog', category: interior-design}
+- {id: design-milkinterior-design-ideas-for-your-modern-home-de, name: Design MilkInterior Design Ideas for Your Modern Home | Design Milk, kind: rss, url: 'https://design-milk.com/category/interior-design/feed/',
+  category: interior-design}
+- {id: fubiz-media, name: Fubiz Media, kind: rss, url: 'https://feeds.feedburner.com/fubiz', category: interior-design}
+- {id: in-my-own-style, name: In My Own Style, kind: rss, url: 'https://inmyownstyle.com/feed', category: interior-design}
+- {id: interior-design-ideas, name: Interior Design Ideas, kind: rss, url: 'https://www.home-designing.com/feed', category: interior-design}
+- {id: interior-design-dezeen, name: Interior design | Dezeen, kind: rss, url: 'https://www.dezeen.com/interiors/feed/', category: interior-design}
+- {id: latest-from-ideal-home-in-news, name: Latest from Ideal Home in News, kind: rss, url: 'https://www.idealhome.co.uk/feed', category: interior-design}
+- {id: liz-marie-blog, name: Liz Marie Blog, kind: rss, url: 'https://www.lizmarieblog.com/feed/', category: interior-design}
+- {id: the-inspired-room, name: The Inspired Room, kind: rss, url: 'https://theinspiredroom.net/feed/', category: interior-design}
+- {id: thrifty-decor-chick-thrifty-diy-decor-and-organizing, name: 'Thrifty Decor Chick | Thrifty DIY, Decor and Organizing', kind: rss, url: 'https://feeds.feedburner.com/blogspot/ZBcZ',
+  category: interior-design}
+- {id: trendir, name: Trendir, kind: rss, url: 'https://www.trendir.com/feed/', category: interior-design}
+- {id: yanko-design, name: Yanko Design, kind: rss, url: 'https://feeds.feedburner.com/yankodesign', category: interior-design}
+- {id: yatzer-live-beautifully-explore-endlessly, name: Yatzer | Live Beautifully. Explore Endlessly., kind: rss, url: 'https://www.yatzer.com/rss.xml', category: interior-design}
+- {id: young-house-love, name: Young House Love, kind: rss, url: 'https://www.younghouselove.com/feed/', category: interior-design}
+- {id: indian-meme-templates, name: Indian Meme Templates, kind: rss, url: 'https://indianmemetemplates.com/feed/', category: memes}
+- {id: know-your-meme-newsfeed, name: Know Your Meme Newsfeed, kind: rss, url: 'https://knowyourmeme.com/newsfeed.rss', category: memes}
+- {id: memebase, name: Memebase, kind: rss, url: 'https://memebase.cheezburger.com/rss', category: memes}
+- {id: rabbit-ramblings, name: Rabbit Ramblings, kind: rss, url: 'https://feeds.feedburner.com/blogspot/GlZMR', category: memes}
+- {id: yucksauce, name: YuckSauce, kind: rss, url: 'https://yucksauce.com/feed/', category: memes}
+- {id: film, name: /Film, kind: rss, url: 'https://feeds2.feedburner.com/slashfilm', category: movies}
+- {id: ain-t-it-cool-news-feed, name: Ain't It Cool News Feed, kind: rss, url: 'https://www.aintitcool.com/node/feed/', category: movies}
+- {id: comingsoon-net-movie-trailers-tv-streaming-news-and-more, name: 'ComingSoon.net – Movie Trailers, TV & Streaming News, and More', kind: rss, url: 'https://www.comingsoon.net/feed',
+  category: movies}
+- {id: deadline, name: Deadline, kind: rss, url: 'https://deadline.com/feed/', category: movies}
+- {id: firstshowing-net, name: FirstShowing.net, kind: rss, url: 'https://www.firstshowing.net/feed/', category: movies}
+- {id: indiewire, name: IndieWire, kind: rss, url: 'https://www.indiewire.com/feed', category: movies}
+- {id: movies, name: Movies, kind: rss, url: 'https://www.bleedingcool.com/movies/feed/', category: movies}
+- {id: variety, name: Variety, kind: rss, url: 'https://variety.com/feed/', category: movies}
+- {id: consequence, name: Consequence, kind: rss, url: 'https://consequenceofsound.net/feed', category: music}
+- {id: metal-injection, name: Metal Injection, kind: rss, url: 'https://feeds.feedburner.com/metalinjection', category: music}
+- {id: music-business-worldwide, name: Music Business Worldwide, kind: rss, url: 'https://www.musicbusinessworldwide.com/feed/', category: music}
+- {id: rss-news, name: 'RSS: News', kind: rss, url: 'https://pitchfork.com/rss/news', category: music}
+- {id: song-exploder, name: Song Exploder, kind: rss, url: 'https://feed.songexploder.net/songexploder', category: music}
+- {id: bbc-earth, name: BBC Earth, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCwmZiChSryoWQCZMIQezgTg', category: nature}
+- {id: bbc-earth-podcast, name: BBC Earth Podcast, kind: rss, url: 'https://rss.acast.com/bbcearthpodcast', category: nature}
+- {id: blog-posts-mark-avery, name: BLOG POSTS – Mark Avery, kind: rss, url: 'https://markavery.info/blog/feed/', category: nature}
+- {id: blog-nature-pbs, name: Blog | Nature | PBS, kind: rss, url: 'https://www.pbs.org/wnet/nature/blog/feed/', category: nature}
+- {id: explore-oceans, name: Explore Oceans, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCSyg9cb3Iq-NtlbxqNB9wGw', category: nature}
+- {id: national-geographic, name: National Geographic, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCpVm7bg6pXKo1Pr6k5kxG9A', category: nature}
+- {id: nature-2, name: Nature, kind: rss, url: 'https://feeds.nature.com/nature/rss/current?x=1', category: nature}
+- {id: nature-on-pbs, name: Nature on PBS, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCcBp_9YPyma4c3HTadmRJ3Q', category: nature}
+- {id: reflections-of-the-natural-world, name: Reflections of the Natural World, kind: rss, url: 'https://reflectionsofthenaturalworld.com/feed/', category: nature}
+- {id: stories-archives-nature-canada, name: Stories Archives - Nature Canada, kind: rss, url: 'https://naturecanada.ca/category/news/blog/feed/', category: nature}
+- {id: nature-video, name: nature video, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UC7c8mE90qCtu11z47U0KErg', category: nature}
+- {id: international-top-news-and-analysis, name: 'International: Top News And Analysis', kind: rss, url: 'https://www.cnbc.com/id/100727362/device/rss/rss.html',
+  category: news}
+- {id: ndtv-news-search-records-found-1000-2, name: NDTV News Search Records Found 1000, kind: rss, url: 'https://feeds.feedburner.com/ndtvnews-world-news', category: news}
+- {id: top-stories-google-news, name: Top stories - Google News, kind: rss, url: 'https://news.google.com/rss', category: news}
+- {id: world-news-today-world-news-latest-international-news-wo, name: 'World News, Today World News, Latest International News, World Breaking News, Trending News
+    of World - Times of India', kind: rss, url: 'https://timesofindia.indiatimes.com/rssfeeds/296589292.cms', category: news}
+- {id: afford-anything, name: Afford Anything®, kind: rss, url: 'https://affordanything.com/feed/', category: personal-finance}
+- {id: afford-anything-2, name: Afford Anything®, kind: rss, url: 'https://feeds.feedburner.com/AffordAnythingFeed', category: personal-finance}
+- {id: budgets-are-sexy, name: Budgets Are Sexy, kind: rss, url: 'https://feeds2.feedburner.com/budgetsaresexy', category: personal-finance}
+- {id: financial-samurai, name: Financial Samurai, kind: rss, url: 'https://www.financialsamurai.com/feed/', category: personal-finance}
+- {id: frugalwoods, name: Frugalwoods, kind: rss, url: 'https://feeds.feedburner.com/Frugalwoods', category: personal-finance}
+- {id: good-financial-cents, name: Good Financial Cents®, kind: rss, url: 'https://www.goodfinancialcents.com/feed/', category: personal-finance}
+- {id: invest-like-the-best-with-patrick-o-shaughnessy, name: Invest Like the Best with Patrick O'Shaughnessy, kind: rss, url: 'https://investlikethebest.libsyn.com/rss',
+  category: personal-finance}
+- {id: learn-to-trade-the-market, name: Learn To Trade The Market, kind: rss, url: 'https://www.learntotradethemarket.com/feed', category: personal-finance}
+- {id: listen-money-matters-free-your-inner-financial-badass-al, name: Listen Money Matters - Free your inner financial badass. All the stuff you should know about
+    personal finance., kind: rss, url: 'https://feeds.megaphone.fm/listen-money-matters', category: personal-finance}
+- {id: making-sense-of-cents, name: Making Sense Of Cents, kind: rss, url: 'https://www.makingsenseofcents.com/feed', category: personal-finance}
+- {id: money-crashers, name: Money Crashers, kind: rss, url: 'https://www.moneycrashers.com/feed/', category: personal-finance}
+- {id: money-for-the-rest-of-us, name: Money For the Rest of Us, kind: rss, url: 'https://rss.art19.com/money-for-the-rest-of-us', category: personal-finance}
+- {id: money-saving-mom, name: Money Saving Mom®, kind: rss, url: 'https://moneysavingmom.com/feed/', category: personal-finance}
+- {id: money-under-30, name: Money Under 30, kind: rss, url: 'https://www.moneyunder30.com/feed', category: personal-finance}
+- {id: moneyning, name: MoneyNing, kind: rss, url: 'https://feeds.feedburner.com/MoneyNing', category: personal-finance}
+- {id: mywifequitherjob-com, name: MyWifeQuitHerJob.com, kind: rss, url: 'https://mywifequitherjob.com/feed/', category: personal-finance}
+- {id: nerd-s-eye-view-kitces-com, name: Nerd's Eye View | Kitces.com, kind: rss, url: 'https://feeds.feedblitz.com/kitcesnerdseyeview&x=1', category: personal-finance}
+- {id: nerdwallet, name: NerdWallet, kind: rss, url: 'https://www.nerdwallet.com/blog/feed/', category: personal-finance}
+- {id: oblivious-investor, name: Oblivious Investor, kind: rss, url: 'https://obliviousinvestor.com/feed/', category: personal-finance}
+- {id: savingadvice-com-blog, name: SavingAdvice.com Blog, kind: rss, url: 'https://www.savingadvice.com/feed/', category: personal-finance}
+- {id: the-college-investor, name: The College Investor, kind: rss, url: 'https://thecollegeinvestor.com/feed/', category: personal-finance}
+- {id: the-ramsey-show, name: The Ramsey Show, kind: rss, url: 'https://daveramsey.libsyn.com/rss', category: personal-finance}
+- {id: well-kept-wallet, name: Well Kept Wallet, kind: rss, url: 'https://wellkeptwallet.com/feed/', category: personal-finance}
+- {id: 500px, name: 500px, kind: rss, url: 'https://iso.500px.com/feed/', category: photography}
+- {id: digital-photography-school, name: Digital Photography School, kind: rss, url: 'https://feeds.feedburner.com/DigitalPhotographySchool', category: photography}
+- {id: light-stalking, name: Light Stalking, kind: rss, url: 'https://www.lightstalking.com/feed/', category: photography}
+- {id: one-big-photo, name: One Big Photo, kind: rss, url: 'https://feeds.feedburner.com/OneBigPhoto', category: photography}
+- {id: petapixel, name: PetaPixel, kind: rss, url: 'https://petapixel.com/feed/', category: photography}
+- {id: strobist, name: Strobist, kind: rss, url: 'https://feeds.feedburner.com/blogspot/WOBq', category: photography}
+- {id: the-boston-globe, name: The Boston Globe, kind: rss, url: 'https://www.bostonglobe.com/rss/bigpicture', category: photography}
+- {id: better-programming-medium, name: Better Programming - Medium, kind: rss, url: 'https://medium.com/feed/better-programming', category: programming}
+- {id: codenewbie, name: CodeNewbie, kind: rss, url: 'https://feeds.codenewbie.org/cnpodcast.xml', category: programming}
+- {id: developer-tea, name: Developer Tea, kind: rss, url: 'https://feeds.simplecast.com/dLRotFGk', category: programming}
+- {id: engineering-at-slack, name: Engineering at Slack, kind: rss, url: 'https://slack.engineering/feed', category: programming}
+- {id: etsy-engineering-code-as-craft, name: Etsy Engineering | Code as Craft, kind: rss, url: 'https://codeascraft.com/feed/atom/', category: programming}
+- {id: floss-weekly-audio, name: FLOSS Weekly (Audio), kind: rss, url: 'https://feeds.twit.tv/floss.xml', category: programming}
+- {id: gitlab, name: GitLab, kind: rss, url: 'https://about.gitlab.com/atom.xml', category: programming}
+- {id: google-developers-blog, name: Google Developers Blog, kind: rss, url: 'https://feeds.feedburner.com/GDBcode', category: programming}
+- {id: google-techtalks, name: Google TechTalks, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=GoogleTechTalks', category: programming}
+- {id: hackernoon-com-medium, name: HackerNoon.com - Medium, kind: rss, url: 'https://medium.com/feed/hackernoon', category: programming}
+- {id: hanselminutes-with-scott-hanselman, name: Hanselminutes with Scott Hanselman, kind: rss, url: 'https://feeds.simplecast.com/gvtxUiIf', category: programming}
+- {id: java-sql-and-jooq, name: 'Java, SQL and jOOQ.', kind: rss, url: 'https://blog.jooq.org/feed', category: programming}
+- {id: joel-on-software, name: Joel on Software, kind: rss, url: 'https://www.joelonsoftware.com/feed/', category: programming}
+- {id: overflow-buffer-resources, name: Overflow - Buffer Resources, kind: rss, url: 'https://buffer.com/resources/overflow/rss/', category: programming}
+- {id: podcast-archives-software-engineering-daily, name: Podcast Archives - Software Engineering Daily, kind: rss, url: 'https://softwareengineeringdaily.com/category/podcast/feed',
+  category: programming}
+- {id: programming-archives-the-crazy-programmer, name: Programming Archives - The Crazy Programmer, kind: rss, url: 'https://www.thecrazyprogrammer.com/category/programming/feed',
+  category: programming}
+- {id: programming-throwdown, name: Programming Throwdown, kind: rss, url: 'https://feeds.feedburner.com/ProgrammingThrowdown', category: programming}
+- {id: robert-heaton-blog, name: Robert Heaton | Blog, kind: rss, url: 'https://robertheaton.com/feed.xml', category: programming}
+- {id: scott-hanselman-s-blog, name: Scott Hanselman's Blog, kind: rss, url: 'https://feeds.hanselman.com/ScottHanselman', category: programming}
+- {id: software-engineering-radio-the-podcast-for-professional-, name: Software Engineering Radio - The Podcast for Professional Software Developers, kind: rss, url: 'https://feeds.feedburner.com/se-radio',
+  category: programming}
+- {id: soundcloud-backstage-blog, name: SoundCloud Backstage Blog, kind: rss, url: 'https://developers.soundcloud.com/blog/blog.rss', category: programming}
+- {id: stack-abuse, name: Stack Abuse, kind: rss, url: 'https://stackabuse.com/rss/', category: programming}
+- {id: the-6-figure-developer, name: The 6 Figure Developer, kind: rss, url: 'https://6figuredev.com/feed/rss/', category: programming}
+- {id: the-airbnb-tech-blog-medium, name: The Airbnb Tech Blog - Medium, kind: rss, url: 'https://medium.com/feed/airbnb-engineering', category: programming}
+- {id: the-cynical-developer, name: The Cynical Developer, kind: rss, url: 'https://cynicaldeveloper.com/feed/podcast', category: programming}
+- {id: the-jetbrains-blog, name: The JetBrains Blog, kind: rss, url: 'https://blog.jetbrains.com/feed', category: programming}
+- {id: the-pit-show-reflections-and-interviews-in-the-tech-worl, name: 'The PIT Show: Reflections and Interviews in the Tech World', kind: rss, url: 'https://feeds.transistor.fm/productivity-in-tech-podcast',
+  category: programming}
+- {id: the-stack-overflow-podcast, name: The Stack Overflow Podcast, kind: rss, url: 'https://feeds.simplecast.com/XA_851k3', category: programming}
+- {id: the-women-in-tech-show-a-technical-podcast, name: 'The Women in Tech Show: A Technical Podcast', kind: rss, url: 'https://thewomenintechshow.com/category/podcast/feed/',
+  category: programming}
+- {id: overreacted-a-blog-by-dan-abramov, name: overreacted — A blog by Dan Abramov, kind: rss, url: 'https://overreacted.io/rss.xml', category: programming}
+- {id: discovery, name: Discovery, kind: rss, url: 'https://podcasts.files.bbci.co.uk/p002w557.rss', category: science}
+- {id: flowingdata, name: FlowingData, kind: rss, url: 'https://flowingdata.com/feed', category: science}
+- {id: gastropod, name: Gastropod, kind: rss, url: 'https://www.omnycontent.com/d/playlist/aaea4e69-af51-495e-afc9-a9760146922b/2a195077-f014-41d2-8313-ab190186b4c2/277bcd5c-0a05-4c14-8ba6-ab190186b4d5/podcast.rss',
+  category: science}
+- {id: hidden-brain, name: Hidden Brain, kind: rss, url: 'https://feeds.npr.org/510308/podcast.xml', category: science}
+- {id: invisibilia, name: Invisibilia, kind: rss, url: 'https://feeds.npr.org/510307/podcast.xml', category: science}
+- {id: nyt-science, name: NYT > Science, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/Science.xml', category: science}
+- {id: popular-science, name: Popular Science, kind: rss, url: 'https://www.popsci.com/arcio/rss/', category: science}
+- {id: probably-science, name: Probably Science, kind: rss, url: 'https://probablyscience.libsyn.com/rss', category: science}
+- {id: sawbones-a-marital-tour-of-misguided-medicine, name: 'Sawbones: A Marital Tour of Misguided Medicine', kind: rss, url: 'https://feeds.simplecast.com/y1LF_sn2',
+  category: science}
+- {id: science, name: Science, kind: rss, url: 'https://gizmodo.com/tag/science/rss', category: science}
+- {id: science-latest, name: Science Latest, kind: rss, url: 'https://www.wired.com/feed/category/science/latest/rss', category: science}
+- {id: shirtloads-of-science, name: Shirtloads of Science, kind: rss, url: 'https://shirtloadsofscience.libsyn.com/rss', category: science}
+- {id: the-infinite-monkey-cage, name: The Infinite Monkey Cage, kind: rss, url: 'https://podcasts.files.bbci.co.uk/b00snr0w.rss', category: science}
+- {id: this-week-in-science-the-kickass-science-podcast, name: This Week in Science – The Kickass Science Podcast, kind: rss, url: 'https://www.twis.org/feed/', category: science}
+- {id: nasa, name: NASA, kind: rss, url: 'https://www.nasa.gov/rss/dyn/breaking_news.rss', category: space}
+- {id: new-scientist-space, name: New Scientist - Space, kind: rss, url: 'https://www.newscientist.com/subject/space/feed/', category: space}
+- {id: space-the-guardian, name: Space | The Guardian, kind: rss, url: 'https://www.theguardian.com/science/space/rss', category: space}
+- {id: spacex, name: SpaceX, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=spacexchannel', category: space}
+- {id: https-sports-yahoo-com-rss, name: 'https://sports.yahoo.com/rss/', kind: rss, url: 'https://sports.yahoo.com/rss/', category: sports}
+- {id: bbc-sport-3, name: BBC Sport, kind: rss, url: 'https://feeds.bbci.co.uk/sport/rss.xml', category: sports}
+- {id: sport-the-guardian, name: Sport | The Guardian, kind: rss, url: 'https://www.theguardian.com/uk/sport/rss', category: sports}
+- {id: sports-news-latest-sports-and-football-news-sky-news, name: Sports News - Latest Sports and Football News | Sky News, kind: rss, url: 'https://feeds.skynews.com/feeds/rss/sports.xml',
+  category: sports}
+- {id: sports-news-cricket-live-scorecard-latest-cricket-news-f, name: 'Sports News: Cricket Live Scorecard, Latest Cricket News, Football, NBA, NFL, WWE, NHL, MLB
+    News & More', kind: rss, url: 'https://timesofindia.indiatimes.com/rssfeeds/4719148.cms', category: sports}
+- {id: sports-the-indian-express, name: Sports | The Indian Express, kind: rss, url: 'https://indianexpress.com/section/sports/feed/', category: sports}
+- {id: www-espn-com-top, name: www.espn.com - TOP, kind: rss, url: 'https://www.espn.com/espn/rss/news', category: sports}
+- {id: blog-on-feld-thoughts, name: Blog on Feld Thoughts, kind: rss, url: 'https://feld.com/archives/tag/blog/feed', category: startups}
+- {id: entrepreneur-latest, name: Entrepreneur – Latest, kind: rss, url: 'https://feeds.feedburner.com/entrepreneur/latest', category: startups}
+- {id: feld-thoughts, name: Feld Thoughts, kind: rss, url: 'https://feld.com/feed', category: startups}
+- {id: garyvee, name: GaryVee, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=GaryVaynerchuk', category: startups}
+- {id: hacker-news-front-page, name: 'Hacker News: Front Page', kind: rss, url: 'https://hnrss.org/frontpage', category: startups}
+- {id: inc-com, name: Inc.com, kind: rss, url: 'https://www.inc.com/rss/', category: startups}
+- {id: marie-forleo, name: Marie Forleo, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=marieforleo', category: startups}
+- {id: masters-of-scale, name: Masters of Scale, kind: rss, url: 'https://rss.art19.com/masters-of-scale', category: startups}
+- {id: product-hunt-the-best-new-products-every-day, name: 'Product Hunt — The best new products, every day', kind: rss, url: 'https://www.producthunt.com/feed',
+  category: startups}
+- {id: small-business-trends, name: Small Business Trends, kind: rss, url: 'https://feeds2.feedburner.com/SmallBusinessTrends', category: startups}
+- {id: smart-passive-income, name: Smart Passive Income, kind: rss, url: 'https://feeds.feedburner.com/smartpassiveincome', category: startups}
+- {id: steve-blank, name: Steve Blank, kind: rss, url: 'https://steveblank.com/feed/', category: startups}
+- {id: the-intercom-blog, name: The Intercom Blog, kind: rss, url: 'https://www.intercom.com/blog/feed', category: startups}
+- {id: the-startup-junkies-podcast, name: The Startup Junkies Podcast, kind: rss, url: 'https://startupjunkie.libsyn.com/rss', category: startups}
+- {id: venturebeat, name: VentureBeat, kind: rss, url: 'https://feeds.feedburner.com/venturebeat/SZYF', category: startups}
+- {id: accidental-tech-podcast, name: Accidental Tech Podcast, kind: rss, url: 'https://atp.fm/rss', category: tech}
+- {id: analog-ue, name: Analog(ue), kind: rss, url: 'https://www.relay.fm/analogue/feed', category: tech}
+- {id: cnet, name: CNET, kind: rss, url: 'https://www.cnet.com/rss/news/', category: tech}
+- {id: cnet-2, name: CNET, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=CNETTV', category: tech}
+- {id: clockwise, name: Clockwise, kind: rss, url: 'https://www.relay.fm/clockwise/feed', category: tech}
+- {id: crunch-hype, name: Crunch Hype, kind: rss, url: 'https://feeds.feedburner.com/TechCrunch', category: tech}
+- {id: gizmodo, name: Gizmodo, kind: rss, url: 'https://gizmodo.com/rss', category: tech}
+- {id: hacker-news, name: Hacker News, kind: rss, url: 'https://news.ycombinator.com/rss', category: tech}
+- {id: lifehacker, name: Lifehacker, kind: rss, url: 'https://lifehacker.com/rss', category: tech}
+- {id: linus-tech-tips, name: Linus Tech Tips, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=LinusTechTips', category: tech}
+- {id: marques-brownlee, name: Marques Brownlee, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=marquesbrownlee', category: tech}
+- {id: reply-all, name: Reply All, kind: rss, url: 'https://feeds.megaphone.fm/replyall', category: tech}
+- {id: rocket, name: Rocket, kind: rss, url: 'https://www.relay.fm/rocket/feed', category: tech}
+- {id: slashdot, name: Slashdot, kind: rss, url: 'https://rss.slashdot.org/Slashdot/slashdotMain', category: tech}
+- {id: the-keyword, name: The Keyword, kind: rss, url: 'https://www.blog.google/rss/', category: tech}
+- {id: the-verge, name: The Verge, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=TheVerge', category: tech}
+- {id: the-vergecast, name: The Vergecast, kind: rss, url: 'https://feeds.megaphone.fm/vergecast', category: tech}
+- {id: this-week-in-tech-audio, name: This Week in Tech (Audio), kind: rss, url: 'https://feeds.twit.tv/twit.xml', category: tech}
+- {id: unbox-therapy, name: Unbox Therapy, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=unboxtherapy', category: tech}
+- {id: www-theregister-com-articles-2, name: www.theregister.com - Articles, kind: rss, url: 'https://www.theregister.com/headlines.rss', category: tech}
+- {id: tv, name: TV, kind: rss, url: 'https://www.bleedingcool.com/tv/feed/', category: television}
+- {id: tvline-all-tv-no-interference-tv-news-spoilers-by-tvline, name: TVLine - All TV. No Interference. TV News & Spoilers by TVLine, kind: rss, url: 'https://tvline.com/feed/',
+  category: television}
+- {id: the-tv-addict, name: the TV addict, kind: rss, url: 'https://feeds.feedburner.com/thetvaddict/AXob', category: television}
+- {id: bbc-sport-4, name: BBC Sport, kind: rss, url: 'https://feeds.bbci.co.uk/sport/tennis/rss.xml', category: tennis}
+- {id: essential-tennis-podcast-instruction-lessons-tips, name: 'Essential Tennis Podcast - Instruction, Lessons, Tips', kind: rss, url: 'https://feed.podbean.com/essentialtennis/feed.xml',
+  category: tennis}
+- {id: nyt-sports-tennis, name: NYT > Sports > Tennis, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/Tennis.xml', category: tennis}
+- {id: perfect-tennis, name: Perfect Tennis, kind: rss, url: 'https://www.perfect-tennis.com/feed/', category: tennis}
+- {id: tennis-news-updates-tennis-scores-atp-wta-grand-slams-th, name: 'Tennis News, Updates, Tennis Scores, ATP, WTA, Grand Slams | The Hindu', kind: rss, url: 'https://www.thehindu.com/sport/tennis/feeder/default.rss',
+  category: tennis}
+- {id: tennis-the-guardian, name: Tennis | The Guardian, kind: rss, url: 'https://www.theguardian.com/sport/tennis/rss', category: tennis}
+- {id: tennis-the-indian-express, name: Tennis | The Indian Express, kind: rss, url: 'https://indianexpress.com/section/sports/tennis/feed/', category: tennis}
+- {id: www-espn-com-tennis, name: www.espn.com - TENNIS, kind: rss, url: 'https://www.espn.com/espn/rss/tennis/news', category: tennis}
+- {id: adventure-com, name: Adventure.com, kind: rss, url: 'https://adventure.com/feed/', category: travel}
+- {id: atlas-obscura-latest-articles-and-places, name: Atlas Obscura - Latest Articles and Places, kind: rss, url: 'https://www.atlasobscura.com/feeds/latest', category: travel}
+- {id: everything-everywhere, name: Everything Everywhere, kind: rss, url: 'https://feeds2.feedburner.com/EverythingEverywhere/', category: travel}
+- {id: live-life-travel, name: Live Life Travel, kind: rss, url: 'https://www.livelifetravel.world/feed/', category: travel}
+- {id: million-mile-secrets, name: Million Mile Secrets, kind: rss, url: 'https://feeds.feedburner.com/MillionMileSecrets', category: travel}
+- {id: nyt-travel, name: NYT > Travel, kind: rss, url: 'https://rss.nytimes.com/services/xml/rss/nyt/Travel.xml', category: travel}
+- {id: tfil-traveling-to-every-country-in-a-z-order, name: TFIL (Traveling to EVERY COUNTRY in A-Z Order), kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=ECastee',
+  category: travel}
+- {id: the-points-guy-articles, name: The Points Guy Articles, kind: rss, url: 'https://feeds.feedburner.com/thepointsguy', category: travel}
+- {id: travel-blog, name: Travel Blog -, kind: rss, url: 'https://www.nomadicmatt.com/travel-blog/feed/', category: travel}
+- {id: travel-dudes, name: Travel Dudes, kind: rss, url: 'https://www.traveldudes.com/feed/', category: travel}
+- {id: travel-the-guardian, name: Travel | The Guardian, kind: rss, url: 'https://www.theguardian.com/uk/travel/rss', category: travel}
+- {id: articles-on-smashing-magazine-for-web-designers-and-deve, name: Articles on Smashing Magazine — For Web Designers And Developers, kind: rss, url: 'https://www.smashingmagazine.com/feed',
+  category: ui-ux}
+- {id: just-creative, name: JUST™ Creative, kind: rss, url: 'https://feeds.feedburner.com/JustCreativeDesignBlog', category: ui-ux}
+- {id: nn-g-latest-articles-and-announcements, name: NN/g latest articles and announcements, kind: rss, url: 'https://www.nngroup.com/feed/rss/', category: ui-ux}
+- {id: ux-collective-medium, name: UX Collective - Medium, kind: rss, url: 'https://uxdesign.cc/feed', category: ui-ux}
+- {id: ux-movement, name: UX Movement, kind: rss, url: 'https://uxmovement.com/feed/', category: ui-ux}
+- {id: usability-geek, name: Usability Geek, kind: rss, url: 'https://usabilitygeek.com/feed/', category: ui-ux}
+- {id: a-list-apart-the-full-feed, name: 'A List Apart: The Full Feed', kind: rss, url: 'https://alistapart.com/main/feed/', category: web-development}
+- {id: css-tricks, name: CSS-Tricks, kind: rss, url: 'https://css-tricks.com/feed/', category: web-development}
+- {id: david-walsh-blog, name: David Walsh Blog, kind: rss, url: 'https://davidwalsh.name/feed', category: web-development}
+- {id: sink-in-tech-learnings, name: Sink In - Tech Learnings, kind: rss, url: 'https://gosink.in/rss/', category: web-development}
+- {id: alberto-de-bortoli, name: Alberto De Bortoli, kind: rss, url: 'https://albertodebortoli.com/rss/', category: ios-development}
+- {id: augmented-code, name: Augmented Code, kind: rss, url: 'https://augmentedcode.io/feed/', category: ios-development}
+- {id: benoit-pasquier, name: Benoit Pasquier, kind: rss, url: 'https://benoitpasquier.com/index.xml', category: ios-development}
+- {id: bruno-rocha, name: Bruno Rocha, kind: rss, url: 'https://swiftrocks.com/rss.xml', category: ios-development}
+- {id: latest-news-apple-developer, name: Latest News - Apple Developer, kind: rss, url: 'https://developer.apple.com/news/rss/news.rss', category: ios-development}
+- {id: mobile-a11y, name: Mobile A11y, kind: rss, url: 'https://mobilea11y.com/index.xml', category: ios-development}
+- {id: ole-begemann, name: Ole Begemann, kind: rss, url: 'https://oleb.net/blog/atom.xml', category: ios-development}
+- {id: swift-by-sundell, name: Swift by Sundell, kind: rss, url: 'https://www.swiftbysundell.com/feed.rss', category: ios-development}
+- {id: swift-by-sundell-2, name: Swift by Sundell, kind: rss, url: 'https://swiftbysundell.com/feed.rss', category: ios-development}
+- {id: the-atomic-birdhouse, name: The Atomic Birdhouse, kind: rss, url: 'https://atomicbird.com/index.xml', category: ios-development}
+- {id: the-one-and-only-blog-of-joe-fabisevich, name: The One And Only Blog Of Joe Fabisevich, kind: rss, url: 'https://www.fabisevi.ch/feed.xml', category: ios-development}
+- {id: under-the-radar, name: Under the Radar, kind: rss, url: 'https://www.relay.fm/radar/feed', category: ios-development}
+- {id: use-your-loaf-ios-development-news-tips, name: Use Your Loaf - iOS Development News & Tips, kind: rss, url: 'https://useyourloaf.com/blog/rss.xml', category: ios-development}
+- {id: inessential-com, name: inessential.com, kind: rss, url: 'https://inessential.com/xml/rss.xml', category: ios-development}

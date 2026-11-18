@@ -14,3 +14,6 @@ infra/dbt/logs/
 infra/dbt/**/*.duckdb
 infra/dbt/.user.yml
 .venv/
+
+# open-feeds dedupe state (kept in the Actions cache, never committed)
+.open-feeds/
