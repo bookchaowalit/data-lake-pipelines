@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import json
 import os
 import sys
@@ -731,42 +732,48 @@ _BRONZE_PART_PREFIX = "part-"
 _BRONZE_PART_SUFFIX = ".parquet"
 
 
+def _bronze_digest(bronze_key: str) -> str:
+    return hashlib.sha256(bronze_key.encode("utf-8")).hexdigest()[:32]
+
+
 def _converted_index_key(avro_key: str, conversion_id: str, bronze_key: str) -> str:
-    """Index entry for one landing Avro key, naming its conversion id and full Bronze key.
+    """Index entry for one landing Avro key, naming its conversion id and a digest of its Bronze key.
 
     Landing objects are written once (``--if-none-match``), so the key stays bound to its bytes. The
-    Bronze key sits in the entry's own key, so a run checks it (and the conversion manifest derived
-    from it) against listings without reading the entry.
+    digest sits in the entry's own key (fixed length, so the key stays far below the 1,024-byte S3/R2
+    limit), and a run compares it with digests of the Bronze listing without reading the entry.
     """
-    return f"{CONVERTED_INDEX_PREFIX}/{avro_key}/conversion_id={conversion_id}/{bronze_key}.json"
+    return f"{CONVERTED_INDEX_PREFIX}/{avro_key}/conversion_id={conversion_id}/bronze={_bronze_digest(bronze_key)}.json"
 
 
 def _parse_index_key(key: str) -> tuple[str, str, str] | None:
-    """``(avro_key, conversion_id, bronze_key)``; ``bronze_key`` is empty for a legacy entry."""
+    """``(avro_key, conversion_id, bronze_digest)``; the digest is empty for a legacy entry.
+
+    Three shapes: ``conversion_id=<id>.json`` (legacy), ``conversion_id=<id>/bronze=<digest>.json``
+    and ``conversion_id=<id>/<full bronze key>.json`` (written on 2026-11-18 only; still read).
+    """
     prefix = CONVERTED_INDEX_PREFIX + "/"
     if not key.startswith(prefix) or not key.endswith(".json"):
         return None
     avro_key, marker, tail = key[len(prefix) : -len(".json")].partition("/conversion_id=")
     if not avro_key or not marker:
         return None
-    conversion_id, _, bronze_key = tail.partition("/")
-    if not conversion_id or (bronze_key and not _bronze_key_matches(bronze_key, conversion_id)):
+    conversion_id, _, ref = tail.partition("/")
+    if not conversion_id:
         return None
-    return avro_key, conversion_id, bronze_key
+    if not ref:
+        return avro_key, conversion_id, ""
+    if ref.startswith("bronze=") and re.fullmatch(r"[0-9a-f]{32}", ref[len("bronze=") :]):
+        return avro_key, conversion_id, ref[len("bronze=") :]
+    if _bronze_key_matches(ref, conversion_id):
+        return avro_key, conversion_id, _bronze_digest(ref)
+    return None
 
 
 def _bronze_key_matches(bronze_key: str, conversion_id: str) -> bool:
     return bronze_key.startswith("bronze/") and bronze_key.endswith(
         f"/{_BRONZE_PART_PREFIX}{conversion_id}{_BRONZE_PART_SUFFIX}"
     )
-
-
-def _conversion_manifest_key(bronze_key: str, conversion_id: str) -> str | None:
-    """The conversion manifest key ``convert_avro_file`` writes for this Bronze part."""
-    sources = [part for part in bronze_key.split("/") if part.startswith("source=")]
-    if len(sources) != 1:
-        return None
-    return f"control/manifests/stream-parquet/{sources[0]}/conversion_id={conversion_id}.json"
 
 
 def _record_converted(store: ObjectStore, avro_key: str, result: dict[str, Any]) -> None:
@@ -793,7 +800,7 @@ LEGACY_UPGRADES_PER_RUN = 150  # each costs a read and a write; the job has a 20
 
 
 def _indexed_parts(store: ObjectStore, avro_key: str, entries: set[tuple[str, str]]) -> set[tuple[str, str]]:
-    """``(conversion_id, bronze_key)`` pairs for one Avro key; a legacy entry is read once and rewritten."""
+    """``(conversion_id, bronze_digest)`` pairs for one Avro key; a legacy entry is read once and rewritten."""
     current = {entry for entry in entries if entry[1]}
     if current:
         return current
@@ -807,7 +814,7 @@ def _indexed_parts(store: ObjectStore, avro_key: str, entries: set[tuple[str, st
         bronze_key = str(body.get("bronze_key") or "")
         if _bronze_key_matches(bronze_key, conversion_id):
             _record_converted(store, avro_key, body)
-            parts.add((conversion_id, bronze_key))
+            parts.add((conversion_id, _bronze_digest(bronze_key)))
     return parts
 
 
@@ -838,7 +845,16 @@ def convert_pending(
         if parsed:
             index.setdefault(parsed[0], set()).add((parsed[1], parsed[2]))
     bronze_keys = set(store.list_keys("bronze")) if index else set()
-    manifest_keys = set(store.list_keys("control/manifests/stream-parquet")) if index else set()
+    bronze_digests = {_bronze_digest(key) for key in bronze_keys}
+    manifest_ids = (
+        {
+            key[: -len(".json")].rsplit("/conversion_id=", 1)[-1]
+            for key in store.list_keys("control/manifests/stream-parquet")
+            if key.endswith(".json") and "/conversion_id=" in key
+        }
+        if index
+        else set()
+    )
     bronze_ids = {
         key.rsplit("/", 1)[-1][len(_BRONZE_PART_PREFIX) : -len(_BRONZE_PART_SUFFIX)]
         for key in bronze_keys
@@ -850,7 +866,7 @@ def convert_pending(
     indexed = 0
     for avro_key in avro_keys:
         entries = index.get(avro_key)
-        if entries and not any(bronze for _, bronze in entries) and legacy_budget <= 0:
+        if entries and not any(digest for _, digest in entries) and legacy_budget <= 0:
             # Legacy entry past this run's upgrade budget: keep the earlier conversion-id check for now.
             if {c for c, _ in entries} <= bronze_ids:
                 indexed += 1
@@ -859,11 +875,15 @@ def convert_pending(
                 errors.append({"avro_key": avro_key, "error": "IndexedBronzeMissing"})
             continue
         if entries:
-            if not any(bronze for _, bronze in entries):
+            if not any(digest for _, digest in entries):
                 legacy_budget -= 1
-            parts = _indexed_parts(store, avro_key, entries)
-            if parts and all(bronze_key in bronze_keys for _, bronze_key in parts):
-                if all(_conversion_manifest_key(b, c) in manifest_keys for c, b in parts):
+            try:
+                parts = _indexed_parts(store, avro_key, entries)
+            except StorageError as exc:  # one unreadable or unwritable entry must not stop the run
+                errors.append({"avro_key": avro_key, "error": type(exc).__name__})
+                continue
+            if parts and all(digest in bronze_digests for _, digest in parts):
+                if all(conversion_id in manifest_ids for conversion_id, _ in parts):
                     indexed += 1
                     continue
                 # Manifest gone: the full conversion path writes it again from the Bronze part.

@@ -247,7 +247,7 @@ class StreamLakeContractTests(unittest.TestCase):
             result = self._converted_once(temp_dir, 80)
             store = ObjectStore(temp_dir)
             (current,) = store.list_keys("control/state/stream-converted")
-            legacy = current[: current.index("/bronze/")] + ".json"
+            legacy = current[: current.index("/bronze=")] + ".json"
             store.put_bytes(legacy, store.get_bytes(current), content_type="application/json")
             Path(temp_dir, current).unlink()
             after = convert_pending(data_lake_uri=temp_dir)
@@ -260,7 +260,7 @@ class StreamLakeContractTests(unittest.TestCase):
             self._converted_once(temp_dir, 90)
             store = ObjectStore(temp_dir)
             (current,) = store.list_keys("control/state/stream-converted")
-            legacy = current[: current.index("/bronze/")] + ".json"
+            legacy = current[: current.index("/bronze=")] + ".json"
             store.put_bytes(legacy, store.get_bytes(current), content_type="application/json")
             Path(temp_dir, current).unlink()
             with patch.object(stream_sink, "LEGACY_UPGRADES_PER_RUN", 0):
@@ -270,6 +270,50 @@ class StreamLakeContractTests(unittest.TestCase):
             upgraded = convert_pending(data_lake_uri=temp_dir)
             self.assertEqual((upgraded["indexed"], upgraded["legacy_pending"]), (1, 0))
             self.assertIn(current, store.list_keys("control/state/stream-converted"))
+
+    def test_index_keys_have_a_fixed_length_bronze_digest(self):
+        """Review P2: the full Bronze key in the index key could pass the 1,024-byte S3/R2 limit."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self._converted_once(temp_dir, 100)
+            (current,) = ObjectStore(temp_dir).list_keys("control/state/stream-converted")
+            self.assertNotIn(result["bronze_key"], current)
+            self.assertRegex(current, r"/bronze=[0-9a-f]{32}\.json$")
+
+    def test_full_bronze_key_entries_from_2026_11_18_still_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self._converted_once(temp_dir, 110)
+            store = ObjectStore(temp_dir)
+            (current,) = store.list_keys("control/state/stream-converted")
+            long_key = current[: current.index("/bronze=")] + "/" + result["bronze_key"] + ".json"
+            store.put_bytes(long_key, store.get_bytes(current), content_type="application/json")
+            Path(temp_dir, current).unlink()
+            after = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual((after["status"], after["indexed"]), ("healthy", 1))
+
+    def test_a_failed_legacy_upgrade_is_one_error_not_a_stopped_run(self):
+        """Review P2: an unreadable legacy entry must not stop the other Avro files."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._converted_once(temp_dir, 120)
+            store = ObjectStore(temp_dir)
+            (current,) = store.list_keys("control/state/stream-converted")
+            legacy = current[: current.index("/bronze=")] + ".json"
+            store.put_bytes(legacy, store.get_bytes(current), content_type="application/json")
+            Path(temp_dir, current).unlink()
+            messages = [StreamMessage("events", 0, 121, {"id": "evt-121", "payload": {"value": 1}})]
+            run_once(FakeConsumer(messages), data_lake_uri=temp_dir, source="sensor", domain="operations",
+                     dataset="events", poll_ms=1, max_records=10)
+            original_get = ObjectStore.get_bytes
+
+            def failing_get(obj, key):
+                if key == legacy:
+                    raise StorageError("unreadable")
+                return original_get(obj, key)
+
+            with patch.object(ObjectStore, "get_bytes", failing_get):
+                after = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual(after["status"], "degraded")
+            self.assertEqual(after["converted"], 1)
+            self.assertEqual([e["error"] for e in after["errors"]], ["StorageError"])
 
 if __name__ == "__main__":
     unittest.main()
