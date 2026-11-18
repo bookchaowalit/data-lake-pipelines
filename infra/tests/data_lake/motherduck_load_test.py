@@ -253,7 +253,7 @@ class MotherDuckLoadTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
             gold = self._gold(root)
-            approved = motherduck_load.EXPORT_APPROVED - {"jobs_company_hiring"}
+            approved = {k: v for k, v in motherduck_load.EXPORT_APPROVED.items() if k != "jobs_company_hiring"}
             target = str(Path(out) / "w.duckdb")
             with mock.patch.object(motherduck_load, "EXPORT_APPROVED", approved):
                 result = motherduck_load.load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, now=NOW)
@@ -331,6 +331,54 @@ class MotherDuckLoadTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MOTHERDUCK_TOKEN": "tok-test"}), mock.patch("duckdb.connect", fake_connect):
             motherduck_load._connect("md:empire_gold")
         self.assertEqual(calls, [("md:", {"motherduck_token": "tok-test"})])
+
+    def test_withdrawn_mart_is_dropped_on_the_next_load(self):
+        from data_lake import motherduck_load
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
+            gold = self._gold(root)
+            target = str(Path(out) / "w.duckdb")
+            motherduck_load.load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, now=NOW)
+            approved = {k: v for k, v in motherduck_load.EXPORT_APPROVED.items() if k != "jobs_company_hiring"}
+            with mock.patch.object(motherduck_load, "EXPORT_APPROVED", approved):
+                result = motherduck_load.load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, now=NOW)
+            self.assertEqual(result["status"], "loaded")
+            self.assertEqual(result["dropped"], ["jobs_company_hiring"])
+
+    def test_unapproved_column_is_refused(self):
+        from data_lake import motherduck_load
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
+            gold = self._gold(root)
+            approved = dict(motherduck_load.EXPORT_APPROVED)
+            approved["jobs_company_hiring"] = tuple(c for c in approved["jobs_company_hiring"] if c != "company")
+            with mock.patch.object(motherduck_load, "EXPORT_APPROVED", approved):
+                with self.assertRaisesRegex(motherduck_load.WarehouseLoadError, "export-approved columns"):
+                    motherduck_load.load_jobs_gold(
+                        gold["manifest_key"], str(Path(out) / "w.duckdb"), data_lake_uri=root, now=NOW
+                    )
+
+    def test_republish_of_the_held_run_advances_the_watermark(self):
+        from data_lake.motherduck_load import load_jobs_gold
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
+            gold = self._gold(root)
+            store = ObjectStore(root)
+            manifest = json.loads(store.get_bytes(gold["manifest_key"]))
+            manifest["gold_run_id"] = "gold-second"
+            for mart in manifest["marts"]:
+                data = store.get_bytes(mart["key"])
+                mart["key"] = mart["key"].replace(gold["gold_run_id"], "gold-second")
+                store.put_bytes(mart["key"], data)
+            second_key = gold["manifest_key"].replace(gold["gold_run_id"], "gold-second")
+            store.put_bytes(second_key, json.dumps(manifest).encode("utf-8"))
+            target = str(Path(out) / "w.duckdb")
+            # A at p1, then A re-published at p3 (unchanged), then a slow B from p2 arrives.
+            load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, published_key="p1", now=NOW)
+            again = load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, published_key="p3", now=NOW)
+            self.assertEqual(again["status"], "unchanged")
+            late = load_jobs_gold(second_key, target, data_lake_uri=root, published_key="p2", now=NOW)
+            self.assertEqual(late["status"], "skipped_not_latest")
 
 
 if __name__ == "__main__":

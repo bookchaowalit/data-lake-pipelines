@@ -15,7 +15,10 @@ as R2 Gold. Done when the row counts in MotherDuck equal the Gold manifest count
    reader contract (`pointer_version == "1"`, `layer == "gold"`) or the load fails.
 2. Only Gold leaves R2 (ADR-0016 §2), and only marts in `EXPORT_APPROVED`, a list kept apart
    from the publisher's `JOBS_MARTS`: a mart new to Gold is reported in `not_exported` and never
-   loaded until it is classified as holding no personal data and added there.
+   loaded until it is classified as holding no personal data and added there. Approval covers
+   the columns too: a part whose columns differ from the approved list is refused, and only the
+   approved columns are selected. A mart taken off the list is dropped from the warehouse in the
+   next load's transaction (`dropped`), and `unchanged` is never reported while one remains.
    The load refuses a key outside
    `control/manifests/gold/source=book-job-data/domain=jobs/`, a manifest that is not jobs Gold,
    one that lists a mart twice or does not list exactly the published marts (`JOBS_MARTS`), a part key other than
@@ -43,7 +46,11 @@ as R2 Gold. Done when the row counts in MotherDuck equal the Gold manifest count
    in the warehouse and one fails. Restoring an older run on purpose is `--manifest-key` without
    the flag, which never reads the pointer.
    Tables are addressed as `"<catalog>"."jobs"."<mart>"`, so an attached database named `jobs`
-   cannot shadow the schema.
+   cannot shadow the schema. When the same Gold run is re-published, the `unchanged` path still
+   appends a log row with the newer pointer key (no mart is rewritten), so the watermark moves.
+   The workflow step also skips (`skipped_stale_revision`) unless its commit is main's head, so
+   "Re-run all jobs" on an old run, which rebuilds Gold with old code and a new publish time,
+   cannot write the warehouse.
 8. The `warehouse` job in `jobs-marts.yml` runs after `build` (same gate as `bi`: exit 0 or 3).
    A failed or cancelled load adds `jobs-warehouse` to the `jobs-marts` heartbeat. Gold and the
    BI site do not depend on it. Without the secret the job reports `skipped_no_token` before
