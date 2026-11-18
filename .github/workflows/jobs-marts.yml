@@ -186,7 +186,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Load jobs Gold into MotherDuck
+      - name: Load jobs Gold into MotherDuck and check Preset parity
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.JOB_DATA_R2_SECRET_ACCESS_KEY }}
@@ -224,6 +224,22 @@ jobs:
           jq '{status, gold_run_id, warehouse, loaded_rows,
                error: (if .error then (.error | split(":")[0]) else null end)}' "$RUNNER_TEMP/warehouse.json" \
             | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$code" != 0 ]; then exit $code; fi
+          # Only a warehouse that holds this run is checked (skipped_not_latest also exits 0).
+          case "$(jq -r .status "$RUNNER_TEMP/warehouse.json")" in
+            loaded|unchanged) ;;
+            *) exit 0 ;;
+          esac
+          # ADR-0016 P3: the Preset dataset SQL must show what jobs-insights shows for this run
+          # (preset_parity.py). Mismatch names only, never values; skipped when the load was skipped.
+          set +e
+          .venv/bin/python infra/scripts/data_lake/preset_parity.py --manifest-key "$MANIFEST_KEY" \
+            > "$RUNNER_TEMP/parity.json" 2> "$RUNNER_TEMP/parity.err"
+          code=$?
+          set -e
+          jq '{status, gold_run_id, mismatches, dashboard_export, dataset_matching_days, dashboard_matching_since,
+               dashboard_matching_days, p3_parity_met, error}' \
+            "$RUNNER_TEMP/parity.json" | tee -a "$GITHUB_STEP_SUMMARY"
           exit $code
 
   heartbeat:
