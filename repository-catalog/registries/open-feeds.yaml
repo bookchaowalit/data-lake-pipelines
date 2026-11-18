@@ -18,6 +18,7 @@
 #   enabled      false keeps a row documented but not fetched; say why in `note`
 #   max_items    items kept per fetch (default 300, up to 5000); the rest are counted as items_truncated
 #   json.changes fields whose value is part of the item version (a revised value lands as a new row)
+#   per_day      (json/html) one observation per UTC day: a repo trending again or today's HN points is a new row
 #   paths        dot paths; a key that contains dots: _meta["io.example/official"].publishedAt
 #
 # Rules (same guardrails as source-coverage.yaml): free, keyless, public data only; no login, paywall, CAPTCHA or
@@ -240,6 +241,7 @@ feeds:
     link: url
     time: created_at_i
     keep: [points, num_comments, objectID]
+    per_day: true
 - id: hn-show
   name: Show HN newest
   kind: json
@@ -252,6 +254,7 @@ feeds:
     link: url
     time: created_at_i
     keep: [points, num_comments, objectID]
+    per_day: true
   every_hours: 3
 - id: npm-mcp
   name: npm packages tagged mcp
@@ -329,6 +332,7 @@ feeds:
     title: h2 a
     link: h2 a
     fields: {description: p, language: '[itemprop=programmingLanguage]', stars_today: span.d-inline-block.float-sm-right}
+    per_day: true
 - id: gh-trending-python
   name: GitHub trending python
   kind: html
@@ -340,6 +344,7 @@ feeds:
     title: h2 a
     link: h2 a
     fields: {description: p, stars_today: span.d-inline-block.float-sm-right}
+    per_day: true
 - id: gh-trending-typescript
   name: GitHub trending typescript
   kind: html
@@ -351,6 +356,7 @@ feeds:
     title: h2 a
     link: h2 a
     fields: {description: p, stars_today: span.d-inline-block.float-sm-right}
+    per_day: true
 - id: gh-trending-rust
   name: GitHub trending rust
   kind: html
@@ -362,6 +368,7 @@ feeds:
     title: h2 a
     link: h2 a
     fields: {description: p, stars_today: span.d-inline-block.float-sm-right}
+    per_day: true
 - id: gh-trending-go
   name: GitHub trending go
   kind: html
@@ -373,6 +380,7 @@ feeds:
     title: h2 a
     link: h2 a
     fields: {description: p, stars_today: span.d-inline-block.float-sm-right}
+    per_day: true
 - {id: openai-news, name: OpenAI news, kind: rss, url: 'https://openai.com/news/rss.xml', category: ai, lang: en}
 - {id: deepmind-blog, name: Google DeepMind blog, kind: rss, url: 'https://deepmind.google/blog/rss.xml', category: ai, lang: en}
 - {id: google-ai-blog, name: Google AI blog, kind: rss, url: 'https://blog.google/technology/ai/rss/', category: ai, lang: en}

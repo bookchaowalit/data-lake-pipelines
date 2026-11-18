@@ -56,7 +56,10 @@ a row to `repository-catalog/registries/open-feeds.yaml`.
   with the never-fetched and longest-waiting feeds first; a feed still in flight at the hard stop is
   recorded as `abandoned at the run deadline` so it cannot jump the queue every run. The failure
   ratio counts attempted feeds, and a run where feeds were due but none finished exits 3.
-- A 429/503 with a `Retry-After` longer than our 3 s pause is not retried in the same run.
+- A 429/503 with a `Retry-After` (seconds or an HTTP date) longer than our 3 s pause is not retried
+  in the same run.
+- `per_day: true` (GitHub trending, Hacker News) stores one observation per UTC day, so a repo that
+  trends again or today's points and comment count land as new rows.
 - Safety: redirects are followed by the collector one hop at a time (a 3xx body is never read), and
   every hop, robots.txt included, must be https and off `BLOCKED_HOSTS` (hostnames normalised). The
   HTTP client's network backend does the only DNS lookup, refuses the connection unless every address
@@ -179,7 +182,7 @@ year or more a per-day manifest index is the next step if `report` gets slow. An
 
 ## Tests
 
-`infra/tests/data_lake/open_feeds_test.py` (offline, 56 tests): registry validation (https only,
+`infra/tests/data_lake/open_feeds_test.py` (offline, 58 tests): registry validation (https only,
 unknown fields, required json/html specs, duplicate ids, blocked hosts, max_items) and the shipped
 registry (≥ 500 enabled, no blocked host enabled, every disabled row has a note); HTML page is not a
 feed, empty feed is ok, links resolve against the final URL; JSON rows without id skipped, `changes`

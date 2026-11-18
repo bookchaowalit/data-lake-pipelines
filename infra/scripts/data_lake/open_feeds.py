@@ -170,6 +170,12 @@ class Feed:
 
 def blocked_host(host: str) -> bool:
     host = host.strip().rstrip(".").lower()
+    try:
+        host = host.encode("idna").decode(
+            "ascii"
+        )  # the A-label the connection resolves
+    except UnicodeError:
+        return True  # a name that cannot be encoded is never fetched
     return any(host == b or host.endswith("." + b) for b in BLOCKED_HOSTS)
 
 
@@ -397,9 +403,18 @@ def http_fetch(
                         try:
                             retry_after = float(header)
                         except ValueError:
-                            retry_after = (
-                                3600.0  # an HTTP date: certainly longer than our pause
-                            )
+                            from email.utils import parsedate_to_datetime
+
+                            try:
+                                when = parsedate_to_datetime(header)
+                                if when.tzinfo is None:
+                                    when = when.replace(tzinfo=timezone.utc)
+                                retry_after = max(
+                                    0.0,
+                                    (when - datetime.now(timezone.utc)).total_seconds(),
+                                )
+                            except (TypeError, ValueError):
+                                retry_after = None
                     raise FeedError(
                         f"HTTP {resp.status_code}",
                         status=resp.status_code,
@@ -1054,8 +1069,11 @@ def build_rows(
         seen_set = set() if replay else set(seen)
         fresh: list[str] = []
         current: list[str] = []
+        per_day = bool(feed.spec.get("per_day"))
         for item in res.items:
-            h = _hash(item["guid"])
+            # per_day: one observation per UTC day (a repo trending again tomorrow, HN points of
+            # today), instead of one row for the item's whole life.
+            h = _hash(f"{item['guid']}@{fetched_at[:10]}" if per_day else item["guid"])
             current.append(h)
             if h in seen_set or h in fresh:
                 continue
@@ -1135,8 +1153,15 @@ def lake_fingerprint(data_lake_uri: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
-def _legacy_fingerprint(data_lake_uri: str) -> str:
-    """URI-only fingerprint written before 2026-11-18 17:00 UTC; accepted once, then rewritten."""
+LEGACY_FINGERPRINT_UNTIL = datetime(2026, 11, 20, tzinfo=timezone.utc)
+
+
+def _legacy_fingerprint(data_lake_uri: str) -> str | None:
+    """URI-only fingerprint of states written before 2026-11-18 17:00 UTC (only the live R2 run
+    wrote them). Accepted until LEGACY_FINGERPRINT_UNTIL so the live state carries over once; after
+    that an endpoint-less match is never trusted for an S3 lake."""
+    if _now() >= LEGACY_FINGERPRINT_UNTIL:
+        return None
     return hashlib.sha256(
         data_lake_uri.strip().rstrip("/").encode("utf-8")
     ).hexdigest()[:16]

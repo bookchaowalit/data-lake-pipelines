@@ -715,6 +715,21 @@ class RunTest(unittest.TestCase):
         )
         self.assertEqual([i["guid"] for i in res.items], ["4", "3"])
 
+    def test_per_day_observations(self):
+        body = json.dumps([{"a": 1}]).encode()
+        f = feed(kind="json", spec={"items": "", "id": "a", "per_day": True})
+        res = fetch_feed(
+            f, FakeFetch({"https://ex.test/feed": body}), {}, None, retry_pause=0
+        )
+        items, _, state = build_rows([res], {}, "2026-11-18T10:00:00+00:00")
+        again, _, state = build_rows([res], state, "2026-11-18T11:00:00+00:00")
+        tomorrow, _, _ = build_rows([res], state, "2026-11-19T10:00:00+00:00")
+        self.assertEqual((len(items), len(again), len(tomorrow)), (1, 0, 1))
+
+    def test_idna_and_unencodable_hosts(self):
+        self.assertTrue(of.blocked_host("\u0000bad..name"))
+        self.assertFalse(of.blocked_host("b\u00fccher.example"))
+
     def test_overdue_feeds_go_first(self):
         feeds = [feed(id="new1"), feed(id="old1"), feed(id="mid1")]
         state = {
