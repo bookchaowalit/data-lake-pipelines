@@ -69,6 +69,12 @@ MAX_ITEMS_PER_FEED = (
 )
 MAX_ITEMS_CAP = 5000
 FEED_DEADLINE_SECONDS = 60.0  # wall clock for one response (slow-drip bodies included)
+RUN_BUDGET_SECONDS = (
+    15 * 60
+)  # fetching stops here; the rest stay due (the workflow cap is 25 min)
+BATCH_BYTES = (
+    24 * 1024 * 1024
+)  # one Bronze batch stays well under the lake's 64 MiB object cap
 TITLE_CAP = 500
 SUMMARY_CAP = 2000
 LINK_CAP = 2048
@@ -262,9 +268,36 @@ class Response:
     final_url: str = ""
 
 
-# fetch(url, headers, follow_redirects) -> Response. With follow_redirects=False a 3xx comes back as a
-# Response (status 3xx, final_url = the Location) so the caller can check each hop (robots.txt).
-Fetch = Callable[..., Response]
+# fetch(url, headers) -> Response. It never follows a redirect: a 3xx comes back as a Response
+# (status 3xx, final_url = the Location), so _follow checks every hop before it is requested.
+Fetch = Callable[[str, dict[str, str]], Response]
+REDIRECTS = (301, 302, 303, 307, 308)
+MAX_HOPS = 5
+
+
+def _public_host(host: str, cache: dict[str, bool], lock: threading.Lock) -> bool:
+    """Every address of `host` is a public (global) IP: no loopback, link-local or private
+    network reachable from the runner can be fetched, whatever a redirect says. A failed DNS
+    lookup is a transient error (retried, never cached)."""
+    import ipaddress
+    import socket
+
+    with lock:
+        if host in cache:
+            return cache[host]
+    try:
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except OSError:
+        raise FeedError("ConnectError: DNS lookup failed") from None
+    try:
+        ok = bool(infos) and all(
+            ipaddress.ip_address(str(info[4][0])).is_global for info in infos
+        )
+    except ValueError:
+        ok = False
+    with lock:
+        cache[host] = ok
+    return ok
 
 
 def http_fetch(
@@ -274,34 +307,31 @@ def http_fetch(
 ) -> Fetch:
     import httpx
 
-    def _stay_https(request: "httpx.Request") -> None:
-        # Every hop of a redirect chain is checked: no http://, file:// or private scheme.
-        if request.url.scheme != "https":
-            raise FeedError("redirect left https")
-
     client = httpx.Client(
-        follow_redirects=True,
-        max_redirects=5,
+        follow_redirects=False,
         timeout=timeout,
         headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
-        event_hooks={"request": [_stay_https]},
     )
+    public: dict[str, bool] = {}
+    lock = threading.Lock()
 
-    def fetch(
-        url: str, headers: dict[str, str], follow_redirects: bool = True
-    ) -> Response:
+    def fetch(url: str, headers: dict[str, str]) -> Response:
         if not _https(url):
             raise FeedError("url must be https")
+        host = urllib.parse.urlsplit(url).hostname or ""
+        if blocked_host(host):
+            raise FeedError("host is skip/blocked-legal")
+        if not _public_host(host, public, lock):
+            raise FeedError("host is not on the public internet")
         started = time.monotonic()
         try:
-            with client.stream(
-                "GET", url, headers=headers, follow_redirects=follow_redirects
-            ) as resp:
+            with client.stream("GET", url, headers=headers) as resp:
                 if resp.status_code == 304:
-                    return Response(304, b"", final_url=str(resp.url))
-                if not follow_redirects and resp.is_redirect:
+                    return Response(304, b"", final_url=url)
+                if resp.status_code in REDIRECTS:
+                    # The 3xx body is never read.
                     location = urllib.parse.urljoin(
-                        str(resp.url), resp.headers.get("location", "")
+                        url, resp.headers.get("location", "")
                     )
                     return Response(resp.status_code, b"", final_url=location)
                 if resp.status_code >= 400:
@@ -313,6 +343,7 @@ def http_fetch(
                     if size > max_bytes:
                         raise FeedError("body over size cap", status=resp.status_code)
                     if time.monotonic() - started > deadline:
+                        # Checked per chunk; a stalled read still ends at the I/O timeout.
                         raise FeedError(
                             "ReadTimeout: feed deadline", status=resp.status_code
                         )
@@ -322,7 +353,7 @@ def http_fetch(
                     b"".join(chunks),
                     etag=resp.headers.get("etag"),
                     last_modified=resp.headers.get("last-modified"),
-                    final_url=str(resp.url),
+                    final_url=url,
                 )
         except FeedError:
             raise
@@ -330,6 +361,32 @@ def http_fetch(
             raise FeedError(type(exc).__name__) from None
 
     return fetch  # one shared client; httpx.Client is thread-safe
+
+
+def _follow(
+    fetch: Fetch,
+    url: str,
+    conditional: tuple[str | None, dict[str, str]] = (None, {}),
+    robots: "Robots | None" = None,
+) -> Response:
+    """Follow redirects one hop at a time. Every hop must stay https and off blocked hosts, and
+    with `robots` (html scrapes) be allowed by robots.txt. Conditional headers are sent only to the
+    URL that issued them. The returned final_url is the URL that answered."""
+    validator_url, validators = conditional
+    target = url
+    for _ in range(MAX_HOPS + 1):
+        if not _https(target):
+            raise FeedError("redirect left https")
+        if blocked_host(urllib.parse.urlsplit(target).hostname or ""):
+            raise FeedError("redirect to a skip/blocked-legal host")
+        if robots is not None and not robots.allowed(target):
+            raise FeedError("robots.txt disallows the redirect target")
+        resp = fetch(target, validators if target == validator_url else {})
+        if resp.status not in REDIRECTS:
+            resp.final_url = target
+            return resp
+        target = resp.final_url
+    raise FeedError("too many redirects")
 
 
 class Robots:
@@ -348,7 +405,7 @@ class Robots:
                 rules = urllib.robotparser.RobotFileParser()
                 result: urllib.robotparser.RobotFileParser | None = rules
                 try:
-                    resp = self._fetch(origin + "/robots.txt", {})
+                    resp = _follow(self._fetch, origin + "/robots.txt")
                     rules.parse(resp.body.decode("utf-8", "replace").splitlines())
                 except FeedError as exc:
                     # 404 means no rules (allowed); anything else (403, timeout) means we do not know.
@@ -435,6 +492,14 @@ def parse_rss(body: bytes, feed: Feed, base: str | None = None) -> list[dict[str
     if not parsed.get("version"):
         # An HTML error or maintenance page answered 200: not a feed, so `seen` must not be reset.
         raise FeedError("not a feed")
+    import xml.sax
+
+    if not parsed.entries and isinstance(
+        parsed.get("bozo_exception"), xml.sax.SAXException
+    ):
+        # Truncated or broken XML with no entries is a failure, not an empty feed (an encoding
+        # warning on a feed that still has entries is fine).
+        raise FeedError("malformed feed")
     base = base or feed.url
     items = []
     for entry in parsed.entries:
@@ -660,44 +725,24 @@ class FeedResult:
     last_modified: str | None = None
     skipped: int = 0  # rows without a usable id
     truncated: int = 0  # items past the feed's max_items
-
-
-MAX_HOPS = 5
+    final_url: str | None = None  # the URL that answered (validators belong to it)
 
 
 def _get(
     fetch: Fetch,
     url: str,
-    headers: dict[str, str],
+    conditional: tuple[str | None, dict[str, str]],
     retry_pause: float,
     robots: "Robots | None" = None,
 ) -> Response:
-    """One retry for a transient failure (network blip, 429/5xx); everything else fails at once.
-
-    With `robots`, redirects are followed here one hop at a time and every hop is checked
-    against robots.txt (html scrapes)."""
-
-    def once(target: str) -> Response:
-        if robots is None:
-            return fetch(target, headers)
-        for _ in range(MAX_HOPS):
-            resp = fetch(target, headers, follow_redirects=False)
-            if resp.status not in (301, 302, 303, 307, 308):
-                return resp
-            target = resp.final_url
-            if not _https(target):
-                raise FeedError("redirect left https")
-            if not robots.allowed(target):
-                raise FeedError("robots.txt disallows the redirect target")
-        raise FeedError("too many redirects")
-
+    """One retry for a transient failure (network blip, 429/5xx); everything else fails at once."""
     try:
-        return once(url)
+        return _follow(fetch, url, conditional, robots)
     except FeedError as exc:
         if not str(exc).startswith(TRANSIENT):
             raise
     time.sleep(retry_pause)
-    return once(url)
+    return _follow(fetch, url, conditional, robots)
 
 
 def _encodable(items: list[dict[str, Any]]) -> None:
@@ -734,20 +779,22 @@ def fetch_feed(
             bytes=0,
         )
     headers = {}
-    # Validators belong to the URL that issued them: after a registry URL change, fetch in full.
-    same_url = feed_state.get("url") in (None, feed.url)
-    if same_url and feed_state.get("etag"):
+    # Validators belong to the URL that issued them (after redirects); they go to that URL only.
+    validator_url = feed_state.get("validator_url") or feed_state.get("url") or feed.url
+    if feed_state.get("etag"):
         headers["If-None-Match"] = feed_state["etag"]
-    if same_url and feed_state.get("last_modified"):
+    if feed_state.get("last_modified"):
         headers["If-Modified-Since"] = feed_state["last_modified"]
+    answered: int | None = None
     try:
         resp = _get(
             fetch,
             feed.url,
-            headers,
+            (validator_url, headers),
             retry_pause,
             robots if feed.kind == "html" else None,
         )
+        answered = resp.status
         if resp.status == 304:
             return done(
                 "not-modified",
@@ -757,6 +804,7 @@ def fetch_feed(
                 bytes=0,
                 etag=feed_state.get("etag"),
                 last_modified=feed_state.get("last_modified"),
+                final_url=resp.final_url,
             )
         parsed = PARSERS[feed.kind](resp.body, feed, resp.final_url or feed.url)
         usable = [i for i in parsed if i.get("guid")]
@@ -764,11 +812,15 @@ def fetch_feed(
         _encodable(items)
     except FeedError as exc:
         return done(
-            "error", http_status=exc.status, items=[], error=str(exc)[:120], bytes=0
+            "error",
+            http_status=exc.status or answered,
+            items=[],
+            error=str(exc)[:120],
+            bytes=0,
         )
     except Exception as exc:  # noqa: BLE001 — one broken feed must never stop the run
         return done(
-            "error", http_status=None, items=[], error=type(exc).__name__, bytes=0
+            "error", http_status=answered, items=[], error=type(exc).__name__, bytes=0
         )
     return done(
         "ok",
@@ -780,6 +832,7 @@ def fetch_feed(
         last_modified=resp.last_modified,
         skipped=len(parsed) - len(usable),
         truncated=len(usable) - len(items),
+        final_url=resp.final_url,
     )
 
 
@@ -790,9 +843,15 @@ def fetch_all(
     *,
     workers: int = MAX_WORKERS,
     pause: float = HOST_PAUSE_SECONDS,
+    budget: float = RUN_BUDGET_SECONDS,
 ) -> list[FeedResult]:
-    """Hosts in parallel, feeds of one host one after another with a pause (politeness)."""
+    """Hosts in parallel, feeds of one host one after another with a pause (politeness).
+
+    Fetching stops at `budget` seconds: feeds not started by then are left out of the results, so
+    their state is untouched and they stay due for the next run (a slow host cannot hold the run
+    past the workflow timeout and lose what the other hosts returned)."""
     robots = Robots(fetch)
+    stop_at = time.monotonic() + budget
     by_host: dict[str, list[Feed]] = defaultdict(list)
     for feed in feeds:
         by_host[feed.host].append(feed)
@@ -802,6 +861,8 @@ def fetch_all(
         for index, feed in enumerate(group):
             if index:
                 time.sleep(max(pause, HOST_MIN_PAUSE.get(feed.host, 0.0)))
+            if time.monotonic() >= stop_at:
+                break
             out.append(
                 fetch_feed(
                     feed, fetch, state.get(feed.id) or {}, robots, retry_pause=pause * 3
@@ -867,7 +928,8 @@ def build_rows(
             entry["errors"] = 0
             entry["etag"] = res.etag
             entry["last_modified"] = res.last_modified
-            entry["url"] = feed.url
+            entry["validator_url"] = res.final_url or feed.url
+            entry.pop("url", None)
         else:
             entry["errors"] = int(prev.get("errors") or 0) + 1
         next_state[feed.id] = entry
@@ -892,30 +954,62 @@ def build_rows(
     return items, runs, next_state
 
 
-def read_state(path: Path) -> dict[str, Any]:
-    """The state file, or {} when it is missing or unreadable (the run then re-sends current items)."""
+def lake_fingerprint(data_lake_uri: str) -> str:
+    """Names the lake a state belongs to without storing the URI (no bucket names in the cache)."""
+    return hashlib.sha256(
+        data_lake_uri.strip().rstrip("/").encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def read_state(path: Path, lake: str | None = None) -> dict[str, Any]:
+    """The state file, or {} when it is missing, unreadable or belongs to another lake (the run
+    then re-sends current items)."""
     import gzip
 
     try:
         doc = json.loads(gzip.decompress(path.read_bytes()))
     except (OSError, EOFError, ValueError):
         return {}
-    feeds = doc.get("feeds") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict) or (lake is not None and doc.get("lake") != lake):
+        return {}
+    feeds = doc.get("feeds")
     return feeds if isinstance(feeds, dict) else {}
 
 
-def write_state(path: Path, feeds: dict[str, Any], updated: str) -> None:
+def write_state(
+    path: Path, feeds: dict[str, Any], updated: str, lake: str | None = None
+) -> None:
     import gzip
 
     path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(
-        {"version": 1, "updated": updated, "feeds": feeds},
+        {"version": 1, "updated": updated, "lake": lake, "feeds": feeds},
         sort_keys=True,
         separators=(",", ":"),
     )
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_bytes(gzip.compress(body.encode("utf-8"), mtime=0))
     os.replace(tmp, path)
+
+
+def batches(
+    rows: list[dict[str, Any]], limit: int = BATCH_BYTES
+) -> list[list[dict[str, Any]]]:
+    """Split rows so each Bronze batch's JSONL stays under `limit` bytes (a cache miss can bring
+    tens of thousands of items at once)."""
+    out: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    size = 0
+    for row in rows:
+        n = len(json.dumps(row, ensure_ascii=False, sort_keys=True).encode("utf-8")) + 1
+        if current and size + n > limit:
+            out.append(current)
+            current, size = [], 0
+        current.append(row)
+        size += n
+    if current:
+        out.append(current)
+    return out
 
 
 def capture(
@@ -930,15 +1024,17 @@ def capture(
     force: bool = False,
     workers: int = MAX_WORKERS,
     pause: float = HOST_PAUSE_SECONDS,
+    budget: float = RUN_BUDGET_SECONDS,
 ) -> dict[str, Any]:
     from data_lake.ingest import ingest_records
 
     now = now or _now()
     fetched_at = now.isoformat(timespec="seconds")
-    state = read_state(state_path)
+    lake = lake_fingerprint(data_lake_uri)
+    state = read_state(state_path, lake)
     active = [f for f in feeds if f.enabled and (only is None or f.id in only)]
     todo = [f for f in active if force or due(f, state, now)]
-    results = fetch_all(todo, fetch, state, workers=workers, pause=pause)
+    results = fetch_all(todo, fetch, state, workers=workers, pause=pause, budget=budget)
     items, runs, next_state = build_rows(results, state, fetched_at)
     counts: defaultdict[str, int] = defaultdict(int)
     for r in results:
@@ -954,6 +1050,7 @@ def capture(
         "state_loaded": bool(state),
         "feeds_registered": len(feeds),
         "feeds_due": len(todo),
+        "feeds_deferred": len(todo) - len(results),
         "ok": counts["ok"],
         "not_modified": counts["not-modified"],
         "errors": counts["error"],
@@ -967,7 +1064,7 @@ def capture(
     }
     if dry_run:
         return report
-    manifests = {}
+    manifests: dict[str, list[str]] = {}
     common = dict(
         source=SOURCE,
         domain=DOMAIN,
@@ -977,26 +1074,23 @@ def capture(
         privacy_class="public",
         retention_class="operational",
     )
-    if items:
-        res = ingest_records(
-            items,
-            dataset=DATASET_ITEMS,
-            metadata={"provider": SOURCE, "registry": "open-feeds.yaml"},
-            **common,
-        )
-        manifests[DATASET_ITEMS] = res["manifest_key"]
-    if runs:
-        res = ingest_records(
-            runs, dataset=DATASET_RUNS, metadata={"provider": SOURCE}, **common
-        )
-        manifests[DATASET_RUNS] = res["manifest_key"]
+    for dataset, rows, meta in (
+        (DATASET_ITEMS, items, {"provider": SOURCE, "registry": "open-feeds.yaml"}),
+        (DATASET_RUNS, runs, {"provider": SOURCE}),
+    ):
+        for batch in batches(rows):
+            res = ingest_records(batch, dataset=dataset, metadata=meta, **common)
+            manifests.setdefault(dataset, []).append(res["manifest_key"])
     # State last: if this write fails the next run re-sends the same items, and Silver keeps one row
     # per `id` (source_record_id), so the worst case is a duplicate Bronze row, never a lost item.
     # Rows of feeds removed from the registry are dropped here (the full registry decides, never
     # an --only selection).
     known = {f.id for f in feeds}
     write_state(
-        state_path, {k: v for k, v in next_state.items() if k in known}, fetched_at
+        state_path,
+        {k: v for k, v in next_state.items() if k in known},
+        fetched_at,
+        lake,
     )
     report["manifests"] = manifests
     return report
@@ -1074,20 +1168,24 @@ def opml_rows(
 
 
 def committed_parts(
-    data_lake_uri: str, dataset: str, days: int | None = None
+    data_lake_uri: str,
+    dataset: str,
+    days: int | None = None,
+    manifests: dict[str, bytes] | None = None,
 ) -> list[str]:
     """Parquet parts of `dataset` that a commit manifest names (ADR-0001: the manifest is the commit
-    marker, so a part left by a run that stopped before its manifest is never read)."""
+    marker, so a part left by a run that stopped before its manifest is never read). Pass the
+    `manifests` of one listing to reuse it for several datasets."""
     from data_lake.storage import ObjectStore
 
     store = ObjectStore(data_lake_uri)
+    if manifests is None:
+        manifests = store.get_prefix(f"control/manifests/source={SOURCE}/")
     cutoff = None
     if days is not None:
         cutoff = (_now() - timedelta(days=days + 1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     parts = []
-    for key, body in sorted(
-        store.get_prefix(f"control/manifests/source={SOURCE}/").items()
-    ):
+    for key, body in sorted(manifests.items()):
         if "/batch_id=" not in key or not key.endswith(".json"):
             continue
         try:
@@ -1146,8 +1244,13 @@ def report(
 
     since = f"now() - INTERVAL {int(days)} DAY"
     view = f"WITH items AS ({ITEMS_VIEW}) "
+    from data_lake.storage import ObjectStore
+
     out: dict[str, Any] = {"days": days}
-    items = committed_parts(data_lake_uri, DATASET_ITEMS, days)
+    listing = ObjectStore(data_lake_uri).get_prefix(
+        f"control/manifests/source={SOURCE}/"
+    )
+    items = committed_parts(data_lake_uri, DATASET_ITEMS, days, listing)
     if items:
         out["totals"] = query_parquet(
             items,
@@ -1192,7 +1295,7 @@ def report(
             if items
             else []
         )
-    runs = committed_parts(data_lake_uri, DATASET_RUNS, days)
+    runs = committed_parts(data_lake_uri, DATASET_RUNS, days, listing)
     out["failing_feeds"] = query_parquet(runs, RUNS_FAILING) if runs else []
     return out
 

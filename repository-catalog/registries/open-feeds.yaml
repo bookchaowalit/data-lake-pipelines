@@ -466,6 +466,7 @@ feeds:
     link: properties.url
     time: properties.time
     keep: [properties.mag, properties.place, properties.tsunami, properties.alert, geometry.coordinates]
+    changes: [properties.updated]
   licence: USGS public domain
 - id: nasa-eonet
   name: NASA EONET open natural events

@@ -47,15 +47,21 @@ a row to `repository-catalog/registries/open-feeds.yaml`.
 - Politeness: hosts run in parallel (12 workers), feeds of one host run one after another with a 1 s
   pause (3 s for arXiv, as its terms ask); a descriptive User-Agent; conditional GET
   (`If-None-Match` / `If-Modified-Since`, sent only to the URL that issued them); one retry after 3 s
-  for a transient failure (network error, 429, 5xx); 25 s I/O timeout plus a 60 s wall-clock deadline
-  per response (a slow-drip body cannot hold the run); 8 MB body cap.
-- Safety: https only, every redirect hop must stay https; TLS verification is never turned off;
+  for a transient failure (network or DNS error, 429, 5xx); 25 s I/O timeout plus a 60 s wall-clock
+  deadline per response checked per chunk (a slow-drip body cannot hold the run); 8 MB body cap.
+- Run budget: fetching stops after 15 minutes (workflow cap 25); feeds not started by then are left
+  out (`feeds_deferred`), keep their state and stay due, and everything already fetched is written.
+- Safety: redirects are followed by the collector one hop at a time (a 3xx body is never read), and
+  every hop, robots.txt included, must be https, off `BLOCKED_HOSTS`, and resolve only to public
+  (global) IP addresses, so no loopback, private or cloud-metadata address can be reached; TLS
+  verification is never turned off;
   XML with an `<!ENTITY` declaration is refused (no entity bombs or external entities) and feedparser
   only ever gets a byte stream (never a string it could read as a path or URL); `kind: html`
   checks robots.txt for our User-Agent on every run and on every redirect hop (redirects are followed
   one at a time), and a host whose robots.txt cannot be read (403, timeout) is skipped (`robots-denied`).
-- A 200 answer that is not RSS/Atom/RDF (an HTML maintenance page) is an error, so it cannot reset
-  the feed's dedupe list; a valid feed with no entries is `ok`.
+- A 200 answer that is not RSS/Atom/RDF (an HTML maintenance page) or broken XML with no entries
+  (a truncated body) is an error, so it cannot reset the feed's dedupe list; a valid feed with no
+  entries is `ok`. The HTTP status of such an answer is kept in `feed_runs`.
 - One broken feed never stops a run: parse errors and text that is not valid UTF-8 are recorded in
   `feed_runs` for that feed only.
 
@@ -80,7 +86,8 @@ Snapshots (`json.snapshot: true`, for example exchange rates or a weather foreca
 document, and only when its content hash changes.
 
 Revisions: a JSON row whose values can change after publication (World Bank back-fills a `null` or
-revises a year) lists those fields under `json.changes`; the revised row then lands as a new item, and
+revises a year; USGS revises magnitude, place or alert and bumps `properties.updated`) lists those
+fields under `json.changes`; the revised row then lands as a new item, and
 the latest `fetched_at` per indicator and date is the current value.
 
 `feed_runs` (one row per feed fetched): `id` (`<feed_id>@<fetched_at>`), `feed_id`, `category`,
@@ -102,6 +109,10 @@ stored; a parser fix is replayed by re-fetching (feeds keep their recent items) 
   including partial failures). `run --only` fetches the chosen feeds but keeps the state of the
   others; an unknown id is an error. Locally it defaults to `data/runtime/open-feeds/state.json.gz` (`--state-file`,
   `OPEN_FEEDS_STATE`).
+- The state names the lake it belongs to (a hash of the lake URI, no bucket name); pointed at another
+  lake it starts empty, so a test lake's dedupe never hides items from the real one.
+- Bronze batches are split at 24 MB of JSONL (the lake refuses objects over 64 MiB), so a cache miss
+  that brings ~45 k items at once still commits.
 - A lost state (cache evicted after 7 days without runs) only re-sends what the feeds still show:
   Bronze gets extra rows with the same `id`, and Silver/`report` keep one row per `id`.
 - The state is written after Bronze, so a failed state write can only duplicate, never lose items.
@@ -136,7 +147,9 @@ stored; a parser fix is replayed by re-fetching (feeds keep their recent items) 
 
 It prints items by category and by feed, the feeds failing on their latest run (with HTTP status), and
 the newest titles matching `--search` (one row per item id). It reads only the Parquet parts that a
-commit manifest names (ADR-0001), so a part left by an interrupted run is never counted. Any other question is SQL on
+commit manifest names (ADR-0001), so a part left by an interrupted run is never counted. The manifest
+prefix is listed once per report (one recursive copy); about 50 manifests a day accumulate, so after a
+year or more a per-day manifest index is the next step if `report` gets slow. Any other question is SQL on
 `bronze/domain=open-data/dataset=feed_items/**/*.parquet` (`json_extract_string(payload_json, '$.title')`).
 
 ## Adding a source
@@ -150,13 +163,15 @@ commit manifest names (ADR-0001), so a part left by an interrupted run is never 
 
 ## Tests
 
-`infra/tests/data_lake/open_feeds_test.py` (offline, 38 tests): registry validation (https only,
+`infra/tests/data_lake/open_feeds_test.py` (offline, 44 tests): registry validation (https only,
 unknown fields, required json/html specs, duplicate ids, blocked hosts, max_items) and the shipped
 registry (≥ 500 enabled, no blocked host enabled, every disabled row has a note); HTML page is not a
 feed, empty feed is ok, links resolve against the final URL; JSON rows without id skipped, `changes`
 versions, bracket paths, truncation counted, lone surrogates isolated; robots on every redirect hop;
-validators tied to their URL; HTTP status on errors; `--only` keeps other state; report with no items
-and report ignoring parts without a manifest; RSS, Atom, JSON (dot paths, composite ids, link templates, epoch
+validators tied to the final URL after a redirect; redirect to a blocked host never requested; HTTP
+status on errors and parse failures; truncated XML is an error; run budget defers unstarted feeds;
+batch splitting; state bound to one lake; `--only` keeps other state; report with no items and
+report ignoring parts without a manifest; USGS revisions; RSS, Atom, JSON (dot paths, composite ids, link templates, epoch
 times, snapshots) and HTML parsing; author never kept; entity bomb refused; due logic; dedupe across
 runs; conditional GET and 304; one retry for transient errors only; robots allow/deny/unknown;
 capture into a local lake (manifests, state, nothing due → no write, lost state → re-send); dry run

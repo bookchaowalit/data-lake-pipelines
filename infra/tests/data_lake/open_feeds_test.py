@@ -153,6 +153,8 @@ class RegistryTest(unittest.TestCase):
         # Reddit is `later` in source-coverage.yaml (Data API terms): never fetched from here.
         self.assertFalse([f.id for f in feeds if "reddit.com" in f.host])
         self.assertFalse([f.id for f in enabled if of.blocked_host(f.host)])
+        usgs = next(f for f in feeds if f.id == "usgs-quakes")
+        self.assertEqual(usgs.spec.get("changes"), ["properties.updated"])
         import yaml
 
         rows = yaml.safe_load(REGISTRY.read_text(encoding="utf-8"))["feeds"]
@@ -534,7 +536,92 @@ class RunTest(unittest.TestCase):
         self.assertEqual(fetch.calls[0][1], {})
         res = fetch_feed(feed(), fetch, {}, None, retry_pause=0)
         _, _, state = build_rows([res], {}, "t")
-        self.assertEqual(state["f1"]["url"], "https://ex.test/feed")
+        self.assertEqual(state["f1"]["validator_url"], "https://ex.test/feed")
+        # After a redirect the validators belong to the final URL and are sent there only.
+        moved = FakeFetch(
+            {
+                "https://ex.test/feed": Response(
+                    301, b"", final_url="https://cdn.test/feed"
+                ),
+                "https://cdn.test/feed": RSS,
+            }
+        )
+        res = fetch_feed(feed(), moved, {}, None, retry_pause=0)
+        _, _, state = build_rows([res], {}, "t")
+        self.assertEqual(state["f1"]["validator_url"], "https://cdn.test/feed")
+        fetch_feed(feed(), moved, state["f1"], None, retry_pause=0)
+        self.assertEqual(moved.calls[-2], ("https://ex.test/feed", {}))
+        self.assertEqual(moved.calls[-1][1], {"If-None-Match": '"v1"'})
+
+    def test_redirect_to_blocked_host_refused(self):
+        fetch = FakeFetch(
+            {
+                "https://ex.test/feed": Response(
+                    302, b"", final_url="https://www.reddit.com/r/x/.rss"
+                )
+            }
+        )
+        res = fetch_feed(feed(), fetch, {}, None, retry_pause=0)
+        self.assertEqual(res.status, "error")
+        self.assertEqual(len(fetch.calls), 1)  # the blocked host is never requested
+
+    def test_http_status_kept_when_parse_fails(self):
+        res = fetch_feed(
+            feed(),
+            FakeFetch({"https://ex.test/feed": b"<html><title>x</title></html>"}),
+            {},
+            None,
+            retry_pause=0,
+        )
+        self.assertEqual(
+            (res.status, res.http_status, res.error), ("error", 200, "not a feed")
+        )
+
+    def test_truncated_rss_is_an_error(self):
+        res = fetch_feed(
+            feed(),
+            FakeFetch(
+                {
+                    "https://ex.test/feed": b'<?xml version="1.0"?><rss version="2.0"><channel><title>T'
+                }
+            ),
+            {},
+            None,
+            retry_pause=0,
+        )
+        self.assertEqual((res.status, res.error), ("error", "malformed feed"))
+
+    def test_budget_defers_unstarted_feeds(self):
+        feeds = [feed(id=f"s{i}", url=f"https://slow.test/{i}") for i in range(3)]
+        results = of.fetch_all(
+            feeds,
+            FakeFetch({f"https://slow.test/{i}": RSS for i in range(3)}),
+            {},
+            pause=0,
+            budget=0,
+        )
+        self.assertEqual(results, [])  # nothing started: all stay due, state untouched
+
+    def test_batches_split_by_size(self):
+        rows = [{"id": str(i), "t": "x" * 100} for i in range(50)]
+        parts = of.batches(rows, limit=1000)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual(sum(len(p) for p in parts), 50)
+        self.assertEqual(of.batches([]), [])
+
+    def test_state_belongs_to_one_lake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "s.gz"
+            of.write_state(
+                sp, {"f1": {"seen": ["x"]}}, "t", of.lake_fingerprint("s3://a/b")
+            )
+            self.assertEqual(
+                of.read_state(sp, of.lake_fingerprint("s3://a/b")),
+                {"f1": {"seen": ["x"]}},
+            )
+            self.assertEqual(
+                of.read_state(sp, of.lake_fingerprint("s3://other/lake")), {}
+            )
 
     def test_http_status_kept_on_error(self):
         res = fetch_feed(
