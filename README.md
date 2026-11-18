@@ -27,9 +27,10 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
     silver.py (job.silver.v2, quarantine ≤ 2 % → job_postings_rejects, ตัด offline_fixture)
     → dbt build +path:models/marts/jobs (Silver part เดียวผ่าน var jobs_silver_part)
     → Gold gold/domain=jobs/dataset=<mart>/schema_version=1 + manifest control/manifests/gold/source=book-job-data/domain=jobs/
+  → warehouse: motherduck_load.py → MotherDuck empire_gold.jobs.<mart> (ADR-0016 P2; skipped_no_token จนกว่าจะมี secret MOTHERDUCK_TOKEN)
   → bi: jobs_bi_snapshot.py (ตรวจ sha256 ตาม manifest) → jobs_bi_site.py (static HTML, CSP เข้ม) → Cloudflare Pages
         jobs-insights.pages.dev หลัง Cloudflare Access (deploy เมื่อ <gold_run_id>@<commit> เปลี่ยน)
-  → heartbeat jobs-marts (5 ชม.; failed = stale / jobs-marts / jobs-bi)
+  → heartbeat jobs-marts (5 ชม.; failed = stale / jobs-marts / jobs-bi / jobs-warehouse)
 ```
 
 - Silver ทุกรอบเป็น snapshot เต็ม: อย่า glob ทุก part ให้ใช้ part เดียวจาก manifest
@@ -41,6 +42,9 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
   แล้วเขียน lineage JSON ไป `control/lineage/dagster/domain=jobs/`; ดูกราฟในเครื่องด้วย `uv sync --extra orchestration` แล้ว
   `PYTHONPATH=infra/scripts uv run --extra orchestration --with dagster-webserver==1.13.28 dagster dev -m data_lake.dagster_jobs`
   (webserver ใช้ดูในเครื่องเท่านั้น ไม่อยู่ใน lock และ job ตามรอบไม่ติดตั้ง)
+- MotherDuck (ADR-0016 P2, [`docs/specs/jobs-motherduck-load.md`](docs/specs/jobs-motherduck-load.md)): `motherduck_load.py` แทนที่ตาราง `jobs.<mart>`
+  ทั้งหมดใน transaction เดียวจาก Gold manifest (ตรวจ sha256 และ allow-list เฉพาะ jobs marts) แล้วเทียบจำนวนแถวกับ manifest;
+  รันซ้ำ Gold run เดิมได้ `unchanged`; ลองในเครื่องด้วย `--target /tmp/x.duckdb` แทน MotherDuck
 - lineage: `lake.silver-job-postings` → `lake.gold-jobs-marts` → `consumer.jobs-insights-site` ใน metadata catalog ของ architecture-docs
 
 ## Event plane: Kafka → Bronze (ADR-0008 M4)
