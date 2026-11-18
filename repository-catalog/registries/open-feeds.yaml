@@ -393,29 +393,29 @@ feeds:
     on 2026-11-18 probe: HTTP 429'}
 - {id: marktechpost, name: MarkTechPost, kind: rss, url: 'https://www.marktechpost.com/feed/', category: ai, lang: en}
 - {id: arxiv-cs-ai, name: arXiv cs.AI, kind: rss, url: 'https://rss.arxiv.org/rss/cs.AI', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
-    metadata CC0-1.0 (no PDFs)}
+    metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-cs-cl, name: arXiv cs.CL, kind: rss, url: 'https://rss.arxiv.org/rss/cs.CL', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
-    metadata CC0-1.0 (no PDFs)}
+    metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-cs-lg, name: arXiv cs.LG, kind: rss, url: 'https://rss.arxiv.org/rss/cs.LG', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
-    metadata CC0-1.0 (no PDFs)}
+    metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-cs-cv, name: arXiv cs.CV, kind: rss, url: 'https://rss.arxiv.org/rss/cs.CV', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
-    metadata CC0-1.0 (no PDFs)}
+    metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-cs-cr, name: arXiv cs.CR, kind: rss, url: 'https://rss.arxiv.org/rss/cs.CR', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
-    metadata CC0-1.0 (no PDFs)}
+    metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-cs-se, name: arXiv cs.SE, kind: rss, url: 'https://rss.arxiv.org/rss/cs.SE', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
-    metadata CC0-1.0 (no PDFs)}
+    metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-cs-cy, name: arXiv cs.CY, kind: rss, url: 'https://rss.arxiv.org/rss/cs.CY', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
-    metadata CC0-1.0 (no PDFs)}
+    metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-cs-hc, name: arXiv cs.HC, kind: rss, url: 'https://rss.arxiv.org/rss/cs.HC', category: research-papers, every_hours: 24, keep: full, lang: en, licence: arXiv
-    metadata CC0-1.0 (no PDFs)}
+    metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-stat-ml, name: arXiv stat.ML, kind: rss, url: 'https://rss.arxiv.org/rss/stat.ML', category: research-papers, every_hours: 24, keep: full, lang: en,
-  licence: arXiv metadata CC0-1.0 (no PDFs)}
+  licence: arXiv metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-econ-gn, name: arXiv econ.GN, kind: rss, url: 'https://rss.arxiv.org/rss/econ.GN', category: research-papers, every_hours: 24, keep: full, lang: en,
-  licence: arXiv metadata CC0-1.0 (no PDFs)}
+  licence: arXiv metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-q-fin-st, name: arXiv q-fin.ST, kind: rss, url: 'https://rss.arxiv.org/rss/q-fin.ST', category: research-papers, every_hours: 24, keep: full, lang: en,
-  licence: arXiv metadata CC0-1.0 (no PDFs)}
+  licence: arXiv metadata CC0-1.0 (no PDFs), max_items: 1000}
 - {id: arxiv-q-fin-tr, name: arXiv q-fin.TR, kind: rss, url: 'https://rss.arxiv.org/rss/q-fin.TR', category: research-papers, every_hours: 24, keep: full, lang: en,
-  licence: arXiv metadata CC0-1.0 (no PDFs), enabled: false, note: 'disabled on 2026-11-18 probe: answered but no items'}
+  licence: arXiv metadata CC0-1.0 (no PDFs), enabled: false, note: 'disabled on 2026-11-18 probe: answered but no items', max_items: 1000}
 - {id: cisa-advisories, name: CISA advisories, kind: rss, url: 'https://www.cisa.gov/cybersecurity-advisories/all.xml', category: security, lang: en}
 - {id: krebs, name: Krebs on Security, kind: rss, url: 'https://krebsonsecurity.com/feed/', category: security, lang: en}
 - {id: bleepingcomputer, name: BleepingComputer, kind: rss, url: 'https://www.bleepingcomputer.com/feed/', category: security, lang: en}

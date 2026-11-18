@@ -93,7 +93,7 @@ the latest `fetched_at` per indicator and date is the current value.
 `feed_runs` (one row per feed fetched): `id` (`<feed_id>@<fetched_at>`), `feed_id`, `category`,
 `fetched_at`, `status` (`ok` | `not-modified` | `error` | `robots-denied`), `http_status` (also on
 4xx/5xx errors; null only without an HTTP answer), `error` (short reason, no body), `items_seen`,
-`items_new`, `items_skipped`, `items_truncated` (past the row's `max_items`, default 300, CISA KEV 5000),
+`items_new`, `items_skipped`, `items_truncated` (past the row's `max_items`: default 300, which keeps the newest entries and drops only the archive of podcast-style feeds; arXiv 1000, CISA KEV 5000),
 `duration_ms`, `bytes`, `consecutive_errors`.
 
 Landing (ADR-0001 exception, owner request 2026-11-18): the landing object is the normalised JSONL of

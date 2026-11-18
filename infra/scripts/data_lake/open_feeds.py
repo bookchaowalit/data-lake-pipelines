@@ -300,6 +300,19 @@ def _public_host(host: str, cache: dict[str, bool], lock: threading.Lock) -> boo
     return ok
 
 
+def _peer_is_public(resp: Any) -> bool:
+    import ipaddress
+
+    stream = resp.extensions.get("network_stream")
+    addr = stream.get_extra_info("server_addr") if stream is not None else None
+    if not addr:
+        return False  # unknown peer: refuse rather than guess
+    try:
+        return ipaddress.ip_address(str(addr[0])).is_global
+    except ValueError:
+        return False
+
+
 def http_fetch(
     timeout: float = TIMEOUT_SECONDS,
     max_bytes: int = MAX_BYTES,
@@ -311,6 +324,7 @@ def http_fetch(
         follow_redirects=False,
         timeout=timeout,
         headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
+        trust_env=False,  # no proxy from the environment can route around the address checks
     )
     public: dict[str, bool] = {}
     lock = threading.Lock()
@@ -326,6 +340,10 @@ def http_fetch(
         started = time.monotonic()
         try:
             with client.stream("GET", url, headers=headers) as resp:
+                # The DNS check above can race a rebinding answer: the address actually connected to
+                # must be public too, before any byte of the body is read.
+                if not _peer_is_public(resp):
+                    raise FeedError("connected address is not on the public internet")
                 if resp.status_code == 304:
                     return Response(304, b"", final_url=url)
                 if resp.status_code in REDIRECTS:
