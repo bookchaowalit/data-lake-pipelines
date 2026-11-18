@@ -28,6 +28,7 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
     → dbt build +path:models/marts/jobs (Silver part เดียวผ่าน var jobs_silver_part)
     → Gold gold/domain=jobs/dataset=<mart>/schema_version=1 + manifest control/manifests/gold/source=book-job-data/domain=jobs/
   → warehouse: motherduck_load.py → MotherDuck empire_gold.jobs.<mart> (ADR-0016 P2; skipped_no_token จนกว่าจะมี secret MOTHERDUCK_TOKEN)
+      → preset_parity.py: SQL ของ dataset Preset เทียบกับตัวเลข jobs-insights ของ Gold run เดียวกัน → jobs._preset_parity (ADR-0016 P3)
   → bi: jobs_bi_snapshot.py (ตรวจ sha256 ตาม manifest) → jobs_bi_site.py (static HTML, CSP เข้ม) → Cloudflare Pages
         jobs-insights.pages.dev หลัง Cloudflare Access (deploy เมื่อ <gold_run_id>@<commit> เปลี่ยน)
   → heartbeat jobs-marts (5 ชม.; failed = stale / jobs-marts / jobs-bi / jobs-warehouse)
@@ -45,6 +46,9 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
 - MotherDuck (ADR-0016 P2, [`docs/specs/jobs-motherduck-load.md`](docs/specs/jobs-motherduck-load.md)): `motherduck_load.py` แทนที่ตาราง `jobs.<mart>`
   ทั้งหมดใน transaction เดียวจาก Gold manifest (ตรวจ sha256 และ allow-list เฉพาะ jobs marts) แล้วเทียบจำนวนแถวกับ manifest;
   รันซ้ำ Gold run เดิมได้ `unchanged`; ลองในเครื่องด้วย `--target /tmp/x.duckdb` แทน MotherDuck
+- Preset (ADR-0016 P3, [`docs/specs/jobs-preset-dashboard.md`](docs/specs/jobs-preset-dashboard.md)): dashboard สร้างใน UI ของ Preset
+  จาก SQL ใน `infra/bi/preset/jobs/datasets/` เท่านั้น; `preset_parity.py` นับวันที่ตัวเลขตรงกับ jobs-insights (ครบ 14 วัน = `p3_parity_met`);
+  export ZIP เก็บที่ `infra/bi/preset/jobs/` และต้องผ่าน `preset_export_check.py` (ไม่มี token, เฉพาะ marts/คอลัมน์ที่อนุมัติ)
 - lineage: `lake.silver-job-postings` → `lake.gold-jobs-marts` → `consumer.jobs-insights-site` ใน metadata catalog ของ architecture-docs
 
 ## Event plane: Kafka → Bronze (ADR-0008 M4)

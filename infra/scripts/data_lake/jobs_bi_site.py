@@ -230,21 +230,41 @@ def _daily_chart(snapshot: Snapshot) -> tuple[str, int]:
     return f'<ul class="legend">{legend}</ul>{svg}{table}', total
 
 
+KPI_LABELS = {
+    "postings": "Postings",
+    "postings_90d": f"Posted in the last {DAILY_WINDOW_DAYS} days",
+    "postings_7d": "Posted in the last 7 days",
+    "boards": "Boards",
+    "companies": "Companies",
+}
+
+
+def overview_kpis(snapshot: Snapshot) -> dict[str, int]:
+    """The overview tiles. The Preset parity check (preset_parity.py) compares these too."""
+    return {
+        "postings": sum(int(row["postings_total"]) for row in snapshot.boards),
+        "postings_90d": sum(int(row["postings"]) for row in snapshot.daily),
+        "postings_7d": sum(int(row["postings_7d"]) for row in snapshot.boards),
+        "boards": len(snapshot.boards),
+        "companies": len(snapshot.companies),
+    }
+
+
+def skills_last_week(snapshot: Snapshot) -> tuple[date | None, list[dict[str, Any]]]:
+    """The last complete week (Monday start) and its top 20 tags, as the skills page shows them."""
+    as_of = snapshot.meta["as_of_date"]
+    if as_of is None:
+        return None, []
+    last_week = as_of - timedelta(days=as_of.weekday() + 7)
+    return last_week, [row for row in snapshot.skills if row["posted_week"] == last_week][:20]
+
+
 def render_overview(snapshot: Snapshot) -> str:
     meta = snapshot.meta
-    chart, total_90d = _daily_chart(snapshot)
-    postings = sum(int(row["postings_total"]) for row in snapshot.boards)
-    postings_7d = sum(int(row["postings_7d"]) for row in snapshot.boards)
-    kpis = [
-        ("postings", "Postings", postings),
-        ("postings_90d", f"Posted in the last {DAILY_WINDOW_DAYS} days", total_90d),
-        ("postings_7d", "Posted in the last 7 days", postings_7d),
-        ("boards", "Boards", len(snapshot.boards)),
-        ("companies", "Companies", len(snapshot.companies)),
-    ]
+    chart, _ = _daily_chart(snapshot)
     tiles = "".join(
         f'<div class="kpi"><dt>{escape(label)}</dt><dd data-kpi="{key}">{_fmt_int(value)}</dd></div>'
-        for key, label, value in kpis
+        for key, label, value in ((key, KPI_LABELS[key], value) for key, value in overview_kpis(snapshot).items())
     )
     body = (
         "<h1>Jobs overview</h1>"
@@ -304,10 +324,10 @@ def render_skills(snapshot: Snapshot) -> str:
     if as_of is None or not snapshot.skills:
         body.append("<p>No tags in this snapshot.</p>")
         return _page("Skills", "/skills/", "".join(body), snapshot.meta)
-    last_week = as_of - timedelta(days=as_of.weekday() + 7)
+    last_week, top = skills_last_week(snapshot)
+    assert last_week is not None
     first_of_4 = last_week - timedelta(days=21)
 
-    top = [row for row in snapshot.skills if row["posted_week"] == last_week][:20]
     peak = max((int(row["postings"]) for row in top), default=0)
     rows = [
         f"<tr><td class=\"num\">{int(row['demand_rank'])}</td><th scope=\"row\">{escape(str(row['tag']))}</th>"
