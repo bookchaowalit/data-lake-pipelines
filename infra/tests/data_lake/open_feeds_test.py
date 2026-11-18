@@ -68,13 +68,15 @@ class FakeFetch:
         self.bodies = bodies
         self.calls: list[tuple[str, dict]] = []
 
-    def __call__(self, url: str, headers: dict[str, str]) -> Response:
+    def __call__(
+        self, url: str, headers: dict[str, str], follow_redirects: bool = True
+    ) -> Response:
         self.calls.append((url, dict(headers)))
         value = self.bodies.get(url)
         if isinstance(value, list):
             value = value.pop(0) if len(value) > 1 else value[0]
         if value is None:
-            raise FeedError("HTTP 404")
+            raise FeedError("HTTP 404", status=404)
         if isinstance(value, Exception):
             raise value
         if isinstance(value, Response):
@@ -121,6 +123,27 @@ class RegistryTest(unittest.TestCase):
             parse_registry({"feeds": [self.ok_row(), self.ok_row()]})
         with self.assertRaises(RegistryError):
             parse_registry({"rows": []})
+        for row in [
+            self.ok_row(url="https://www.producthunt.com/feed"),  # blocked-legal
+            self.ok_row(
+                url="https://old.reddit.com/r/x/.rss"
+            ),  # later (Data API terms)
+            self.ok_row(max_items=0),
+            self.ok_row(max_items=99999),
+        ]:
+            with self.subTest(row=row), self.assertRaises(RegistryError):
+                parse_registry({"feeds": [row]})
+        # A blocked host may stay documented when disabled.
+        (f,) = parse_registry(
+            {
+                "feeds": [
+                    self.ok_row(
+                        url="https://www.producthunt.com/feed", enabled=False, note="x"
+                    )
+                ]
+            }
+        )
+        self.assertFalse(f.enabled)
 
     def test_shipped_registry(self):
         feeds = load_registry(REGISTRY)
@@ -129,6 +152,7 @@ class RegistryTest(unittest.TestCase):
         self.assertTrue(all(f.url.startswith("https://") for f in feeds))
         # Reddit is `later` in source-coverage.yaml (Data API terms): never fetched from here.
         self.assertFalse([f.id for f in feeds if "reddit.com" in f.host])
+        self.assertFalse([f.id for f in enabled if of.blocked_host(f.host)])
         import yaml
 
         rows = yaml.safe_load(REGISTRY.read_text(encoding="utf-8"))["feeds"]
@@ -162,6 +186,24 @@ class ParseTest(unittest.TestCase):
             (item["guid"], item["link"], item["published_at"]),
             ("urn:1", "https://ex.test/1", "2026-11-18T07:00:00+00:00"),
         )
+
+    def test_html_page_is_not_a_feed(self):
+        page = b"<html><head><title>Down for maintenance</title></head><body>soon</body></html>"
+        with self.assertRaises(FeedError):
+            parse_rss(page, feed())
+
+    def test_valid_empty_feed_is_ok(self):
+        self.assertEqual(
+            parse_rss(
+                b'<?xml version="1.0"?><rss version="2.0"><channel><title>T</title></channel></rss>',
+                feed(),
+            ),
+            [],
+        )
+
+    def test_relative_links_use_the_final_url(self):
+        items = parse_rss(RSS, feed(), "https://moved.test/news/feed")
+        self.assertEqual(items[1]["link"], "https://moved.test/b")
 
     def test_entity_bomb_refused(self):
         with self.assertRaises(FeedError):
@@ -197,12 +239,89 @@ class ParseTest(unittest.TestCase):
             },
         )
         items = parse_json(body, f)
-        self.assertEqual([i["guid"] for i in items], ["X1", "X2"])
+        self.assertEqual(
+            [i["guid"] for i in items], ["X1", "X2", None]
+        )  # "not-a-row" = skipped
         self.assertEqual(items[0]["title"], "Alpha")
         self.assertEqual(items[0]["link"], "https://ex.test/p/X1")
         self.assertEqual(items[0]["published_at"], "2025-11-18T08:00:00+00:00")
         self.assertEqual(items[1]["published_at"], "2026-11-18T00:00:00+00:00")
         self.assertEqual(items[0]["extra"], {"score": 7})
+
+    def test_json_missing_id_is_skipped_not_merged(self):
+        body = json.dumps([{"a": 1}, {"b": 2}, {"b": 3}, "x"]).encode()
+        items = parse_json(body, feed(kind="json", spec={"items": "", "id": "a"}))
+        self.assertEqual([i["guid"] for i in items], ["1", None, None, None])
+        res = fetch_feed(
+            feed(kind="json", spec={"items": "", "id": "a"}),
+            FakeFetch({"https://ex.test/feed": body}),
+            {},
+            None,
+            retry_pause=0,
+        )
+        self.assertEqual((res.status, len(res.items), res.skipped), ("ok", 1, 3))
+
+    def test_json_changes_make_a_new_version(self):
+        f = feed(
+            kind="json",
+            spec={"items": "1", "id": ["indicator.id", "date"], "changes": ["value"]},
+        )
+        before = parse_json(
+            json.dumps(
+                [{}, [{"indicator": {"id": "GDP"}, "date": "2025", "value": None}]]
+            ).encode(),
+            f,
+        )
+        after = parse_json(
+            json.dumps(
+                [{}, [{"indicator": {"id": "GDP"}, "date": "2025", "value": 5.1}]]
+            ).encode(),
+            f,
+        )
+        self.assertTrue(before[0]["guid"].startswith("GDP|2025#"))
+        self.assertNotEqual(before[0]["guid"], after[0]["guid"])
+
+    def test_bracket_path_for_dotted_keys(self):
+        row = {
+            "_meta": {
+                "io.example.registry/official": {"publishedAt": "2026-11-18T01:00:00Z"}
+            },
+            "n": "x",
+        }
+        f = feed(
+            kind="json",
+            spec={
+                "items": "",
+                "id": "n",
+                "time": '_meta["io.example.registry/official"].publishedAt',
+            },
+        )
+        (item,) = parse_json(json.dumps([row]).encode(), f)
+        self.assertEqual(item["published_at"], "2026-11-18T01:00:00+00:00")
+
+    def test_max_items_truncation_is_reported(self):
+        body = json.dumps([{"a": i} for i in range(10)]).encode()
+        res = fetch_feed(
+            feed(kind="json", max_items=4, spec={"items": "", "id": "a"}),
+            FakeFetch({"https://ex.test/feed": body}),
+            {},
+            None,
+            retry_pause=0,
+        )
+        self.assertEqual((len(res.items), res.truncated), (4, 6))
+        _, runs, _ = build_rows([res], {}, "t")
+        self.assertEqual((runs[0]["items_truncated"], runs[0]["items_skipped"]), (6, 0))
+
+    def test_lone_surrogate_is_one_feed_error(self):
+        body = b'[{"a": "x\\ud800y"}]'
+        res = fetch_feed(
+            feed(kind="json", spec={"items": "", "id": "a"}),
+            FakeFetch({"https://ex.test/feed": body}),
+            {},
+            None,
+            retry_pause=0,
+        )
+        self.assertEqual((res.status, res.error), ("error", "text is not valid UTF-8"))
 
     def test_json_root_list_and_composite_id(self):
         body = json.dumps([{"a": 1, "b": {"c": "x"}}]).encode()
@@ -255,8 +374,18 @@ class ParseTest(unittest.TestCase):
 
     def test_opml(self):
         body = b'<opml><body><outline text="g"><outline title="A" xmlUrl="http://a.test/rss"/><outline title="B" xmlUrl="ftp://b"/></outline></body></opml>'
+        rows = opml_rows(body, "news")
+        parse_registry({"feeds": rows})  # importer output is a valid registry
         self.assertEqual(
-            opml_rows(body, "news"),
+            rows[0]["id"], "a-test-rss"
+        )  # a one-letter title falls back to the URL
+        thai = "\u0e02\u0e48\u0e32\u0e27"
+        two = f'<opml><body><outline title="{thai}" xmlUrl="https://th.test/rss"/><outline title="{thai}" xmlUrl="https://th.test/rss2"/><outline title="P" xmlUrl="https://www.producthunt.com/feed"/></body></opml>'.encode()
+        self.assertEqual(
+            [r["id"] for r in opml_rows(two, "news")], ["th-test-rss", "th-test-rss2"]
+        )
+        self.assertEqual(
+            [{**r, "id": "a"} for r in rows],
             [
                 {
                     "id": "a",
@@ -359,6 +488,114 @@ class RunTest(unittest.TestCase):
         self.assertEqual(
             of.fetch_all([f], unknown, {}, pause=0)[0].status, "robots-denied"
         )
+
+    def test_robots_checked_on_every_redirect_hop(self):
+        page = b'<article class="row"><a href="/x">x</a></article>'
+        f = feed(
+            kind="html", url="https://ex.test/trending", spec={"item": "article.row"}
+        )
+        hop = Response(301, b"", final_url="https://ex.test/private/trending")
+        fetch = FakeFetch(
+            {
+                "https://ex.test/robots.txt": b"User-agent: *\nDisallow: /private",
+                "https://ex.test/trending": hop,
+                "https://ex.test/private/trending": page,
+            }
+        )
+        res = of.fetch_all([f], fetch, {}, pause=0)[0]
+        self.assertEqual(res.status, "error")
+        self.assertIn("robots", res.error)
+        self.assertNotIn(
+            "https://ex.test/private/trending", [c[0] for c in fetch.calls]
+        )
+        ok = FakeFetch(
+            {
+                "https://ex.test/robots.txt": b"",
+                "https://ex.test/trending": Response(
+                    302, b"", final_url="https://ex.test/new"
+                ),
+                "https://ex.test/new": page,
+            }
+        )
+        res = of.fetch_all([f], ok, {}, pause=0)[0]
+        self.assertEqual(
+            (res.status, res.items[0]["link"]), ("ok", "https://ex.test/x")
+        )
+
+    def test_validators_only_for_the_url_that_issued_them(self):
+        fetch = FakeFetch({"https://ex.test/feed": RSS})
+        fetch_feed(
+            feed(),
+            fetch,
+            {"etag": '"old"', "url": "https://elsewhere.test/rss"},
+            None,
+            retry_pause=0,
+        )
+        self.assertEqual(fetch.calls[0][1], {})
+        res = fetch_feed(feed(), fetch, {}, None, retry_pause=0)
+        _, _, state = build_rows([res], {}, "t")
+        self.assertEqual(state["f1"]["url"], "https://ex.test/feed")
+
+    def test_http_status_kept_on_error(self):
+        res = fetch_feed(
+            feed(),
+            FakeFetch({"https://ex.test/feed": FeedError("HTTP 410", status=410)}),
+            {},
+            None,
+            retry_pause=0,
+        )
+        self.assertEqual((res.status, res.http_status), ("error", 410))
+
+    def test_only_keeps_the_state_of_other_feeds(self):
+        feeds = [feed(), feed(id="f2", url="https://other.test/atom")]
+        bodies = {"https://ex.test/feed": RSS, "https://other.test/atom": ATOM}
+        with tempfile.TemporaryDirectory() as lake:
+            sp = Path(lake) / "s.gz"
+            capture(
+                feeds, FakeFetch(dict(bodies)), lake, state_path=sp, now=NOW, pause=0
+            )
+            r = capture(
+                feeds,
+                FakeFetch(dict(bodies)),
+                lake,
+                only={"f1"},
+                force=True,
+                state_path=sp,
+                now=NOW + timedelta(hours=1),
+                pause=0,
+            )
+            self.assertEqual(r["feeds_due"], 1)
+            self.assertEqual(set(of.read_state(sp)), {"f1", "f2"})
+
+    def test_report_without_items(self):
+        with tempfile.TemporaryDirectory() as lake:
+            capture(
+                [feed()],
+                FakeFetch({}),
+                lake,
+                state_path=Path(lake) / "s.gz",
+                now=NOW,
+                pause=0,
+            )
+            rep = of.report(lake, days=100000, search="x")
+            self.assertEqual((rep["totals"]["items"], rep["search"]), (0, []))
+            self.assertEqual(rep["failing_feeds"][0]["http_status"], 404)
+
+    def test_report_ignores_parts_without_manifest(self):
+        with tempfile.TemporaryDirectory() as lake:
+            capture(
+                [feed()],
+                FakeFetch({"https://ex.test/feed": RSS}),
+                lake,
+                state_path=Path(lake) / "s.gz",
+                now=NOW,
+                pause=0,
+            )
+            # A part left by a run that stopped before its commit manifest.
+            part = next(Path(lake).rglob("dataset=feed_items/**/*.parquet"))
+            (part.parent / "part-orphan.parquet").write_bytes(part.read_bytes())
+            self.assertEqual(of.report(lake, days=100000)["totals"]["items"], 2)
+            self.assertEqual(len(of.committed_parts(lake, "feed_items")), 1)
 
     def test_http_fetch_refuses_non_https(self):
         with self.assertRaises(FeedError):
@@ -485,6 +722,16 @@ class MainTest(unittest.TestCase):
                 FakeFetch({}),
             )
             self.assertEqual(code, 3)  # every feed failing = broken runner/network
+            # Re-run inside the hour: nothing is due, but the latest fetch of every feed failed.
+            code, report = self.run_main(
+                ["--registry", reg, "--data-lake-uri", lake, *st], FakeFetch({})
+            )
+            self.assertEqual((code, report["feeds_due"]), (3, 0))
+            code, report = self.run_main(
+                ["--registry", reg, "--data-lake-uri", lake, "--only", "a1,typo", *st],
+                FakeFetch({}),
+            )
+            self.assertEqual((code, report["error"]), (2, "RegistryError"))
             code, report = self.run_main(
                 ["--registry", reg, "run", "--require-cloud", "--data-lake-uri", lake],
                 FakeFetch({}),

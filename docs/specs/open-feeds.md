@@ -16,8 +16,8 @@ a row to `repository-catalog/registries/open-feeds.yaml`.
 
 ## Scope
 
-- **Registry** `open-feeds.yaml`: 881 rows on 2026-11-18, 854 enabled, in 82 categories
-  (RSS/Atom 814, keyless JSON APIs 35, HTML scrapes 5). Seed:
+- **Registry** `open-feeds.yaml`: 881 rows on 2026-11-18, 853 enabled, in 82 categories
+  (RSS/Atom 813, keyless JSON APIs 35, HTML scrapes 5). Seed:
   - hand-picked: Thai news (Bangkok Post, Matichon, Khaosod, Thairath, Prachatai, Blognone, The
     Standard, …), Google News TH/US by topic, Google Trends daily RSS (TH, US, GB, JP, SG), world
     news (BBC, Guardian, NYT, NPR, DW, Al Jazeera, Nikkei Asia, …), tech and AI blogs, arXiv RSS
@@ -33,6 +33,8 @@ a row to `repository-catalog/registries/open-feeds.yaml`.
 - **Not added**: sources whose `source-coverage.yaml` verdict is `skip` or `blocked-legal`, or that
   need an owner decision first (Reddit, CoinGecko, Product Hunt, LinkedIn, Stack Exchange dumps,
   Open-Meteo free tier, property and booking sites), anything behind a login, key, paywall or CAPTCHA.
+  `BLOCKED_HOSTS` in the collector refuses an enabled row on those hosts, so an OPML import cannot
+  slip one in (the Product Hunt feed of the OPML list is kept disabled with a note).
 - **Collector** `infra/scripts/data_lake/open_feeds.py`, subcommands `run` (default), `check`,
   `probe`, `report`, `import-opml`.
 
@@ -42,14 +44,20 @@ a row to `repository-catalog/registries/open-feeds.yaml`.
   `.github/workflows/open-feeds.yml` on a GitHub-hosted runner (public repository, $0).
   `workflow_dispatch` with `force` fetches every enabled feed.
 - A feed is fetched when its `every_hours` (1, 2, 3, 6, 12, 24 or 168) is due (10 min slack).
-- Politeness: hosts run in parallel (24 workers), feeds of one host run one after another with a 1 s
-  pause; a descriptive User-Agent; conditional GET (`If-None-Match` / `If-Modified-Since`); one retry
-  after 3 s for a transient failure (network error, 429, 5xx); 25 s timeout; 8 MB body cap.
+- Politeness: hosts run in parallel (12 workers), feeds of one host run one after another with a 1 s
+  pause (3 s for arXiv, as its terms ask); a descriptive User-Agent; conditional GET
+  (`If-None-Match` / `If-Modified-Since`, sent only to the URL that issued them); one retry after 3 s
+  for a transient failure (network error, 429, 5xx); 25 s I/O timeout plus a 60 s wall-clock deadline
+  per response (a slow-drip body cannot hold the run); 8 MB body cap.
 - Safety: https only, every redirect hop must stay https; TLS verification is never turned off;
-  XML with an `<!ENTITY` declaration is refused (no entity bombs or external entities); `kind: html`
-  checks robots.txt for our User-Agent on every run, and a host whose robots.txt cannot be read
-  (403, timeout) is skipped (`robots-denied`).
-- One broken feed never stops a run: its error is recorded in `feed_runs`.
+  XML with an `<!ENTITY` declaration is refused (no entity bombs or external entities) and feedparser
+  only ever gets a byte stream (never a string it could read as a path or URL); `kind: html`
+  checks robots.txt for our User-Agent on every run and on every redirect hop (redirects are followed
+  one at a time), and a host whose robots.txt cannot be read (403, timeout) is skipped (`robots-denied`).
+- A 200 answer that is not RSS/Atom/RDF (an HTML maintenance page) is an error, so it cannot reset
+  the feed's dedupe list; a valid feed with no entries is `ok`.
+- One broken feed never stops a run: parse errors and text that is not valid UTF-8 are recorded in
+  `feed_runs` for that feed only.
 
 ## Contract
 
@@ -59,7 +67,7 @@ Two Bronze datasets under `domain=open-data`, `source=open-feeds`, `privacy_clas
 
 | Field | Meaning |
 |---|---|
-| `id` | `<feed_id>:<sha256(guid)[:16]>` (the `source_record_id`; guid = RSS guid/Atom id, else link, else title; JSON: the `id` field(s); snapshot: content hash) |
+| `id` | `<feed_id>:<sha256(guid)[:16]>` (the `source_record_id`; guid = RSS guid/Atom id, else link, else title; JSON: the `id` field(s), plus a hash of the `changes` fields when set; snapshot: content hash). A JSON row missing an id field is skipped and counted (`items_skipped`), never merged with another row |
 | `feed_id`, `category`, `subcategory`, `kind`, `lang` | from the registry row |
 | `title` | tags stripped, whitespace folded, ≤ 500 chars |
 | `link` | absolute http(s) URL or null |
@@ -71,16 +79,28 @@ Personal data: author fields are never read; publisher RSS keeps headline + link
 Snapshots (`json.snapshot: true`, for example exchange rates or a weather forecast) store the whole
 document, and only when its content hash changes.
 
+Revisions: a JSON row whose values can change after publication (World Bank back-fills a `null` or
+revises a year) lists those fields under `json.changes`; the revised row then lands as a new item, and
+the latest `fetched_at` per indicator and date is the current value.
+
 `feed_runs` (one row per feed fetched): `id` (`<feed_id>@<fetched_at>`), `feed_id`, `category`,
-`fetched_at`, `status` (`ok` | `not-modified` | `error` | `robots-denied`), `http_status`, `error`
-(short reason, no body), `items_seen`, `items_new`, `duration_ms`, `bytes`, `consecutive_errors`.
+`fetched_at`, `status` (`ok` | `not-modified` | `error` | `robots-denied`), `http_status` (also on
+4xx/5xx errors; null only without an HTTP answer), `error` (short reason, no body), `items_seen`,
+`items_new`, `items_skipped`, `items_truncated` (past the row's `max_items`, default 300, CISA KEV 5000),
+`duration_ms`, `bytes`, `consecutive_errors`.
+
+Landing (ADR-0001 exception, owner request 2026-11-18): the landing object is the normalised JSONL of
+the new items, not the publisher's response. Raw RSS bodies carry article summaries and author names
+that the headline-only rule must not keep (copyright and personal data), so the raw response is not
+stored; a parser fix is replayed by re-fetching (feeds keep their recent items) rather than from landing.
 
 ## State and idempotence
 
 - The lake is write-once, so the dedupe state (per feed: hashes of the items it shows now, ETag,
   Last-Modified, last fetch, error streak) is one gzip JSON file (~0.5 MB) kept in the GitHub Actions
-  cache (`open-feeds-state-<run_id>`, restored by prefix, saved after every run including partial
-  failures). Locally it defaults to `data/runtime/open-feeds/state.json.gz` (`--state-file`,
+  cache (`open-feeds-state-<run_id>-<run_attempt>`, restored by prefix, saved after every run
+  including partial failures). `run --only` fetches the chosen feeds but keeps the state of the
+  others; an unknown id is an error. Locally it defaults to `data/runtime/open-feeds/state.json.gz` (`--state-file`,
   `OPEN_FEEDS_STATE`).
 - A lost state (cache evicted after 7 days without runs) only re-sends what the feeds still show:
   Bronze gets extra rows with the same `id`, and Silver/`report` keep one row per `id`.
@@ -99,9 +119,12 @@ document, and only when its content hash changes.
 ## Failure and heartbeat
 
 - Exit `0`: the run completed (some feeds may have failed; see `failed_feeds` and `feed_runs`).
-- Exit `3`: more than half of the due feeds failed (runner or network problem).
+- Exit `3`: more than half of the due feeds failed, or more than half of the enabled feeds failed on
+  their latest fetch (so a re-run with nothing due cannot report ok while the feeds are broken).
 - Exit `2`: invalid registry, lake error, empty or local lake URI with `--require-cloud`.
-- Heartbeat `open-feeds` goes to `monitor.bookchaowalit.com`, which alerts after 3 h without an ok run.
+- Heartbeat `open-feeds` goes to `monitor.bookchaowalit.com` (window 3 h; the monitor adds its usual
+  1 h grace to every heartbeat, so a silent job alerts after about 4 h, as job-radar does). `ok:false`
+  alerts at once.
 
 ## Analysis
 
@@ -111,23 +134,29 @@ document, and only when its content hash changes.
 .venv/bin/python infra/scripts/data_lake/open_feeds.py report --days 7 --search "AI" --limit 20
 ```
 
-It prints items by category and by feed, the feeds failing on their latest run, and the newest titles
-matching `--search` (one row per item id). Any other question is SQL on
+It prints items by category and by feed, the feeds failing on their latest run (with HTTP status), and
+the newest titles matching `--search` (one row per item id). It reads only the Parquet parts that a
+commit manifest names (ADR-0001), so a part left by an interrupted run is never counted. Any other question is SQL on
 `bronze/domain=open-data/dataset=feed_items/**/*.parquet` (`json_extract_string(payload_json, '$.title')`).
 
 ## Adding a source
 
 1. Add a row (see the field list at the top of `open-feeds.yaml`); for a new OPML list:
-   `open_feeds.py import-opml file.opml --category <topic>` prints rows.
+   `open_feeds.py import-opml file.opml --category <topic>` prints valid rows (ids from the URL when a
+   title has no Latin letters, blocked hosts dropped).
 2. `open_feeds.py check` (offline, also a test) and `open_feeds.py probe --only <id>` (live).
 3. Keep the guardrails: free, keyless, public; read the source's terms; `keep: full` only for open
    licences; a new html scrape only where robots.txt and the terms allow it.
 
 ## Tests
 
-`infra/tests/data_lake/open_feeds_test.py` (offline): registry validation (https only, unknown
-fields, required json/html specs, duplicate ids) and the shipped registry (≥ 500 enabled, no Reddit,
-every disabled row has a note); RSS, Atom, JSON (dot paths, composite ids, link templates, epoch
+`infra/tests/data_lake/open_feeds_test.py` (offline, 38 tests): registry validation (https only,
+unknown fields, required json/html specs, duplicate ids, blocked hosts, max_items) and the shipped
+registry (≥ 500 enabled, no blocked host enabled, every disabled row has a note); HTML page is not a
+feed, empty feed is ok, links resolve against the final URL; JSON rows without id skipped, `changes`
+versions, bracket paths, truncation counted, lone surrogates isolated; robots on every redirect hop;
+validators tied to their URL; HTTP status on errors; `--only` keeps other state; report with no items
+and report ignoring parts without a manifest; RSS, Atom, JSON (dot paths, composite ids, link templates, epoch
 times, snapshots) and HTML parsing; author never kept; entity bomb refused; due logic; dedupe across
 runs; conditional GET and 304; one retry for transient errors only; robots allow/deny/unknown;
 capture into a local lake (manifests, state, nothing due → no write, lost state → re-send); dry run

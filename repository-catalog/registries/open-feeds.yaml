@@ -16,11 +16,15 @@
 #                or snapshot: true (whole document, stored when its content changes), path, time
 #   html         item: CSS selector, title / link: selectors inside the item, fields: {name: selector}
 #   enabled      false keeps a row documented but not fetched; say why in `note`
+#   max_items    items kept per fetch (default 300, up to 5000); the rest are counted as items_truncated
+#   json.changes fields whose value is part of the item version (a revised value lands as a new row)
+#   paths        dot paths; a key that contains dots: _meta["io.example/official"].publishedAt
 #
 # Rules (same guardrails as source-coverage.yaml): free, keyless, public data only; no login, paywall, CAPTCHA or
 # rate-limit bypass; never turn TLS verification off; no author names or user content (personal data);
 # publisher RSS keeps headline + link only. Sources with verdict skip / blocked-legal in source-coverage.yaml
-# (Reddit, CoinGecko, Product Hunt, LinkedIn, ...) are not added here.
+# (Reddit, CoinGecko, Product Hunt, LinkedIn, ...) are not added here; the collector refuses an
+# enabled row on those hosts (BLOCKED_HOSTS in open_feeds.py).
 #
 # Seed 2026-11-18: hand-picked feeds and APIs (Thai and world news, AI, arXiv, security, earth, economy,
 # government, platform status, GitHub releases/trending) + the CC0 lists of github.com/plenaryapp/awesome-rss-feeds
@@ -285,7 +289,7 @@ feeds:
     id: [server.name, server.version]
     title: server.name
     link: server.repository.url
-    time: _meta.io.modelcontextprotocol.registry/official.publishedAt
+    time: _meta["io.modelcontextprotocol.registry/official"].publishedAt
     keep: [server.description, server.version]
   every_hours: 24
 - id: crates-summary
@@ -439,6 +443,7 @@ feeds:
     keep: [cveID, vendorProject, product, knownRansomwareCampaignUse, dueDate]
   every_hours: 6
   licence: US Government public domain
+  max_items: 5000
 - {id: nasa-news, name: NASA news releases, kind: rss, url: 'https://www.nasa.gov/news-release/feed/', category: science, lang: en}
 - {id: sciencedaily, name: ScienceDaily, kind: rss, url: 'https://www.sciencedaily.com/rss/all.xml', category: science, lang: en}
 - {id: nature, name: Nature, kind: rss, url: 'https://www.nature.com/nature.rss', category: science, lang: en}
@@ -571,6 +576,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: wb-tha-ny-gdp-mktp-kd-zg
@@ -583,6 +589,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: wb-tha-fp-cpi-totl-zg
@@ -595,6 +602,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: wb-tha-sl-uem-totl-zs
@@ -607,6 +615,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: wb-tha-sp-pop-totl
@@ -619,6 +628,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: wb-tha-ne-exp-gnfs-zs
@@ -631,6 +641,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: wb-tha-bx-klt-dinv-cd-wd
@@ -643,6 +654,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: wb-tha-it-net-user-zs
@@ -655,6 +667,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: wb-tha-gc-dod-totl-gd-zs
@@ -667,6 +680,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: wb-tha-ny-gnp-pcap-cd
@@ -679,6 +693,7 @@ feeds:
     id: [indicator.id, date]
     title: indicator.value
     keep: [date, value, countryiso3code]
+    changes: [value]
   every_hours: 168
   licence: CC BY 4.0 (World Bank)
 - id: ust-avg-rates
@@ -1400,7 +1415,7 @@ feeds:
 - {id: marie-forleo, name: Marie Forleo, kind: rss, url: 'https://www.youtube.com/feeds/videos.xml?user=marieforleo', category: startups}
 - {id: masters-of-scale, name: Masters of Scale, kind: rss, url: 'https://rss.art19.com/masters-of-scale', category: startups}
 - {id: product-hunt-the-best-new-products-every-day, name: 'Product Hunt — The best new products, every day', kind: rss, url: 'https://www.producthunt.com/feed',
-  category: startups}
+  category: startups, enabled: false, note: 'disabled 2026-11-18: host is skip/blocked-legal in source-coverage.yaml (needs written permission)'}
 - {id: small-business-trends, name: Small Business Trends, kind: rss, url: 'https://feeds2.feedburner.com/SmallBusinessTrends', category: startups}
 - {id: smart-passive-income, name: Smart Passive Income, kind: rss, url: 'https://feeds.feedburner.com/smartpassiveincome', category: startups}
 - {id: steve-blank, name: Steve Blank, kind: rss, url: 'https://steveblank.com/feed/', category: startups}

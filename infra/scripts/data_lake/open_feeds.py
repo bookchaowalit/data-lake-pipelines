@@ -63,8 +63,12 @@ TIMEOUT_SECONDS = 25
 HOST_PAUSE_SECONDS = 1.0
 # Hosts whose terms ask for a slower pace than the default pause (arXiv: one request every 3 s).
 HOST_MIN_PAUSE = {"rss.arxiv.org": 3.0, "export.arxiv.org": 3.0}
-MAX_WORKERS = 24
-MAX_ITEMS_PER_FEED = 300
+MAX_WORKERS = 12
+MAX_ITEMS_PER_FEED = (
+    300  # default; a row may raise it with `max_items` (up to MAX_ITEMS_CAP)
+)
+MAX_ITEMS_CAP = 5000
+FEED_DEADLINE_SECONDS = 60.0  # wall clock for one response (slow-drip bodies included)
 TITLE_CAP = 500
 SUMMARY_CAP = 2000
 LINK_CAP = 2048
@@ -96,8 +100,22 @@ FIELDS = {
     "licence",
     "enabled",
     "note",
+    "max_items",
     *KINDS,
 }
+# Sources that source-coverage.yaml marks skip / blocked-legal (or that need an owner decision): an
+# enabled row on one of these hosts is refused, so an OPML import cannot slip one in.
+BLOCKED_HOSTS = (
+    "reddit.com",
+    "producthunt.com",
+    "coingecko.com",
+    "linkedin.com",
+    "jobthai.com",
+    "fastwork.co",
+    "stackexchange.com",
+    "stackoverflow.com",
+    "open-meteo.com",
+)
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
 TAG_RE = re.compile(r"<[^>]+>")
 WS_RE = re.compile(r"\s+")
@@ -105,6 +123,10 @@ WS_RE = re.compile(r"\s+")
 
 class FeedError(RuntimeError):
     """A feed answered with an error, an unsafe redirect or a body we refuse to parse."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class RegistryError(ValueError):
@@ -127,11 +149,17 @@ class Feed:
     lang: str | None = None
     licence: str | None = None
     enabled: bool = True
+    max_items: int = MAX_ITEMS_PER_FEED
     spec: dict[str, Any] = field(default_factory=dict)
 
     @property
     def host(self) -> str:
         return urllib.parse.urlsplit(self.url).hostname or ""
+
+
+def blocked_host(host: str) -> bool:
+    host = host.lower()
+    return any(host == b or host.endswith("." + b) for b in BLOCKED_HOSTS)
 
 
 def _https(url: Any) -> bool:
@@ -182,6 +210,19 @@ def parse_registry(doc: Any) -> list[Feed]:
             )
         if kind == "html" and not isinstance(spec.get("item"), str):
             raise RegistryError(f"{fid}: html feeds need an `item` CSS selector")
+        max_items = row.get("max_items", MAX_ITEMS_PER_FEED)
+        if (
+            not isinstance(max_items, int)
+            or isinstance(max_items, bool)
+            or not 1 <= max_items <= MAX_ITEMS_CAP
+        ):
+            raise RegistryError(f"{fid}: max_items must be 1..{MAX_ITEMS_CAP}")
+        enabled = row.get("enabled", True) is not False
+        host = urllib.parse.urlsplit(row["url"]).hostname or ""
+        if enabled and blocked_host(host):
+            raise RegistryError(
+                f"{fid}: {host} is skip/blocked-legal in source-coverage.yaml"
+            )
         feeds.append(
             Feed(
                 id=fid,
@@ -194,7 +235,8 @@ def parse_registry(doc: Any) -> list[Feed]:
                 keep=keep,
                 lang=row.get("lang"),
                 licence=row.get("licence"),
-                enabled=row.get("enabled", True) is not False,
+                enabled=enabled,
+                max_items=max_items,
                 spec=spec,
             )
         )
@@ -220,10 +262,16 @@ class Response:
     final_url: str = ""
 
 
-Fetch = Callable[[str, dict[str, str]], Response]
+# fetch(url, headers, follow_redirects) -> Response. With follow_redirects=False a 3xx comes back as a
+# Response (status 3xx, final_url = the Location) so the caller can check each hop (robots.txt).
+Fetch = Callable[..., Response]
 
 
-def http_fetch(timeout: float = TIMEOUT_SECONDS, max_bytes: int = MAX_BYTES) -> Fetch:
+def http_fetch(
+    timeout: float = TIMEOUT_SECONDS,
+    max_bytes: int = MAX_BYTES,
+    deadline: float = FEED_DEADLINE_SECONDS,
+) -> Fetch:
     import httpx
 
     def _stay_https(request: "httpx.Request") -> None:
@@ -238,23 +286,36 @@ def http_fetch(timeout: float = TIMEOUT_SECONDS, max_bytes: int = MAX_BYTES) -> 
         headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
         event_hooks={"request": [_stay_https]},
     )
-    lock = threading.Lock()
 
-    def fetch(url: str, headers: dict[str, str]) -> Response:
+    def fetch(
+        url: str, headers: dict[str, str], follow_redirects: bool = True
+    ) -> Response:
         if not _https(url):
             raise FeedError("url must be https")
+        started = time.monotonic()
         try:
-            with client.stream("GET", url, headers=headers) as resp:
+            with client.stream(
+                "GET", url, headers=headers, follow_redirects=follow_redirects
+            ) as resp:
                 if resp.status_code == 304:
                     return Response(304, b"", final_url=str(resp.url))
+                if not follow_redirects and resp.is_redirect:
+                    location = urllib.parse.urljoin(
+                        str(resp.url), resp.headers.get("location", "")
+                    )
+                    return Response(resp.status_code, b"", final_url=location)
                 if resp.status_code >= 400:
-                    raise FeedError(f"HTTP {resp.status_code}")
+                    raise FeedError(f"HTTP {resp.status_code}", status=resp.status_code)
                 chunks: list[bytes] = []
                 size = 0
                 for chunk in resp.iter_bytes():
                     size += len(chunk)
                     if size > max_bytes:
-                        raise FeedError("body over size cap")
+                        raise FeedError("body over size cap", status=resp.status_code)
+                    if time.monotonic() - started > deadline:
+                        raise FeedError(
+                            "ReadTimeout: feed deadline", status=resp.status_code
+                        )
                     chunks.append(chunk)
                 return Response(
                     resp.status_code,
@@ -268,8 +329,7 @@ def http_fetch(timeout: float = TIMEOUT_SECONDS, max_bytes: int = MAX_BYTES) -> 
         except httpx.HTTPError as exc:
             raise FeedError(type(exc).__name__) from None
 
-    fetch.lock = lock  # type: ignore[attr-defined]  # shared client; httpx.Client is thread-safe
-    return fetch
+    return fetch  # one shared client; httpx.Client is thread-safe
 
 
 class Robots:
@@ -285,21 +345,20 @@ class Robots:
         origin = f"{parts.scheme}://{parts.netloc}"
         with self._lock:
             if origin not in self._cache:
-                parser: urllib.robotparser.RobotFileParser | None = (
-                    urllib.robotparser.RobotFileParser()
-                )
+                rules = urllib.robotparser.RobotFileParser()
+                result: urllib.robotparser.RobotFileParser | None = rules
                 try:
                     resp = self._fetch(origin + "/robots.txt", {})
-                    parser.parse(resp.body.decode("utf-8", "replace").splitlines())
+                    rules.parse(resp.body.decode("utf-8", "replace").splitlines())
                 except FeedError as exc:
                     # 404 means no rules (allowed); anything else (403, timeout) means we do not know.
-                    if str(exc) == "HTTP 404":
-                        parser.parse([])
+                    if exc.status == 404 or str(exc) == "HTTP 404":
+                        rules.parse([])
                     else:
-                        parser = None
-                self._cache[origin] = parser
-            parser = self._cache[origin]
-        return parser is not None and parser.can_fetch(USER_AGENT, url)
+                        result = None
+                self._cache[origin] = result
+            cached = self._cache[origin]
+        return cached is not None and cached.can_fetch(USER_AGENT, url)
 
 
 # --------------------------------------------------------------------------------------------- parsing
@@ -362,21 +421,26 @@ def _refuse_entities(body: bytes) -> None:
         raise FeedError("XML entity declaration refused")
 
 
-def parse_rss(body: bytes, feed: Feed) -> list[dict[str, Any]]:
+def parse_rss(body: bytes, feed: Feed, base: str | None = None) -> list[dict[str, Any]]:
     """RSS 0.9x/1.0/2.0 and Atom through feedparser; the author is never kept (personal data)."""
+    import io
+
     import feedparser
 
     _refuse_entities(body)
-    parsed = feedparser.parse(body, sanitize_html=False, resolve_relative_uris=False)
-    if not parsed.entries and parsed.get("bozo") and not parsed.get("feed"):
+    # A stream, never bytes/str: feedparser treats a str as a URL or a file path.
+    parsed = feedparser.parse(
+        io.BytesIO(body), sanitize_html=False, resolve_relative_uris=False
+    )
+    if not parsed.get("version"):
+        # An HTML error or maintenance page answered 200: not a feed, so `seen` must not be reset.
         raise FeedError("not a feed")
+    base = base or feed.url
     items = []
-    for entry in parsed.entries[:MAX_ITEMS_PER_FEED]:
-        link = _link(entry.get("link"), feed.url)
+    for entry in parsed.entries:
+        link = _link(entry.get("link"), base)
         title = _clean(entry.get("title"), TITLE_CAP)
-        guid = entry.get("id") or link or title
-        if not guid:
-            continue
+        guid = entry.get("id") or link or title or None
         published = _iso(entry.get("published_parsed") or entry.get("updated_parsed"))
         extra: dict[str, Any] = {}
         tags = [
@@ -392,7 +456,7 @@ def parse_rss(body: bytes, feed: Feed) -> list[dict[str, Any]]:
                 extra["summary"] = summary
         items.append(
             {
-                "guid": str(guid),
+                "guid": str(guid) if guid else None,
                 "title": title,
                 "link": link,
                 "published_at": published,
@@ -402,10 +466,18 @@ def parse_rss(body: bytes, feed: Feed) -> list[dict[str, Any]]:
     return items
 
 
+PATH_TOKEN = re.compile(r'\["([^"]+)"\]|([^.\[\]]+)')
+
+
+def _path(path: str) -> list[str]:
+    """`a.b.0.c`, with `["key.with.dots"]` for a key that contains dots or slashes."""
+    return [quoted or plain for quoted, plain in PATH_TOKEN.findall(path)]
+
+
 def _dig(value: Any, path: str | None) -> Any:
     if path in (None, "", "."):
         return value
-    for part in str(path).split("."):
+    for part in _path(str(path)):
         if isinstance(value, dict):
             value = value.get(part)
         elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
@@ -423,7 +495,9 @@ def _template(template: str, row: Any) -> str:
     )
 
 
-def parse_json(body: bytes, feed: Feed) -> list[dict[str, Any]]:
+def parse_json(
+    body: bytes, feed: Feed, base: str | None = None
+) -> list[dict[str, Any]]:
     try:
         doc = json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -457,13 +531,23 @@ def parse_json(body: bytes, feed: Feed) -> list[dict[str, Any]]:
         ]
     if not isinstance(rows, list):
         raise FeedError("items path is not a list")
-    items = []
-    for row in rows[:MAX_ITEMS_PER_FEED]:
+    base = base or feed.url
+    items: list[dict[str, Any]] = []
+    for row in rows:
         if not isinstance(row, dict):
+            items.append(
+                {"guid": None}
+            )  # counted as skipped, never merged into another item
             continue
         ids = spec.get("id") or []
         ids = [ids] if isinstance(ids, str) else ids
-        guid = "|".join(str(_dig(row, p)) for p in ids) if ids else None
+        parts = [_dig(row, p) for p in ids]
+        if ids and any(part is None or part == "" for part in parts):
+            items.append(
+                {"guid": None}
+            )  # a missing id field must not collapse rows into "None|None"
+            continue
+        guid = "|".join(str(part) for part in parts) if ids else None
         title = (
             _clean(_dig(row, spec.get("title")), TITLE_CAP) if spec.get("title") else ""
         )
@@ -472,9 +556,17 @@ def parse_json(body: bytes, feed: Feed) -> list[dict[str, Any]]:
             if spec.get("link_template")
             else _dig(row, spec.get("link"))
         )
-        link = _link(link_value, feed.url)
+        link = _link(link_value, base)
         if not guid:
             guid = link or json.dumps(row, sort_keys=True, ensure_ascii=False)
+        changes = spec.get("changes")
+        if changes:
+            # A revised value (World Bank back-fills, a KEV due date) is a new version of the item:
+            # the content of these fields is part of the guid, so the revision lands as a new row.
+            version = json.dumps(
+                [_dig(row, c) for c in changes], sort_keys=True, ensure_ascii=False
+            )
+            guid = f"{guid}#{hashlib.sha256(version.encode('utf-8', 'surrogatepass')).hexdigest()[:12]}"
         keep = spec.get("keep")
         if keep == "*" or (keep is None and feed.keep == "full"):
             extra = {"row": row}
@@ -492,13 +584,16 @@ def parse_json(body: bytes, feed: Feed) -> list[dict[str, Any]]:
     return items
 
 
-def parse_html(body: bytes, feed: Feed) -> list[dict[str, Any]]:
+def parse_html(
+    body: bytes, feed: Feed, base: str | None = None
+) -> list[dict[str, Any]]:
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(body, "html.parser")
     spec = feed.spec
+    base = base or feed.url
     items = []
-    for node in soup.select(spec["item"])[:MAX_ITEMS_PER_FEED]:
+    for node in soup.select(spec["item"]):
         title_node = node.select_one(spec["title"]) if spec.get("title") else node
         link_node = (
             node.select_one(spec["link"])
@@ -506,7 +601,8 @@ def parse_html(body: bytes, feed: Feed) -> list[dict[str, Any]]:
             else (node if node.name == "a" else node.find("a"))
         )
         title = _clean(title_node.get_text(" ") if title_node else "", TITLE_CAP)
-        link = _link(link_node.get("href") if link_node else None, feed.url)
+        href = link_node.get("href") if link_node else None
+        link = _link(href if isinstance(href, str) else None, base)
         if not (title or link):
             continue
         extra = {}
@@ -562,19 +658,54 @@ class FeedResult:
     bytes: int
     etag: str | None = None
     last_modified: str | None = None
+    skipped: int = 0  # rows without a usable id
+    truncated: int = 0  # items past the feed's max_items
+
+
+MAX_HOPS = 5
 
 
 def _get(
-    fetch: Fetch, url: str, headers: dict[str, str], retry_pause: float
+    fetch: Fetch,
+    url: str,
+    headers: dict[str, str],
+    retry_pause: float,
+    robots: "Robots | None" = None,
 ) -> Response:
-    """One retry for a transient failure (network blip, 429/5xx); everything else fails at once."""
+    """One retry for a transient failure (network blip, 429/5xx); everything else fails at once.
+
+    With `robots`, redirects are followed here one hop at a time and every hop is checked
+    against robots.txt (html scrapes)."""
+
+    def once(target: str) -> Response:
+        if robots is None:
+            return fetch(target, headers)
+        for _ in range(MAX_HOPS):
+            resp = fetch(target, headers, follow_redirects=False)
+            if resp.status not in (301, 302, 303, 307, 308):
+                return resp
+            target = resp.final_url
+            if not _https(target):
+                raise FeedError("redirect left https")
+            if not robots.allowed(target):
+                raise FeedError("robots.txt disallows the redirect target")
+        raise FeedError("too many redirects")
+
     try:
-        return fetch(url, headers)
+        return once(url)
     except FeedError as exc:
         if not str(exc).startswith(TRANSIENT):
             raise
     time.sleep(retry_pause)
-    return fetch(url, headers)
+    return once(url)
+
+
+def _encodable(items: list[dict[str, Any]]) -> None:
+    """Lone surrogates from json.loads would crash hashing / JSONL later, outside this feed's try."""
+    try:
+        json.dumps(items, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        raise FeedError("text is not valid UTF-8") from None
 
 
 def fetch_feed(
@@ -603,12 +734,20 @@ def fetch_feed(
             bytes=0,
         )
     headers = {}
-    if feed_state.get("etag"):
+    # Validators belong to the URL that issued them: after a registry URL change, fetch in full.
+    same_url = feed_state.get("url") in (None, feed.url)
+    if same_url and feed_state.get("etag"):
         headers["If-None-Match"] = feed_state["etag"]
-    if feed_state.get("last_modified"):
+    if same_url and feed_state.get("last_modified"):
         headers["If-Modified-Since"] = feed_state["last_modified"]
     try:
-        resp = _get(fetch, feed.url, headers, retry_pause)
+        resp = _get(
+            fetch,
+            feed.url,
+            headers,
+            retry_pause,
+            robots if feed.kind == "html" else None,
+        )
         if resp.status == 304:
             return done(
                 "not-modified",
@@ -619,9 +758,14 @@ def fetch_feed(
                 etag=feed_state.get("etag"),
                 last_modified=feed_state.get("last_modified"),
             )
-        items = PARSERS[feed.kind](resp.body, feed)
+        parsed = PARSERS[feed.kind](resp.body, feed, resp.final_url or feed.url)
+        usable = [i for i in parsed if i.get("guid")]
+        items = usable[: feed.max_items]
+        _encodable(items)
     except FeedError as exc:
-        return done("error", http_status=None, items=[], error=str(exc)[:120], bytes=0)
+        return done(
+            "error", http_status=exc.status, items=[], error=str(exc)[:120], bytes=0
+        )
     except Exception as exc:  # noqa: BLE001 — one broken feed must never stop the run
         return done(
             "error", http_status=None, items=[], error=type(exc).__name__, bytes=0
@@ -634,6 +778,8 @@ def fetch_feed(
         bytes=len(resp.body),
         etag=resp.etag,
         last_modified=resp.last_modified,
+        skipped=len(parsed) - len(usable),
+        truncated=len(usable) - len(items),
     )
 
 
@@ -721,6 +867,7 @@ def build_rows(
             entry["errors"] = 0
             entry["etag"] = res.etag
             entry["last_modified"] = res.last_modified
+            entry["url"] = feed.url
         else:
             entry["errors"] = int(prev.get("errors") or 0) + 1
         next_state[feed.id] = entry
@@ -735,6 +882,8 @@ def build_rows(
                 "error": res.error,
                 "items_seen": len(res.items),
                 "items_new": len(fresh),
+                "items_skipped": res.skipped,
+                "items_truncated": res.truncated,
                 "duration_ms": res.duration_ms,
                 "bytes": res.bytes,
                 "consecutive_errors": entry["errors"],
@@ -774,6 +923,7 @@ def capture(
     fetch: Fetch,
     data_lake_uri: str,
     *,
+    only: set[str] | None = None,
     state_path: Path = DEFAULT_STATE,
     now: datetime | None = None,
     dry_run: bool = False,
@@ -786,13 +936,18 @@ def capture(
     now = now or _now()
     fetched_at = now.isoformat(timespec="seconds")
     state = read_state(state_path)
-    active = [f for f in feeds if f.enabled]
+    active = [f for f in feeds if f.enabled and (only is None or f.id in only)]
     todo = [f for f in active if force or due(f, state, now)]
     results = fetch_all(todo, fetch, state, workers=workers, pause=pause)
     items, runs, next_state = build_rows(results, state, fetched_at)
-    counts = defaultdict(int)
+    counts: defaultdict[str, int] = defaultdict(int)
     for r in results:
         counts[r.status] += 1
+    enabled = [f for f in feeds if f.enabled]
+    # Health from the state after this run, so a re-run with nothing due cannot hide a broken hour.
+    failing = sum(
+        1 for f in enabled if int((next_state.get(f.id) or {}).get("errors") or 0) > 0
+    )
     report: dict[str, Any] = {
         "status": "dry-run" if dry_run else "captured",
         "fetched_at": fetched_at,
@@ -804,7 +959,11 @@ def capture(
         "errors": counts["error"],
         "robots_denied": counts["robots-denied"],
         "items_new": len(items),
+        "items_skipped": sum(r.skipped for r in results),
+        "items_truncated": sum(r.truncated for r in results),
         "failed_feeds": sorted(r.feed.id for r in results if r.status == "error"),
+        "feeds_failing": failing,
+        "feeds_enabled": len(enabled),
     }
     if dry_run:
         return report
@@ -833,7 +992,8 @@ def capture(
         manifests[DATASET_RUNS] = res["manifest_key"]
     # State last: if this write fails the next run re-sends the same items, and Silver keeps one row
     # per `id` (source_record_id), so the worst case is a duplicate Bronze row, never a lost item.
-    # Rows of feeds removed from the registry are dropped here.
+    # Rows of feeds removed from the registry are dropped here (the full registry decides, never
+    # an --only selection).
     known = {f.id for f in feeds}
     write_state(
         state_path, {k: v for k, v in next_state.items() if k in known}, fetched_at
@@ -875,6 +1035,7 @@ def opml_rows(
     _refuse_entities(body)
     root = ET.fromstring(body)  # noqa: S314 — entities refused above; OPML is a CC0 list we chose
     rows = []
+    taken: set[str] = set()
     for node in root.iter("outline"):
         url = node.get("xmlUrl")
         if not url:
@@ -882,11 +1043,22 @@ def opml_rows(
         url = url.strip()
         if url.startswith("http://"):
             url = "https://" + url[len("http://") :]
-        if not _https(url):
+        if not _https(url) or blocked_host(urllib.parse.urlsplit(url).hostname or ""):
             continue
         name = node.get("title") or node.get("text") or url
+        fid = slug(name)
+        if (
+            len(fid) < 2 or fid == "feed"
+        ):  # e.g. a Thai-only title: name it after the URL instead
+            parts = urllib.parse.urlsplit(url)
+            fid = slug(f"{parts.hostname or ''} {parts.path}")
+        base_id, n = fid[:60], 2
+        while fid in taken:
+            fid = f"{base_id}-{n}"
+            n += 1
+        taken.add(fid)
         row: dict[str, Any] = {
-            "id": slug(name),
+            "id": fid,
             "name": name.strip(),
             "kind": "rss",
             "url": url,
@@ -901,13 +1073,40 @@ def opml_rows(
 # --------------------------------------------------------------------------------------------- report
 
 
-def _bronze_glob(data_lake_uri: str, dataset: str) -> str:
-    base = (
-        data_lake_uri[len("file://") :]
-        if data_lake_uri.startswith("file://")
-        else data_lake_uri
-    )
-    return f"{base.rstrip('/')}/bronze/domain={DOMAIN}/dataset={dataset}/**/*.parquet"
+def committed_parts(
+    data_lake_uri: str, dataset: str, days: int | None = None
+) -> list[str]:
+    """Parquet parts of `dataset` that a commit manifest names (ADR-0001: the manifest is the commit
+    marker, so a part left by a run that stopped before its manifest is never read)."""
+    from data_lake.storage import ObjectStore
+
+    store = ObjectStore(data_lake_uri)
+    cutoff = None
+    if days is not None:
+        cutoff = (_now() - timedelta(days=days + 1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    parts = []
+    for key, body in sorted(
+        store.get_prefix(f"control/manifests/source={SOURCE}/").items()
+    ):
+        if "/batch_id=" not in key or not key.endswith(".json"):
+            continue
+        try:
+            manifest = json.loads(body)
+        except ValueError:
+            continue
+        if manifest.get("domain") != DOMAIN or manifest.get("dataset") != dataset:
+            continue
+        if cutoff and str(manifest.get("received_at") or "") < cutoff:
+            continue
+        bronze_key = (manifest.get("bronze") or {}).get("key")
+        if bronze_key:
+            uri = store.object_uri(bronze_key)
+            parts.append(
+                urllib.parse.unquote(uri[len("file://") :])
+                if uri.startswith("file://")
+                else uri
+            )
+    return parts
 
 
 ITEMS_VIEW = """
@@ -925,60 +1124,76 @@ SELECT id,
 FROM raw
 """
 
+RUNS_FAILING = """
+WITH r AS (SELECT json_extract_string(payload_json, '$.feed_id') AS feed_id,
+                  json_extract_string(payload_json, '$.status') AS status,
+                  json_extract_string(payload_json, '$.error') AS error,
+                  TRY_CAST(json_extract_string(payload_json, '$.http_status') AS INTEGER) AS http_status,
+                  TRY_CAST(json_extract_string(payload_json, '$.consecutive_errors') AS INTEGER) AS streak,
+                  json_extract_string(payload_json, '$.fetched_at') AS fetched_at FROM lake_table
+           QUALIFY row_number() OVER (PARTITION BY feed_id ORDER BY fetched_at DESC) = 1)
+SELECT feed_id, error, http_status, streak FROM r WHERE status IN ('error', 'robots-denied')
+ORDER BY streak DESC, feed_id
+"""
+
 
 def report(
     data_lake_uri: str, *, days: int = 7, search: str | None = None, limit: int = 30
 ) -> dict[str, Any]:
-    """Counts by category and feed over the last `days` days (one row per item id), plus a title search."""
+    """Counts by category and feed over the last `days` days (one row per item id), the feeds failing
+    on their latest run, and a title search. Reads committed parts only."""
     from data_lake.query import query_parquet
 
     since = f"now() - INTERVAL {int(days)} DAY"
-    items = _bronze_glob(data_lake_uri, DATASET_ITEMS)
     view = f"WITH items AS ({ITEMS_VIEW}) "
     out: dict[str, Any] = {"days": days}
-    out["totals"] = query_parquet(
-        items,
-        view
-        + f"""
-        SELECT count(*) AS items, count(DISTINCT feed_id) AS feeds, min(fetched_at)::VARCHAR AS first_fetch,
-               max(fetched_at)::VARCHAR AS last_fetch FROM items WHERE fetched_at >= {since}""",
-    )[0]
-    out["by_category"] = query_parquet(
-        items,
-        view
-        + f"""
-        SELECT category, count(*) AS items, count(DISTINCT feed_id) AS feeds FROM items
-        WHERE fetched_at >= {since} GROUP BY 1 ORDER BY 2 DESC""",
-    )
-    out["top_feeds"] = query_parquet(
-        items,
-        view
-        + f"""
-        SELECT feed_id, category, count(*) AS items FROM items WHERE fetched_at >= {since}
-        GROUP BY 1, 2 ORDER BY 3 DESC LIMIT {int(limit)}""",
-    )
-    if search:
-        out["search"] = query_parquet(
+    items = committed_parts(data_lake_uri, DATASET_ITEMS, days)
+    if items:
+        out["totals"] = query_parquet(
             items,
             view
             + f"""
-            SELECT coalesce(published_at, fetched_at)::VARCHAR AS at, feed_id, title, link FROM items
-            WHERE fetched_at >= {since} AND title ILIKE ? ORDER BY coalesce(published_at, fetched_at) DESC
-            LIMIT {int(limit)}""",
-            [f"%{search}%"],
+            SELECT count(*) AS items, count(DISTINCT feed_id) AS feeds, min(fetched_at)::VARCHAR AS first_fetch,
+                   max(fetched_at)::VARCHAR AS last_fetch FROM items WHERE fetched_at >= {since}""",
+        )[0]
+        out["by_category"] = query_parquet(
+            items,
+            view
+            + f"""
+            SELECT category, count(*) AS items, count(DISTINCT feed_id) AS feeds FROM items
+            WHERE fetched_at >= {since} GROUP BY 1 ORDER BY 2 DESC""",
         )
-    runs = _bronze_glob(data_lake_uri, DATASET_RUNS)
-    out["failing_feeds"] = query_parquet(
-        runs,
-        """
-        WITH r AS (SELECT json_extract_string(payload_json, '$.feed_id') AS feed_id,
-                          json_extract_string(payload_json, '$.status') AS status,
-                          json_extract_string(payload_json, '$.error') AS error,
-                          TRY_CAST(json_extract_string(payload_json, '$.consecutive_errors') AS INTEGER) AS streak,
-                          json_extract_string(payload_json, '$.fetched_at') AS fetched_at FROM lake_table
-                   QUALIFY row_number() OVER (PARTITION BY feed_id ORDER BY fetched_at DESC) = 1)
-        SELECT feed_id, error, streak FROM r WHERE status IN ('error', 'robots-denied') ORDER BY streak DESC, feed_id""",
-    )
+        out["top_feeds"] = query_parquet(
+            items,
+            view
+            + f"""
+            SELECT feed_id, category, count(*) AS items FROM items WHERE fetched_at >= {since}
+            GROUP BY 1, 2 ORDER BY 3 DESC LIMIT {int(limit)}""",
+        )
+    else:
+        out["totals"] = {
+            "items": 0,
+            "feeds": 0,
+            "first_fetch": None,
+            "last_fetch": None,
+        }
+        out["by_category"], out["top_feeds"] = [], []
+    if search:
+        out["search"] = (
+            query_parquet(
+                items,
+                view
+                + f"""
+                SELECT coalesce(published_at, fetched_at)::VARCHAR AS at, feed_id, title, link FROM items
+                WHERE fetched_at >= {since} AND title ILIKE ? ORDER BY coalesce(published_at, fetched_at) DESC
+                LIMIT {int(limit)}""",
+                [f"%{search}%"],
+            )
+            if items
+            else []
+        )
+    runs = committed_parts(data_lake_uri, DATASET_RUNS, days)
+    out["failing_feeds"] = query_parquet(runs, RUNS_FAILING) if runs else []
     return out
 
 
@@ -1036,11 +1251,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select(feeds: list[Feed], only: str | None) -> list[Feed]:
+def _only(feeds: list[Feed], only: str | None) -> set[str] | None:
+    """The --only ids; an id that is not in the registry is an error (a typo must not run nothing)."""
     if not only:
-        return feeds
+        return None
     wanted = {x.strip() for x in only.split(",") if x.strip()}
-    return [f for f in feeds if f.id in wanted]
+    unknown = wanted - {f.id for f in feeds}
+    if unknown:
+        raise RegistryError(f"unknown feed id(s): {sorted(unknown)}")
+    return wanted
+
+
+def _select(feeds: list[Feed], only: str | None) -> list[Feed]:
+    wanted = _only(feeds, only)
+    return feeds if wanted is None else [f for f in feeds if f.id in wanted]
 
 
 def main(
@@ -1086,7 +1310,7 @@ def main(
             return 0
         feeds = load_registry(args.registry)
         if cmd == "check":
-            kinds = defaultdict(int)
+            kinds: defaultdict[str, int] = defaultdict(int)
             for f in feeds:
                 kinds[f.kind] += 1
             print(
@@ -1113,9 +1337,10 @@ def main(
             print(json.dumps({"status": "error", "error": "LakeUriNotConfigured"}))
             return 2
         result = capture(
-            _select(feeds, args.only),
+            feeds,
             fetch or http_fetch(),
             uri,
+            only=_only(feeds, args.only),
             state_path=args.state_file,
             dry_run=args.dry_run,
             force=args.force or bool(args.only),
@@ -1134,8 +1359,13 @@ def main(
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
     due_count = result["feeds_due"]
-    if due_count and result["errors"] / due_count > FAIL_RATIO:
-        return 3  # most feeds failing = the runner or the network is broken, not one publisher
+    enabled = result["feeds_enabled"]
+    if (due_count and result["errors"] / due_count > FAIL_RATIO) or (
+        enabled and result["feeds_failing"] / enabled > FAIL_RATIO
+    ):
+        # Most feeds failing (this run, or on their latest fetch when nothing was due) = the runner
+        # or the network is broken, not one publisher.
+        return 3
     return 0
 
 
