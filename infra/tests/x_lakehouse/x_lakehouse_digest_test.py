@@ -170,6 +170,17 @@ class RenderTests(unittest.TestCase):
             self.assertTrue(digest.any_term(row, terms), value)
         self.assertFalse(digest.any_term({"_extra": json.dumps({"note": "synthetic"})}, terms))
         self.assertTrue(digest.any_term({"_extra": "{not json acme corp"}, terms))  # bad JSON: raw text
+        # Deep nesting in an X post text never aborts the run: the row is withheld (fail closed).
+        self.assertTrue(digest.any_term({"text": "[" * 100_000 + "]" * 100_000}, terms))
+        self.assertTrue(digest.any_term({"text": _deep(5_000)}, terms))
+        self.assertFalse(digest.any_term({"text": "[synthetic] and {synthetic}"}, terms))
+
+
+def _deep(n: int) -> list:
+    v: list = []
+    for _ in range(n):
+        v = [v]
+    return v
 
 
 class FakeServices:
