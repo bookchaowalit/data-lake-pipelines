@@ -203,7 +203,11 @@ jobs:
           fi
           # A re-run of an older workflow run rebuilds Gold with that run's (older) code and a new
           # publish time; only the revision that is main's head may write the warehouse.
-          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" refs/heads/main | cut -f1)
+          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" refs/heads/main | cut -f1) || head=""
+          if [ -z "$head" ]; then
+            echo '{"status": "failed", "error": "main_head_unreadable"}' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 2
+          fi
           if [ "$head" != "$GITHUB_SHA" ]; then
             echo '{"status": "skipped_stale_revision"}' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0

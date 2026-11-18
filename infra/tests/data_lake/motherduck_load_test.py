@@ -380,6 +380,47 @@ class MotherDuckLoadTests(unittest.TestCase):
             late = load_jobs_gold(second_key, target, data_lake_uri=root, published_key="p2", now=NOW)
             self.assertEqual(late["status"], "skipped_not_latest")
 
+    def test_tables_the_loader_never_wrote_are_never_dropped(self):
+        import duckdb
+
+        from data_lake.motherduck_load import load_jobs_gold
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
+            gold = self._gold(root)
+            target = str(Path(out) / "w.duckdb")
+            load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, now=NOW)
+            con = duckdb.connect(target)
+            con.execute("CREATE TABLE jobs.analyst_notes AS SELECT 1 AS x")
+            con.close()
+            again = load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, now=NOW)
+            self.assertEqual(again["status"], "unchanged")
+            con = duckdb.connect(target, read_only=True)
+            try:
+                self.assertEqual(con.sql("select x from jobs.analyst_notes").fetchall(), [(1,)])
+            finally:
+                con.close()
+
+    def test_unchanged_is_not_reported_when_warehouse_columns_drift(self):
+        import duckdb
+
+        from data_lake.motherduck_load import load_jobs_gold
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
+            gold = self._gold(root)
+            target = str(Path(out) / "w.duckdb")
+            load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, now=NOW)
+            con = duckdb.connect(target)
+            con.execute("ALTER TABLE jobs.jobs_company_hiring ADD COLUMN contact VARCHAR")
+            con.close()
+            again = load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, now=NOW)
+            self.assertEqual(again["status"], "loaded")
+            con = duckdb.connect(target, read_only=True)
+            try:
+                cols = [r[0] for r in con.sql("describe jobs.jobs_company_hiring").fetchall()]
+            finally:
+                con.close()
+            self.assertNotIn("contact", cols)
+
 
 if __name__ == "__main__":
     unittest.main()
