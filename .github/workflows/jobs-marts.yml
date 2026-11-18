@@ -3,7 +3,8 @@
 # and in between; the jobs queue (ADR-0008) starts it on time, which GitHub's cron did not. Every run is idempotent: when
 # Bronze has not changed it finds the existing Silver/Gold objects and writes nothing.
 #
-# Then the `bi` job rebuilds the static site (jobs_bi_site.py → infra/bi/jobs) from that Gold run and deploys it
+# The `warehouse` job loads that Gold run into MotherDuck empire_gold (ADR-0016 P2, skipped until
+# the MOTHERDUCK_TOKEN secret exists). Then the `bi` job rebuilds the static site (jobs_bi_site.py → infra/bi/jobs) from that Gold run and deploys it
 # to Cloudflare Pages (jobs-insights.pages.dev, behind Cloudflare Access) when the Gold run is
 # not the one already live.
 #
@@ -167,8 +168,55 @@ jobs:
             || { echo "wrangler deploy failed"; exit 1; }
           echo "deployed $DEPLOY_MARK to $PAGES_PROJECT" | tee -a "$GITHUB_STEP_SUMMARY"
 
+  warehouse:
+    # ADR-0016 P2: replace the jobs tables in MotherDuck empire_gold with this Gold run
+    # (motherduck_load.py). Until the MOTHERDUCK_TOKEN secret exists it reports
+    # skipped_no_token and succeeds. Same gate as bi: stale Gold is still correct for its input.
+    needs: build
+    if: ${{ always() && (needs.build.outputs.exit_code == '0' || needs.build.outputs.exit_code == '3') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Load jobs Gold into MotherDuck
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.JOB_DATA_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.JOB_DATA_R2_SECRET_ACCESS_KEY }}
+          DATA_LAKE_S3_ENDPOINT: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_ENDPOINT_URL: ${{ secrets.JOB_DATA_S3_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+          SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+          MANIFEST_KEY: ${{ needs.build.outputs.manifest_key }}
+        run: |
+          if [ -z "$MOTHERDUCK_TOKEN" ]; then
+            echo '{"status": "skipped_no_token"}' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python -m pip install --disable-pip-version-check uv==0.13.1
+          uv sync --frozen --no-dev
+          set +e
+          # --require-latest: a re-run of an older workflow run must not replace newer tables.
+          .venv/bin/python infra/scripts/data_lake/motherduck_load.py --manifest-key "$MANIFEST_KEY" --require-latest --json \
+            > "$RUNNER_TEMP/warehouse.json" 2> "$RUNNER_TEMP/warehouse.err"
+          code=$?
+          set -e
+          # Status, run id and counts only (public log); an error shows its exception type.
+          jq '{status, gold_run_id, warehouse, loaded_rows,
+               error: (if .error then (.error | split(":")[0]) else null end)}' "$RUNNER_TEMP/warehouse.json" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $code
+
   heartbeat:
-    needs: [build, bi]
+    needs: [build, bi, warehouse]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -178,6 +226,7 @@ jobs:
           HEARTBEAT_TOKEN: ${{ secrets.HEARTBEAT_TOKEN }}
           CODE: ${{ needs.build.outputs.exit_code }}
           BI: ${{ needs.bi.result }}
+          WAREHOUSE: ${{ needs.warehouse.result }}
         run: |
           failed=()
           case "$CODE" in
@@ -187,6 +236,7 @@ jobs:
           esac
           # bi is skipped when the build failed; that is already reported above.
           if [ "$BI" = "failure" ] || [ "$BI" = "cancelled" ]; then failed+=("jobs-bi"); fi
+          if [ "$WAREHOUSE" = "failure" ] || [ "$WAREHOUSE" = "cancelled" ]; then failed+=("jobs-warehouse"); fi
           if [ ${#failed[@]} -eq 0 ]; then
             body='{"ok":true,"failed":[]}'
           else
