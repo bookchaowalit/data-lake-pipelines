@@ -178,7 +178,9 @@ def _dataset(path: str, doc: dict[str, Any]) -> tuple[list[str], set[str]]:
     listed = [c for c in doc.get("columns") or [] if isinstance(c, dict)]
     problems: list[str] = []
     if sql:
-        if _normal_sql(sql) not in APPROVED_SQL:
+        # Block comments are refused outright: the normaliser only knows line comments, and
+        # DuckDB ignores `--` inside /* */, so the two could disagree on what runs.
+        if "/*" in sql or "*/" in sql or _normal_sql(sql) not in APPROVED_SQL:
             return [
                 f"{path}: SQL dataset is not one of infra/bi/preset/jobs/datasets/*.sql"
             ], set()

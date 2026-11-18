@@ -577,6 +577,11 @@ class PresetExportCheckTests(unittest.TestCase):
             "a second dashboard misses datasets": {
                 "dashboard_export/dashboards/Other.yaml": "dashboard_title: Other\nposition: '{}'\n"
             },
+            "SQL dataset with a block comment": {
+                KPIS: _sql_dataset("jobs_kpis").replace(
+                    "from as_of a", "from as_of a /* x */"
+                )
+            },
             "chart on a dataset outside the export": {
                 CHART: "slice_name: x\ndataset_uuid: other\n"
             },
