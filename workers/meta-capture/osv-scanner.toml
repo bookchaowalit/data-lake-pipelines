@@ -1,0 +1,9 @@
+# picomatch ReDoS through single-branch repeated extglobs (CVE-2026-112366).
+# Every picomatch release up to 4.0.7 (the latest) is affected and no fixed version exists yet.
+# It reaches this worker only through dev tooling (vitest -> vite / tinyglobby / fdir), never the
+# deployed Worker bundle, and the glob patterns it parses come from our own test config, not from
+# user input. Drop this entry once picomatch ships a fix; the expiry forces a re-check.
+[[IgnoredVulns]]
+id = "GHSA-fc5q-39xc-vjpf"
+ignoreUntil = 2026-12-18
+reason = "No fixed picomatch release; dev-only (vitest/vite), patterns are repo-controlled. Re-check by 2026-12-18."
