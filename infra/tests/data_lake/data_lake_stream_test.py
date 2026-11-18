@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "infra" / "scripts"))
 
 from data_lake.avro import read_avro  # noqa: E402
 from data_lake.storage import ObjectStore, StorageError  # noqa: E402
+import data_lake.stream_sink as stream_sink  # noqa: E402
 from data_lake.stream_sink import (  # noqa: E402
     StreamMessage,
     convert_avro_file,
@@ -211,6 +212,64 @@ class StreamLakeContractTests(unittest.TestCase):
             self.assertEqual(after["status"], "degraded")
             self.assertEqual(after["indexed"], 0)
             self.assertEqual(after["errors"][0]["error"], "IndexedBronzeMissing")
+
+    def _converted_once(self, temp_dir, offset):
+        messages = [StreamMessage("events", 0, offset, {"id": f"evt-{offset}", "payload": {"value": 1}})]
+        run_once(FakeConsumer(messages.copy()), data_lake_uri=temp_dir, source="sensor", domain="operations",
+                 dataset="events", poll_ms=1, max_records=10)
+        return convert_pending(data_lake_uri=temp_dir)["results"][0]
+
+    def test_convert_pending_degrades_when_indexed_bronze_part_moved(self):
+        """Review P2: the same part file under another partition must not count as present."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self._converted_once(temp_dir, 60)
+            source = Path(temp_dir, result["bronze_key"])
+            moved = Path(str(source).replace("ingest_date=", "ingest_date=1999-01-01-was-"))
+            moved.parent.mkdir(parents=True)
+            source.rename(moved)
+            after = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual(after["status"], "degraded")
+            self.assertEqual(after["errors"][0]["error"], "IndexedBronzeMissing")
+
+    def test_convert_pending_rewrites_a_missing_conversion_manifest(self):
+        """Review P2: an indexed Avro whose manifest is gone goes back through the conversion path."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self._converted_once(temp_dir, 70)
+            Path(temp_dir, result["manifest_key"]).unlink()
+            after = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual(after["status"], "healthy", after["errors"])
+            self.assertEqual(after["indexed"], 0)
+            self.assertTrue(Path(temp_dir, result["manifest_key"]).exists())
+            self.assertEqual(convert_pending(data_lake_uri=temp_dir)["indexed"], 1)
+
+    def test_convert_pending_upgrades_a_legacy_index_entry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self._converted_once(temp_dir, 80)
+            store = ObjectStore(temp_dir)
+            (current,) = store.list_keys("control/state/stream-converted")
+            legacy = current[: current.index("/bronze/")] + ".json"
+            store.put_bytes(legacy, store.get_bytes(current), content_type="application/json")
+            Path(temp_dir, current).unlink()
+            after = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual((after["status"], after["indexed"]), ("healthy", 1))
+            self.assertIn(current, store.list_keys("control/state/stream-converted"))
+            self.assertEqual(result["status"], "success")
+
+    def test_legacy_upgrades_are_bounded_per_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._converted_once(temp_dir, 90)
+            store = ObjectStore(temp_dir)
+            (current,) = store.list_keys("control/state/stream-converted")
+            legacy = current[: current.index("/bronze/")] + ".json"
+            store.put_bytes(legacy, store.get_bytes(current), content_type="application/json")
+            Path(temp_dir, current).unlink()
+            with patch.object(stream_sink, "LEGACY_UPGRADES_PER_RUN", 0):
+                held = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual((held["status"], held["indexed"], held["legacy_pending"]), ("healthy", 1, 1))
+            self.assertNotIn(current, store.list_keys("control/state/stream-converted"))
+            upgraded = convert_pending(data_lake_uri=temp_dir)
+            self.assertEqual((upgraded["indexed"], upgraded["legacy_pending"]), (1, 0))
+            self.assertIn(current, store.list_keys("control/state/stream-converted"))
 
 if __name__ == "__main__":
     unittest.main()

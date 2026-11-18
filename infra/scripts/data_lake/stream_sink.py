@@ -731,31 +731,42 @@ _BRONZE_PART_PREFIX = "part-"
 _BRONZE_PART_SUFFIX = ".parquet"
 
 
-def _converted_index_key(avro_key: str, conversion_id: str) -> str:
-    """Index entry for one landing Avro key, bound to the conversion id of its Bronze part.
+def _converted_index_key(avro_key: str, conversion_id: str, bronze_key: str) -> str:
+    """Index entry for one landing Avro key, naming its conversion id and full Bronze key.
 
-    Landing objects are written once (``--if-none-match``), so the key stays bound to its bytes.
+    Landing objects are written once (``--if-none-match``), so the key stays bound to its bytes. The
+    Bronze key sits in the entry's own key, so a run checks it (and the conversion manifest derived
+    from it) against listings without reading the entry.
     """
-    return f"{CONVERTED_INDEX_PREFIX}/{avro_key}/conversion_id={conversion_id}.json"
+    return f"{CONVERTED_INDEX_PREFIX}/{avro_key}/conversion_id={conversion_id}/{bronze_key}.json"
 
 
-def _parse_index_key(key: str) -> tuple[str, str] | None:
+def _parse_index_key(key: str) -> tuple[str, str, str] | None:
+    """``(avro_key, conversion_id, bronze_key)``; ``bronze_key`` is empty for a legacy entry."""
     prefix = CONVERTED_INDEX_PREFIX + "/"
     if not key.startswith(prefix) or not key.endswith(".json"):
         return None
-    avro_key, _, leaf = key[len(prefix) : -len(".json")].rpartition("/")
-    if not avro_key or not leaf.startswith("conversion_id="):
+    avro_key, marker, tail = key[len(prefix) : -len(".json")].partition("/conversion_id=")
+    if not avro_key or not marker:
         return None
-    return avro_key, leaf[len("conversion_id=") :]
+    conversion_id, _, bronze_key = tail.partition("/")
+    if not conversion_id or (bronze_key and not _bronze_key_matches(bronze_key, conversion_id)):
+        return None
+    return avro_key, conversion_id, bronze_key
 
 
-def _bronze_conversion_ids(store: ObjectStore) -> set[str]:
-    ids: set[str] = set()
-    for key in store.list_keys("bronze"):
-        leaf = key.rsplit("/", 1)[-1]
-        if leaf.startswith(_BRONZE_PART_PREFIX) and leaf.endswith(_BRONZE_PART_SUFFIX):
-            ids.add(leaf[len(_BRONZE_PART_PREFIX) : -len(_BRONZE_PART_SUFFIX)])
-    return ids
+def _bronze_key_matches(bronze_key: str, conversion_id: str) -> bool:
+    return bronze_key.startswith("bronze/") and bronze_key.endswith(
+        f"/{_BRONZE_PART_PREFIX}{conversion_id}{_BRONZE_PART_SUFFIX}"
+    )
+
+
+def _conversion_manifest_key(bronze_key: str, conversion_id: str) -> str | None:
+    """The conversion manifest key ``convert_avro_file`` writes for this Bronze part."""
+    sources = [part for part in bronze_key.split("/") if part.startswith("source=")]
+    if len(sources) != 1:
+        return None
+    return f"control/manifests/stream-parquet/{sources[0]}/conversion_id={conversion_id}.json"
 
 
 def _record_converted(store: ObjectStore, avro_key: str, result: dict[str, Any]) -> None:
@@ -772,10 +783,32 @@ def _record_converted(store: ObjectStore, avro_key: str, result: dict[str, Any])
         "record_count": result.get("record_count"),
     }
     store.put_bytes(
-        _converted_index_key(avro_key, conversion_id),
+        _converted_index_key(avro_key, conversion_id, bronze_key),
         (canonical_json(entry) + "\n").encode("utf-8"),
         content_type="application/json",
     )
+
+
+LEGACY_UPGRADES_PER_RUN = 150  # each costs a read and a write; the job has a 20-minute timeout
+
+
+def _indexed_parts(store: ObjectStore, avro_key: str, entries: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    """``(conversion_id, bronze_key)`` pairs for one Avro key; a legacy entry is read once and rewritten."""
+    current = {entry for entry in entries if entry[1]}
+    if current:
+        return current
+    parts: set[tuple[str, str]] = set()
+    for conversion_id, _ in entries:
+        legacy_key = f"{CONVERTED_INDEX_PREFIX}/{avro_key}/conversion_id={conversion_id}.json"
+        try:
+            body = json.loads(store.get_bytes(legacy_key).decode("utf-8"))
+        except (ObjectNotFound, ValueError):
+            continue
+        bronze_key = str(body.get("bronze_key") or "")
+        if _bronze_key_matches(bronze_key, conversion_id):
+            _record_converted(store, avro_key, body)
+            parts.add((conversion_id, bronze_key))
+    return parts
 
 
 def convert_pending(
@@ -787,32 +820,56 @@ def convert_pending(
     """Scan the immutable stream landing prefix and convert pending Avro files.
 
     A landing key with an entry under ``control/state/stream-converted/`` is skipped without
-    reading it, as long as the Bronze part named by the entry's conversion id still appears in
-    the Bronze listing; a missing part is reported as an error (status ``degraded``). Listings
-    replace three object reads per historical file, which grew past the event-sink job timeout
-    (330 files, ~16 min on 2026-11-15). Keys without an entry go through ``convert_avro_file``
-    (full manifest and Bronze checksum checks) and get an entry afterwards, so a cancelled run
-    keeps its progress. ``convert --avro-key`` still re-verifies one file end to end.
+    reading it when the entry's full Bronze key appears in the Bronze listing and its conversion
+    manifest appears in the manifest listing. A missing Bronze part is reported as an error
+    (status ``degraded``); a missing manifest sends the key back through ``convert_avro_file``,
+    which writes it again. Listings replace three object reads per historical file, which grew
+    past the event-sink job timeout (330 files, ~16 min on 2026-11-15). A legacy entry (conversion
+    id only) is read once and rewritten with its Bronze key, at most ``LEGACY_UPGRADES_PER_RUN``
+    per run; the rest keep the earlier conversion-id check until a later run upgrades them. Keys without an entry go through
+    ``convert_avro_file`` (full manifest and Bronze checksum checks) and get an entry afterwards,
+    so a cancelled run keeps its progress. ``convert --avro-key`` still re-verifies one file.
     """
     store = ObjectStore(data_lake_uri)
     avro_keys = [key for key in store.list_keys("landing/stream") if key.endswith(".avro")]
-    index: dict[str, set[str]] = {}
+    index: dict[str, set[tuple[str, str]]] = {}
     for key in store.list_keys(CONVERTED_INDEX_PREFIX):
         parsed = _parse_index_key(key)
         if parsed:
-            index.setdefault(parsed[0], set()).add(parsed[1])
-    bronze_ids = _bronze_conversion_ids(store) if index else set()
+            index.setdefault(parsed[0], set()).add((parsed[1], parsed[2]))
+    bronze_keys = set(store.list_keys("bronze")) if index else set()
+    manifest_keys = set(store.list_keys("control/manifests/stream-parquet")) if index else set()
+    bronze_ids = {
+        key.rsplit("/", 1)[-1][len(_BRONZE_PART_PREFIX) : -len(_BRONZE_PART_SUFFIX)]
+        for key in bronze_keys
+        if key.rsplit("/", 1)[-1].startswith(_BRONZE_PART_PREFIX) and key.endswith(_BRONZE_PART_SUFFIX)
+    }
+    legacy_budget, legacy_pending = LEGACY_UPGRADES_PER_RUN, 0
     results: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     indexed = 0
     for avro_key in avro_keys:
-        conversion_ids = index.get(avro_key)
-        if conversion_ids:
-            if conversion_ids <= bronze_ids:
+        entries = index.get(avro_key)
+        if entries and not any(bronze for _, bronze in entries) and legacy_budget <= 0:
+            # Legacy entry past this run's upgrade budget: keep the earlier conversion-id check for now.
+            if {c for c, _ in entries} <= bronze_ids:
                 indexed += 1
+                legacy_pending += 1
             else:
                 errors.append({"avro_key": avro_key, "error": "IndexedBronzeMissing"})
             continue
+        if entries:
+            if not any(bronze for _, bronze in entries):
+                legacy_budget -= 1
+            parts = _indexed_parts(store, avro_key, entries)
+            if parts and all(bronze_key in bronze_keys for _, bronze_key in parts):
+                if all(_conversion_manifest_key(b, c) in manifest_keys for c, b in parts):
+                    indexed += 1
+                    continue
+                # Manifest gone: the full conversion path writes it again from the Bronze part.
+            elif parts:
+                errors.append({"avro_key": avro_key, "error": "IndexedBronzeMissing"})
+                continue
         try:
             result = convert_avro_file(
                 data_lake_uri=data_lake_uri,
@@ -833,6 +890,7 @@ def convert_pending(
         "converted": sum(result["status"] == "success" for result in results),
         "already_converted": indexed + sum(result["status"] == "already_converted" for result in results),
         "indexed": indexed,
+        "legacy_pending": legacy_pending,
         "errors": errors,
         "results": results,
     }
