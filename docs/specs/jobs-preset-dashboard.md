@@ -47,21 +47,35 @@ Dashboard title: `Jobs insights`.
 
 ## Parity check
 
-`preset_parity.py` runs inside the `warehouse` job of `jobs-marts.yml`, after the load, with the
-read-write token:
+`preset_parity.py` runs inside the `warehouse` job of `jobs-marts.yml`, after a load that reports
+`loaded` or `unchanged` (any other load status skips it), with the read-write token:
 
 - It builds the jobs-insights snapshot from the same Gold manifest and takes the site's own
-  numbers (`jobs_bi_site.overview_kpis`, `skills_last_week`, the per-board 90-day totals and the
-  company rows).
-- It runs the four dataset SQL files against MotherDuck and compares: each tile, `as_of_date`,
-  the per-board totals, the skills week and its top 20, and every company row.
-- If the warehouse's newest `_gold_loads` row is a different Gold run (the load was skipped), the
-  result is `skipped_run_mismatch` and nothing is recorded.
+  numbers (`jobs_bi_site.overview_kpis`, `skills_last_week`, the daily rows and the company rows).
+- In one transaction it reads the warehouse's newest `_gold_loads` run, runs the four dataset SQL
+  files and writes the result, so a load from another session cannot mix two Gold runs. A
+  different run (the load was skipped or another session loaded) gives `skipped_run_mismatch`
+  and nothing is recorded.
+- It compares each tile, `as_of_date`, postings per `(posted_date, board)` in the 90-day window
+  (the chart's own points, so a posting moved to another day is a mismatch), the skills week and
+  its top 20, and every company row in page order.
 - Each check appends a row to `jobs._preset_parity` (`seq`, `gold_run_id`, `checked_at`, `ok`,
-  `mismatches_json`). The streak starts at the first match after the newest mismatch;
-  `p3_parity_met` is true once it is 14 days long.
-- The log shows status, run id, the names of the comparisons that differ and the streak, never
-  values. A mismatch exits 2, fails the job and the heartbeat reports `jobs-warehouse`.
+  `mismatches_json`, `export_sha256`). `export_sha256` fingerprints the dashboard export ZIPs
+  committed at that revision, and is empty when none is committed or one fails the export check.
+- Two streaks, both broken by a mismatch or by more than 6 h between two checks (jobs-marts runs
+  every 2 h; time nobody checked is not evidence):
+  - `dataset_matching_days`: the dataset SQL alone matched. This says nothing about a dashboard.
+  - `dashboard_matching_days`: only checks made with the same committed export count, so it starts
+    when the export is first committed and restarts after every re-export.
+  `p3_parity_met` is true once the dashboard streak is 14 days long.
+- The log shows status, run id, the names of the comparisons that differ, the export state and the
+  streaks, never values. A mismatch exits 2, fails the job and the heartbeat reports
+  `jobs-warehouse`.
+
+What the check proves: the committed dashboard reads only the repository's dataset SQL (the export
+check refuses anything else), and that SQL returned the jobs-insights numbers on every check for
+14 days. It does not see how a chart aggregates or filters a dataset in the Preset UI; the owner's
+look at the dashboard (step 7) covers that.
 
 Locally, against a DuckDB file named `empire_gold.duckdb` that `motherduck_load.py` loaded:
 
@@ -93,20 +107,30 @@ Locally, against a DuckDB file named `empire_gold.duckdb` that `motherduck_load.
    ```
 
    Commit the ZIP only when it prints `ok`. Export again and commit after every dashboard change.
-7. P3 is done when the summary of a jobs-marts run shows `p3_parity_met: true`. Then the owner
-   compares the dashboard with https://jobs-insights.pages.dev once by eye. jobs-insights keeps
-   running until the owner retires it (ADR-0016 Rollout).
+7. Right after committing the first export, compare each dashboard chart with
+   https://jobs-insights.pages.dev once by eye (same tiles, chart points, skills and companies).
+   P3 is done when a jobs-marts run summary shows `p3_parity_met: true` (14 days with that same
+   export) and a second look at the end still matches. jobs-insights keeps running until the
+   owner retires it (ADR-0016 Rollout).
 
 ## Export check rules
 
 `preset_export_check.py` fails a ZIP when:
 
-- a file holds a `motherduck_token` value, a JWT, an unmasked `password` or an `encrypted_extra`;
+- a credential is found. Every YAML file is parsed and walked, including JSON held in string
+  values (chart `params`, `query_context`, database `extra`), and also scanned as raw text: a
+  `motherduck_token` value, a JWT, or a key named like a password, secret, token, API key,
+  private key, credential, access key or `encrypted_extra` that holds a value (Preset's masked
+  `XXXXXXXXXX` is allowed);
 - a database URI is not exactly `duckdb:///md:empire_gold` (no query parameters);
 - a physical dataset is not an `EXPORT_APPROVED` mart in schema `jobs`, or lists a column outside
-  that mart's approved columns (calculated columns are allowed);
+  that mart's approved columns;
 - a SQL dataset's SQL differs from every file in `infra/bi/preset/jobs/datasets/` (comments,
   whitespace and case are ignored);
+- a SQL fragment Preset builds queries from (a calculated column, a dataset metric, or any
+  `sqlExpression` / `expression` in a chart) names anything other than its own dataset's columns
+  and a fixed list of SQL keywords and functions, or uses a quoted or dotted name, a comment or
+  `;`; a chart points at a dataset that is not in the export;
 - an entry is not YAML, has an absolute or `..` path, or is over 5 MB; or there is no dashboard.
 
 Problems name the file and the rule, never the matched text.
