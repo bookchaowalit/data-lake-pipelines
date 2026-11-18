@@ -58,7 +58,9 @@ Dashboard title: `Jobs insights`.
   and nothing is recorded.
 - It compares each tile, `as_of_date`, postings per `(posted_date, board)` in the 90-day window
   (the chart's own points, so a posting moved to another day is a mismatch), the skills week and
-  its top 20, and every company row in page order.
+  its top 20, and every company row in page order (name, 30-day and all-time postings, boards as
+  the page prints them, last posting date). Daily rows are summed per key as the chart sums them,
+  so a repeated row is a mismatch.
 - Each check appends a row to `jobs._preset_parity` (`seq`, `gold_run_id`, `checked_at`, `ok`,
   `mismatches_json`, `export_sha256`). `export_sha256` fingerprints the dashboard export ZIPs
   committed at that revision, and is empty when none is committed or one fails the export check.
@@ -126,11 +128,14 @@ Locally, against a DuckDB file named `empire_gold.duckdb` that `motherduck_load.
 - a physical dataset is not an `EXPORT_APPROVED` mart in schema `jobs`, or lists a column outside
   that mart's approved columns;
 - a SQL dataset's SQL differs from every file in `infra/bi/preset/jobs/datasets/` (comments,
-  whitespace and case are ignored);
+  whitespace and case are ignored outside quoted text; string literals must match exactly);
 - a SQL fragment Preset builds queries from (a calculated column, a dataset metric, or any
-  `sqlExpression` / `expression` in a chart) names anything other than its own dataset's columns
+  `sqlExpression`, `expression`, `where` or `having` in a chart, including `query_context`
+  extras) names anything other than its own dataset's columns
   and a fixed list of SQL keywords and functions, or uses a quoted or dotted name, a comment or
   `;`; a chart points at a dataset that is not in the export;
+- a dashboard holds SQL, shows a chart that is not in the export, or does not show at least one
+  chart on each of the four SQL datasets (the parity check proves only what they return);
 - an entry is not YAML, has an absolute or `..` path, or is over 5 MB; or there is no dashboard.
 
 Problems name the file and the rule, never the matched text.

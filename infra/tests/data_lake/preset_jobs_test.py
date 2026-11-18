@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -231,6 +232,61 @@ class PresetParityTests(unittest.TestCase):
             )
             self.assertEqual(result["mismatches"], ["daily_90d"])
 
+    def test_company_boards_and_dates_and_repeated_daily_rows_are_compared(self):
+        from data_lake.preset_parity import check_parity
+
+        with TEMP() as root, TEMP() as out:
+            gold, target = self._loaded(root, out)
+            self._sql(
+                target,
+                "update jobs.jobs_company_hiring set last_posted_date = last_posted_date - 1",
+            )
+            dated = check_parity(
+                gold["manifest_key"],
+                target,
+                data_lake_uri=root,
+                now=NOW,
+                export_sha256="a",
+            )
+            self.assertEqual(dated["mismatches"], ["companies"])
+            self._sql(
+                target,
+                "update jobs.jobs_company_hiring set last_posted_date = last_posted_date + 1",
+            )
+            self._sql(
+                target,
+                "update jobs.jobs_company_hiring set boards = list_reverse(boards) || ['Extra']",
+            )
+            boards = check_parity(
+                gold["manifest_key"],
+                target,
+                data_lake_uri=root,
+                now=NOW,
+                export_sha256="a",
+            )
+            self.assertEqual(boards["mismatches"], ["companies"])
+
+    def test_a_repeated_daily_row_is_a_mismatch(self):
+        from data_lake.preset_parity import check_parity
+
+        with TEMP() as root, TEMP() as out:
+            gold, target = self._loaded(root, out)
+            # The chart sums postings per day and board, so a repeated row doubles that point.
+            self._sql(
+                target,
+                "insert into jobs.jobs_postings_daily select * from jobs.jobs_postings_daily "
+                "where posted_date <= (select max(as_of_date) from jobs.jobs_board_health) "
+                "order by posted_date desc limit 1",
+            )
+            result = check_parity(
+                gold["manifest_key"],
+                target,
+                data_lake_uri=root,
+                now=NOW,
+                export_sha256="a",
+            )
+            self.assertIn("daily_90d", result["mismatches"])
+
     def test_skills_week_and_order_match_the_site(self):
         import duckdb
 
@@ -296,18 +352,31 @@ DS = "dashboard_export/datasets/MotherDuck/"
 KPIS = DS + "jobs_kpis.yaml"
 HEALTH = DS + "jobs_board_health.yaml"
 CHART = "dashboard_export/charts/Postings.yaml"
+DASHBOARD = "dashboard_export/dashboards/Jobs.yaml"
+
+
+def _indented_sql(name: str) -> str:
+    from data_lake.preset_parity import dataset_sql
+
+    return "\n".join("    " + line for line in dataset_sql(name).splitlines())
+
+
+def _sql_dataset(name: str) -> str:
+    return f"table_name: {name}\nschema: null\nuuid: u-{name}\nsql: |\n{_indented_sql(name)}\n"
 
 
 def _export(**overrides: str | None) -> dict[str, str]:
-    from data_lake.preset_parity import dataset_sql
-
-    sql = "\n".join("    " + line for line in dataset_sql("jobs_kpis").splitlines())
+    others = ("jobs_daily_90d", "jobs_skills_last_week", "jobs_companies_30d")
+    position = {
+        f"CHART-{n}": {"type": "CHART", "meta": {"uuid": f"c-{n}"}}
+        for n in ("jobs_kpis", *others)
+    }
     files: dict[str, str | None] = {
         "dashboard_export/metadata.yaml": "version: 1.0.0\ntype: Dashboard\n",
         DB: "database_name: MotherDuck\nsqlalchemy_uri: duckdb:///md:empire_gold\nextra:\n  allows_virtual_table_explore: true\n",
         KPIS: (
-            f"table_name: jobs_kpis\nschema: null\nuuid: u-kpis\nsql: |\n{sql}\n"
-            "columns:\n- column_name: postings\n- column_name: boards\n"
+            _sql_dataset("jobs_kpis")
+            + "columns:\n- column_name: postings\n- column_name: boards\n"
             "metrics:\n- metric_name: count\n  expression: COUNT(*)\n"
         ),
         HEALTH: (
@@ -316,12 +385,18 @@ def _export(**overrides: str | None) -> dict[str, str]:
             "metrics:\n- metric_name: total\n  expression: SUM(postings_total)\n"
         ),
         CHART: (
-            "slice_name: Postings\nviz_type: big_number_total\ndataset_uuid: u-kpis\nparams:\n"
+            "slice_name: Postings\nviz_type: big_number_total\nuuid: c-jobs_kpis\ndataset_uuid: u-jobs_kpis\nparams:\n"
             "  metric:\n    expressionType: SQL\n    sqlExpression: sum(postings) / nullif(boards, 0)\n"
-            'query_context: \'{"queries": [{"filters": [{"sqlExpression": "boards > 1"}]}]}\'\n'
+            'query_context: \'{"queries": [{"filters": [{"sqlExpression": "boards > 1"}], '
+            '"extras": {"where": "", "having": "sum(postings) > 0"}}]}\'\n'
         ),
-        "dashboard_export/dashboards/Jobs.yaml": "dashboard_title: Jobs insights\n",
+        DASHBOARD: f"dashboard_title: Jobs insights\nposition: '{json.dumps(position)}'\n",
     }
+    for name in others:
+        files[DS + f"{name}.yaml"] = _sql_dataset(name)
+        files[f"dashboard_export/charts/{name}.yaml"] = (
+            f"slice_name: {name}\nuuid: c-{name}\ndataset_uuid: u-{name}\n"
+        )
     files.update(overrides)
     return {name: text for name, text in files.items() if text is not None}
 
@@ -426,6 +501,26 @@ class PresetExportCheckTests(unittest.TestCase):
             },
             "chart names a column of another dataset": {
                 CHART: "slice_name: x\ndataset_uuid: u-kpis\nparams:\n  metric:\n    sqlExpression: sum(postings_total)\n"
+            },
+            "chart where clause reads another table": {
+                CHART: (
+                    "slice_name: x\nuuid: c-jobs_kpis\ndataset_uuid: u-jobs_kpis\n"
+                    'query_context: \'{"queries": [{"extras": {"where": "boards in (select 1 from posts)"}}]}\'\n'
+                )
+            },
+            "chart having names another column": {
+                CHART: "slice_name: x\nuuid: c-jobs_kpis\ndataset_uuid: u-jobs_kpis\nparams:\n  having: sum(email) > 0\n"
+            },
+            "dashboard misses a dataset": {
+                "dashboard_export/charts/jobs_companies_30d.yaml": None
+            },
+            "dashboard chart not in the export": {
+                DASHBOARD: 'dashboard_title: x\nposition: \'{"C": {"type": "CHART", "meta": {"uuid": "nope"}}}\'\n'
+            },
+            "SQL dataset with a changed literal": {
+                DS + "jobs_companies_30d.yaml": _sql_dataset(
+                    "jobs_companies_30d"
+                ).replace("', '", "',  '")
             },
             "chart on a dataset outside the export": {
                 CHART: "slice_name: x\ndataset_uuid: other\n"

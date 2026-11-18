@@ -10,7 +10,7 @@ what the static jobs-insights site computes from the same Gold run
 - the overview tiles (postings, last 90 days, last 7 days, boards, companies);
 - postings per day and board over the 90-day window (the chart's own points);
 - the last complete week's top 20 tags;
-- every company with its 30-day and all-time postings, in page order.
+- every company with its 30-day and all-time postings, boards and last posting date, in page order.
 
 Each check appends one row to ``jobs._preset_parity`` in the warehouse, with the
 fingerprint of the dashboard export committed at that revision (``export_sha256``;
@@ -87,7 +87,22 @@ def _rows(con: Any, sql: str) -> list[dict[str, Any]]:
 
 
 def _daily(rows: list[dict[str, Any]]) -> dict[tuple[Any, str], int]:
-    return {(row["posted_date"], row["board"]): int(row["postings"]) for row in rows}
+    """Postings per (day, board), summed as the chart sums them (a repeated row counts twice)."""
+    out: dict[tuple[Any, str], int] = {}
+    for row in rows:
+        key = (row["posted_date"], row["board"])
+        out[key] = out.get(key, 0) + int(row["postings"])
+    return out
+
+
+def _company(row: dict[str, Any], boards: str) -> tuple[Any, ...]:
+    return (
+        row["company"],
+        int(row["postings_30d"]),
+        int(row["postings_total"]),
+        boards,
+        row["last_posted_date"],
+    )
 
 
 def site_values(snapshot: Snapshot) -> dict[str, Any]:
@@ -101,8 +116,9 @@ def site_values(snapshot: Snapshot) -> dict[str, Any]:
             last_week,
             [(int(r["demand_rank"]), r["tag"], int(r["postings"])) for r in top],
         ],
+        # Boards as the Companies page prints them.
         "companies": [
-            (r["company"], int(r["postings_30d"]), int(r["postings_total"]))
+            _company(r, ", ".join(str(b) for b in (r["boards"] or [])))
             for r in snapshot.companies
         ],
     }
@@ -129,7 +145,7 @@ def warehouse_values(con: Any) -> dict[str, Any]:
             [(int(r["demand_rank"]), r["tag"], int(r["postings"])) for r in skills],
         ],
         "companies": [
-            (r["company"], int(r["postings_30d"]), int(r["postings_total"]))
+            _company(r, r["boards"])
             for r in _rows(con, dataset_sql("jobs_companies_30d"))
         ],
     }

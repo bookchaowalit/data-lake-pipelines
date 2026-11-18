@@ -71,12 +71,39 @@ SQL_WORDS = frozenset(
     lower upper length trim asc desc filter where over partition by order
     """.split()
 )
-EXPRESSION_KEYS = ("sqlExpression", "expression")
+# Keys whose string values Superset puts into the SQL it runs (adhoc metrics and filters, the
+# legacy free-form WHERE/HAVING boxes and query_context extras).
+EXPRESSION_KEYS = ("sqlExpression", "expression", "where", "having")
 
 
 def _normal_sql(sql: str) -> str:
-    lines = [line.split("--", 1)[0] for line in sql.splitlines()]
-    return " ".join(" ".join(lines).split()).rstrip(";").strip().lower()
+    """Comments dropped, whitespace collapsed and case folded outside quoted text only."""
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch in ("'", '"'):
+            j = i + 1
+            while j < n:
+                if sql[j] == ch:
+                    if j + 1 < n and sql[j + 1] == ch:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            out.append(sql[i : j + 1])
+            i = j + 1
+        elif sql.startswith("--", i):
+            while i < n and sql[i] != "\n":
+                i += 1
+        elif ch.isspace():
+            if out and out[-1] != " ":
+                out.append(" ")
+            i += 1
+        else:
+            out.append(ch.lower())
+            i += 1
+    return "".join(out).strip().rstrip(";").strip()
 
 
 APPROVED_SQL = {_normal_sql(dataset_sql(name)): name for name in DATASETS}
@@ -219,6 +246,7 @@ def check_zip(zip_path: Path) -> list[str]:
                 docs[info.filename] = (kind, doc)
 
     dataset_columns: dict[str, set[str]] = {}
+    dataset_names: dict[str, str] = {}
     for path, (kind, doc) in docs.items():
         if kind == "databases":
             if str(doc.get("sqlalchemy_uri") or "") != DATABASE_URI:
@@ -229,13 +257,18 @@ def check_zip(zip_path: Path) -> list[str]:
             found, columns = _dataset(path, doc)
             problems += found
             dataset_columns[str(doc.get("uuid"))] = columns
+            if name := APPROVED_SQL.get(_normal_sql(str(doc.get("sql") or ""))):
+                dataset_names[str(doc.get("uuid"))] = name
+    chart_datasets: dict[str, str] = {}
     for path, (kind, doc) in docs.items():
         if kind != "charts":
             continue
-        chart_columns = dataset_columns.get(str(doc.get("dataset_uuid")))
+        dataset_uuid = str(doc.get("dataset_uuid"))
+        chart_columns = dataset_columns.get(dataset_uuid)
         if chart_columns is None:
             problems.append(f"{path}: chart does not use a dataset in this export")
             continue
+        chart_datasets[str(doc.get("uuid"))] = dataset_uuid
         for key, value in _walk(doc):
             if (
                 key in EXPRESSION_KEYS
@@ -243,8 +276,31 @@ def check_zip(zip_path: Path) -> list[str]:
                 and (problem := _expression_problem(str(value), chart_columns))
             ):
                 problems.append(f"{path}: a chart {key} {problem}")
-    if not any(kind == "dashboards" for kind, _ in docs.values()):
+    dashboards = [
+        (path, doc) for path, (kind, doc) in docs.items() if kind == "dashboards"
+    ]
+    if not dashboards:
         problems.append(f"{zip_path.name}: no dashboard in the export")
+    shown: set[str] = set()
+    for path, doc in dashboards:
+        for key, value in _walk(doc):
+            if key in EXPRESSION_KEYS and value:
+                problems.append(f"{path}: the dashboard holds SQL ({key})")
+            if isinstance(value, dict) and value.get("type") == "CHART":
+                chart = str((value.get("meta") or {}).get("uuid"))
+                if chart not in chart_datasets:
+                    problems.append(
+                        f"{path}: the dashboard shows a chart that is not in the export"
+                    )
+                    continue
+                if name := dataset_names.get(chart_datasets[chart]):
+                    shown.add(name)
+    # The parity check only proves what these four datasets return: the dashboard must show each.
+    for name in DATASETS:
+        if dashboards and name not in shown:
+            problems.append(
+                f"{zip_path.name}: no dashboard chart uses the {name} dataset"
+            )
     return problems
 
 
