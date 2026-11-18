@@ -152,29 +152,38 @@ def contains_term(text: str, denylist: Sequence[str]) -> bool:
     return any(t in plain or (skeleton(t) and skeleton(t) in bare) for t in denylist)
 
 
-def _strings(obj: Any) -> list[str]:
+DECODE_MAX = 200_000  # longest string decoded as JSON for the screen; longer is screened as raw text only
+
+
+def _strings(obj: Any, decode: bool = True) -> list[str]:
     """Every scalar inside a nested structure, as text (screened raw, not via a JSON encoding that
     would turn a line break inside a client name into the letters ``\\n``). A string holding a JSON
-    object or array (raw ``_extra`` / ``_coerce_errors``) is screened both as it is and decoded."""
+    object or array (raw ``_extra`` / ``_coerce_errors``) is screened both as it is and decoded, one
+    level only (strings inside the decoded value are not decoded again)."""
     if isinstance(obj, dict):
-        return [x for v in obj.values() for x in _strings(v)]
+        return [x for v in obj.values() for x in _strings(v, decode)]
     if isinstance(obj, (list, tuple, set)):
-        return [x for v in obj for x in _strings(v)]
+        return [x for v in obj for x in _strings(v, decode)]
     if obj is None:
         return []
     text = str(obj)
-    if isinstance(obj, str) and text.lstrip()[:1] in ("{", "["):
+    if decode and isinstance(obj, str) and len(text) <= DECODE_MAX and text.lstrip()[:1] in ("{", "["):
         try:
             inner = json.loads(text)
         except ValueError:
             return [text]
         if isinstance(inner, (dict, list)):
-            return [text, *_strings(inner)]
+            return [text, *_strings(inner, False)]
     return [text]
 
 
 def any_term(obj: Any, denylist: Sequence[str]) -> bool:
-    return any(contains_term(v, denylist) for v in _strings(obj))
+    """True when any value names a term. Fails closed: a value too deeply nested to walk (a post text
+    like ``[[[[...`` decodes to that) counts as a match, so the row is withheld and the run goes on."""
+    try:
+        return any(contains_term(v, denylist) for v in _strings(obj))
+    except RecursionError:
+        return True
 
 
 # ------------------------------------------------------------------------------------------ facts
