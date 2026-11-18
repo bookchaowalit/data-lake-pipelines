@@ -49,8 +49,12 @@ GOLD_MANIFEST_PREFIX = f"control/manifests/gold/source={GOLD_SOURCE}/domain=jobs
 WAREHOUSE_DATABASE = "empire_gold"
 WAREHOUSE_SCHEMA = "jobs"
 LOAD_LOG = "_gold_loads"
-# Datasets cleared to leave R2 (ADR-0016 §2: jobs = public postings and aggregates).
-ALLOWED_DATASETS = frozenset(JOBS_MARTS)
+# Marts cleared to leave R2 (ADR-0016 §2: jobs = public postings and aggregates), reviewed
+# 2026-11-18. Kept apart from JOBS_MARTS on purpose: a mart new to Gold is not exported until it
+# is classified as holding no personal data and added here.
+EXPORT_APPROVED = frozenset(
+    {"jobs_postings_daily", "jobs_board_health", "jobs_skills_demand", "jobs_company_hiring"}
+)
 
 
 class WarehouseLoadError(RuntimeError):
@@ -71,10 +75,12 @@ def _connect(target: str):
     import duckdb  # type: ignore
 
     if target.startswith("md:"):
-        # The motherduck extension reads MOTHERDUCK_TOKEN from the environment;
-        # the token never appears in the connection string or in output.
+        # The token goes in the connection config, never in the connection string or output.
         database = target[3:] or WAREHOUSE_DATABASE
-        con = duckdb.connect("md:")
+        token = os.environ.get("MOTHERDUCK_TOKEN", "").strip()
+        if not token:
+            raise WarehouseLoadError("MOTHERDUCK_TOKEN is not set")
+        con = duckdb.connect("md:", config={"motherduck_token": token})
         con.execute(f'CREATE DATABASE IF NOT EXISTS "{database}"')
         con.execute(f'USE "{database}"')
         return con
@@ -86,11 +92,18 @@ def _read_manifest(store: ObjectStore, manifest_key: str) -> tuple[dict[str, Any
     if not (manifest_key.startswith(GOLD_MANIFEST_PREFIX) and manifest_key.endswith(".json")):
         raise WarehouseLoadError("not a jobs Gold manifest key")
     manifest = json.loads(store.get_bytes(manifest_key))
-    marts = {mart["dataset"]: mart for mart in manifest.get("marts", [])}
+    listed = [mart["dataset"] for mart in manifest.get("marts", [])]
+    if len(listed) != len(set(listed)):
+        raise WarehouseLoadError("manifest lists a mart more than once")
     if manifest.get("layer") != "gold" or manifest.get("domain") != "jobs":
         raise WarehouseLoadError("manifest is not jobs Gold")
-    if set(marts) != ALLOWED_DATASETS:
-        raise WarehouseLoadError("manifest does not list exactly the allow-listed jobs marts")
+    if set(listed) != set(JOBS_MARTS):
+        raise WarehouseLoadError("manifest does not list exactly the published jobs marts")
+    missing = EXPORT_APPROVED - set(listed)
+    if missing:
+        raise WarehouseLoadError("manifest lacks an export-approved mart")
+    # Only export-approved marts leave R2; any other mart is reported, never loaded.
+    marts = {mart["dataset"]: mart for mart in manifest["marts"] if mart["dataset"] in EXPORT_APPROVED}
     gold_run_id = str(manifest.get("gold_run_id", ""))
     for name, mart in marts.items():
         # Each table may only be filled from its own mart's part of this Gold run.
@@ -100,6 +113,7 @@ def _read_manifest(store: ObjectStore, manifest_key: str) -> tuple[dict[str, Any
         )
         if mart.get("key") != expected_key:
             raise WarehouseLoadError(f"{name}: part key is not this mart's part of the Gold run")
+    manifest["_not_exported"] = sorted(set(listed) - EXPORT_APPROVED)
     return manifest, marts
 
 
@@ -168,6 +182,7 @@ def load_jobs_gold(
         "gold_run_id": gold_run_id,
         "manifest_key": manifest_key,
         "expected_rows": expected,
+        "not_exported": manifest["_not_exported"],
     }
 
     con = _connect(target)
@@ -228,7 +243,11 @@ def latest_pointer(*, data_lake_uri: str = "") -> tuple[str, str]:
     pointers = sorted(key for key in store.list_keys(GOLD_POINTER_PREFIX) if key.endswith(".json"))
     if not pointers:
         raise WarehouseLoadError("no jobs Gold pointer found")
-    return pointers[-1], json.loads(store.get_bytes(pointers[-1]))["manifest_key"]
+    # Reader contract (docs/specs/jobs-gold-pointer.md): the greatest key must be a v1 Gold pointer.
+    pointer = json.loads(store.get_bytes(pointers[-1]))
+    if pointer.get("pointer_version") != "1" or pointer.get("layer") != "gold" or not pointer.get("manifest_key"):
+        raise WarehouseLoadError("newest jobs Gold pointer fails the reader contract")
+    return pointers[-1], pointer["manifest_key"]
 
 
 def latest_manifest_key(*, data_lake_uri: str = "") -> str:
@@ -273,7 +292,9 @@ def main(argv: list[str] | None = None) -> int:
                     manifest_key,
                     target,
                     data_lake_uri=args.data_lake_uri,
-                    published_key=published_key if args.require_latest else None,
+                    # Set whenever the run was chosen through the pointer; only an explicit
+                    # --manifest-key restore loads without the publish-order check.
+                    published_key=published_key,
                 )
             code = 0
         except Exception as exc:  # noqa: BLE001 - reported as a failed load

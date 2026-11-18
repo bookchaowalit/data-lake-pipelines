@@ -11,10 +11,14 @@ as R2 Gold. Done when the row counts in MotherDuck equal the Gold manifest count
 ## Behaviour
 
 1. `infra/scripts/data_lake/motherduck_load.py` takes one jobs Gold manifest (the build job's
-   `manifest_key`, or the newest jobs Gold pointer when none is given).
-2. Only Gold leaves R2 (ADR-0016 §2). The load refuses a key outside
+   `manifest_key`, or the newest jobs Gold pointer when none is given). The pointer must pass the
+   reader contract (`pointer_version == "1"`, `layer == "gold"`) or the load fails.
+2. Only Gold leaves R2 (ADR-0016 §2), and only marts in `EXPORT_APPROVED`, a list kept apart
+   from the publisher's `JOBS_MARTS`: a mart new to Gold is reported in `not_exported` and never
+   loaded until it is classified as holding no personal data and added there.
+   The load refuses a key outside
    `control/manifests/gold/source=book-job-data/domain=jobs/`, a manifest that is not jobs Gold,
-   one that does not list exactly the allow-listed marts (`JOBS_MARTS`), a part key other than
+   one that lists a mart twice or does not list exactly the published marts (`JOBS_MARTS`), a part key other than
    its own mart's part of that Gold run
    (`gold/domain=jobs/dataset=<mart>/schema_version=1/part-<gold_run_id>.parquet`), and any part
    whose sha256 differs from the manifest.
@@ -26,15 +30,15 @@ as R2 Gold. Done when the row counts in MotherDuck equal the Gold manifest count
    When the newest row already has this Gold run and the tables still match, the run reports
    `unchanged` and writes nothing.
 5. The target is `md:empire_gold` when `MOTHERDUCK_TOKEN` is set (the read-write service token;
-   the motherduck extension reads it from the environment, it is never in a connection string or
-   output). `--target <file>` or `JOBS_WAREHOUSE_TARGET` loads into a local DuckDB file instead,
+   passed to DuckDB in the connection config, never in a connection string or output). `--target <file>` or `JOBS_WAREHOUSE_TARGET` loads into a local DuckDB file instead,
    which the tests use.
 6. Without a target the CLI reports `skipped_no_token` and exits 0. Exit codes: 0 loaded,
    unchanged or skipped; 2 failed.
 7. `--require-latest` skips a manifest that is no longer the newest jobs Gold run
    (`skipped_not_latest`). The scheduled job sets it, so re-running an old workflow run cannot
    put older data back. The run's pointer key (keys sort by publish time) is stored in
-   `_gold_loads.published_key` and checked again inside the load transaction, so a slow or
+   `_gold_loads.published_key` whenever the run is chosen through the pointer (with or without
+   the flag) and checked again inside the load transaction, so a slow or
    concurrent load of an older run is refused too; two loads racing on the same tables conflict
    in the warehouse and one fails. Restoring an older run on purpose is `--manifest-key` without
    the flag, which never reads the pointer.
