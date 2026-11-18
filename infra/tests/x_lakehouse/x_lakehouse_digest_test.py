@@ -160,6 +160,17 @@ class RenderTests(unittest.TestCase):
         bold = "\U0001d400\U0001d41c\U0001d426\U0001d41e-Corp"  # mathematical bold "Acme"
         self.assertTrue(digest.contains_term(bold, terms))
 
+    def test_terms_inside_json_encoded_raw_fields_are_screened_decoded(self):
+        # _extra / _coerce_errors are JSON strings in raw rows: a client name broken by a line break,
+        # quote or backslash there is only visible once decoded.
+        terms = ("acme corp",)
+        for value in ("Acme\nCorp", 'Acme"Corp', "Acme\\Corp"):
+            row = {"post_id": "1", "text": "synthetic", "_extra": json.dumps({"note": value}),
+                   "_screen": [{"_coerce_errors": json.dumps({"views": value})}]}
+            self.assertTrue(digest.any_term(row, terms), value)
+        self.assertFalse(digest.any_term({"_extra": json.dumps({"note": "synthetic"})}, terms))
+        self.assertTrue(digest.any_term({"_extra": "{not json acme corp"}, terms))  # bad JSON: raw text
+
 
 class FakeServices:
     """Gateway + Telegram behind one MockTransport; records what was sent."""
