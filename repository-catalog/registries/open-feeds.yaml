@@ -441,6 +441,7 @@ feeds:
     link_template: https://nvd.nist.gov/vuln/detail/{cveID}
     time: dateAdded
     keep: [cveID, vendorProject, product, knownRansomwareCampaignUse, dueDate]
+    changes: [vendorProject, product, vulnerabilityName, dueDate, knownRansomwareCampaignUse]
   every_hours: 6
   licence: US Government public domain
   max_items: 5000

@@ -49,11 +49,17 @@ a row to `repository-catalog/registries/open-feeds.yaml`.
   (`If-None-Match` / `If-Modified-Since`, sent only to the URL that issued them); one retry after 3 s
   for a transient failure (network or DNS error, 429, 5xx); 25 s I/O timeout plus a 60 s wall-clock
   deadline per response checked per chunk (a slow-drip body cannot hold the run); 8 MB body cap.
-- Run budget: fetching stops after 15 minutes (workflow cap 25); feeds not started by then are left
-  out (`feeds_deferred`), keep their state and stay due, and everything already fetched is written.
+- Run budget: no feed starts after 15 minutes and no retry is made past it; the fetch phase returns
+  at 15 min + 85 s whatever is still in flight (workers are daemon threads, a stalled connection is
+  abandoned), so everything already fetched is written well inside the 25 min workflow cap. Feeds not
+  finished are left out (`feeds_deferred`), keep their state and stay due, and the next run starts
+  with the never-fetched and longest-waiting feeds first. The failure ratio counts attempted feeds.
 - Safety: redirects are followed by the collector one hop at a time (a 3xx body is never read), and
-  every hop, robots.txt included, must be https, off `BLOCKED_HOSTS`, and resolve only to public
-  (global) IP addresses, so no loopback, private or cloud-metadata address can be reached; TLS
+  every hop, robots.txt included, must be https and off `BLOCKED_HOSTS` (hostnames normalised). The
+  HTTP client's network backend does the only DNS lookup, refuses the connection unless every address
+  is public (global), and connects to a checked address while TLS still verifies the original
+  hostname (SNI), so DNS rebinding cannot slip in a loopback, private or cloud-metadata address; the
+  connected peer is checked again before the body is read, and no environment proxy is used; TLS
   verification is never turned off;
   XML with an `<!ENTITY` declaration is refused (no entity bombs or external entities) and feedparser
   only ever gets a byte stream (never a string it could read as a path or URL); `kind: html`
@@ -86,7 +92,8 @@ Snapshots (`json.snapshot: true`, for example exchange rates or a weather foreca
 document, and only when its content hash changes.
 
 Revisions: a JSON row whose values can change after publication (World Bank back-fills a `null` or
-revises a year; USGS revises magnitude, place or alert and bumps `properties.updated`) lists those
+revises a year; USGS revises magnitude, place or alert and bumps `properties.updated`; CISA changes
+a KEV entry's due date or ransomware flag) lists those
 fields under `json.changes`; the revised row then lands as a new item, and
 the latest `fetched_at` per indicator and date is the current value.
 
@@ -109,8 +116,10 @@ stored; a parser fix is replayed by re-fetching (feeds keep their recent items) 
   including partial failures). `run --only` fetches the chosen feeds but keeps the state of the
   others; an unknown id is an error. Locally it defaults to `data/runtime/open-feeds/state.json.gz` (`--state-file`,
   `OPEN_FEEDS_STATE`).
-- The state names the lake it belongs to (a hash of the lake URI, no bucket name); pointed at another
-  lake it starts empty, so a test lake's dedupe never hides items from the real one.
+- The state names the lake it belongs to (a hash of the lake URI and S3 endpoint, neither stored);
+  pointed at another lake it starts empty, so a test lake's dedupe never hides items from the real one.
+- Validators carry the fingerprint of how the feed is read (URL, kind, parser spec, keep, max_items);
+  after a registry or parser change they are not sent, so the next fetch reads the body (replay).
 - Bronze batches are split at 24 MB of JSONL (the lake refuses objects over 64 MiB), so a cache miss
   that brings ~45 k items at once still commits.
 - A lost state (cache evicted after 7 days without runs) only re-sends what the feeds still show:
@@ -163,7 +172,7 @@ year or more a per-day manifest index is the next step if `report` gets slow. An
 
 ## Tests
 
-`infra/tests/data_lake/open_feeds_test.py` (offline, 44 tests): registry validation (https only,
+`infra/tests/data_lake/open_feeds_test.py` (offline, 51 tests): registry validation (https only,
 unknown fields, required json/html specs, duplicate ids, blocked hosts, max_items) and the shipped
 registry (≥ 500 enabled, no blocked host enabled, every disabled row has a note); HTML page is not a
 feed, empty feed is ok, links resolve against the final URL; JSON rows without id skipped, `changes`

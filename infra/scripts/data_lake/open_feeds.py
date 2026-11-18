@@ -35,7 +35,6 @@ import urllib.parse
 import urllib.robotparser
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -164,7 +163,7 @@ class Feed:
 
 
 def blocked_host(host: str) -> bool:
-    host = host.lower()
+    host = host.strip().rstrip(".").lower()
     return any(host == b or host.endswith("." + b) for b in BLOCKED_HOSTS)
 
 
@@ -275,29 +274,54 @@ REDIRECTS = (301, 302, 303, 307, 308)
 MAX_HOPS = 5
 
 
-def _public_host(host: str, cache: dict[str, bool], lock: threading.Lock) -> bool:
-    """Every address of `host` is a public (global) IP: no loopback, link-local or private
-    network reachable from the runner can be fetched, whatever a redirect says. A failed DNS
-    lookup is a transient error (retried, never cached)."""
+def _guarded_backend() -> Any:
+    """An httpcore network backend that resolves the host itself, refuses the connection unless
+    every address is public (global), and connects to a checked address. TLS keeps the original
+    hostname (httpcore sends the origin host as SNI and verifies the certificate against it), so
+    a DNS rebinding answer between a check and the connect is impossible: there is one lookup."""
     import ipaddress
     import socket
 
-    with lock:
-        if host in cache:
-            return cache[host]
-    try:
-        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    except OSError:
-        raise FeedError("ConnectError: DNS lookup failed") from None
-    try:
-        ok = bool(infos) and all(
-            ipaddress.ip_address(str(info[4][0])).is_global for info in infos
-        )
-    except ValueError:
-        ok = False
-    with lock:
-        cache[host] = ok
-    return ok
+    from httpcore._backends.sync import SyncBackend
+
+    class GuardedBackend(SyncBackend):
+        def connect_tcp(  # type: ignore[override]
+            self,
+            host: str,
+            port: int,
+            timeout: float | None = None,
+            local_address: str | None = None,
+            socket_options: Any = None,
+        ) -> Any:
+            try:
+                infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            except OSError:
+                raise FeedError("ConnectError: DNS lookup failed") from None
+            addresses = [str(info[4][0]) for info in infos]
+            try:
+                public = bool(addresses) and all(
+                    ipaddress.ip_address(a).is_global for a in addresses
+                )
+            except ValueError:
+                public = False
+            if not public:
+                raise FeedError("host is not on the public internet")
+            last: Exception | None = None
+            for address in dict.fromkeys(addresses):
+                try:
+                    return super().connect_tcp(
+                        address,
+                        port,
+                        timeout=timeout,
+                        local_address=local_address,
+                        socket_options=socket_options,
+                    )
+                except Exception as exc:  # noqa: BLE001 — try the next checked address
+                    last = exc
+            assert last is not None
+            raise last
+
+    return GuardedBackend()
 
 
 def _peer_is_public(resp: Any) -> bool:
@@ -320,14 +344,19 @@ def http_fetch(
 ) -> Fetch:
     import httpx
 
+    transport = httpx.HTTPTransport()
+    pool = getattr(transport, "_pool", None)
+    if pool is None or not hasattr(pool, "_network_backend"):
+        # Fail closed: without the guarded backend there is no address check at all.
+        raise RuntimeError("httpx transport without a replaceable network backend")
+    pool._network_backend = _guarded_backend()
     client = httpx.Client(
+        transport=transport,
         follow_redirects=False,
         timeout=timeout,
         headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
         trust_env=False,  # no proxy from the environment can route around the address checks
     )
-    public: dict[str, bool] = {}
-    lock = threading.Lock()
 
     def fetch(url: str, headers: dict[str, str]) -> Response:
         if not _https(url):
@@ -335,22 +364,25 @@ def http_fetch(
         host = urllib.parse.urlsplit(url).hostname or ""
         if blocked_host(host):
             raise FeedError("host is skip/blocked-legal")
-        if not _public_host(host, public, lock):
-            raise FeedError("host is not on the public internet")
         started = time.monotonic()
         try:
             with client.stream("GET", url, headers=headers) as resp:
-                # The DNS check above can race a rebinding answer: the address actually connected to
-                # must be public too, before any byte of the body is read.
+                # Second line of defence behind the guarded backend: the peer actually connected
+                # to must be public before any byte of the body is read.
                 if not _peer_is_public(resp):
                     raise FeedError("connected address is not on the public internet")
                 if resp.status_code == 304:
                     return Response(304, b"", final_url=url)
                 if resp.status_code in REDIRECTS:
                     # The 3xx body is never read.
-                    location = urllib.parse.urljoin(
-                        url, resp.headers.get("location", "")
-                    )
+                    try:
+                        location = urllib.parse.urljoin(
+                            url, resp.headers.get("location", "")
+                        )
+                    except ValueError:
+                        raise FeedError(
+                            "bad redirect location", status=resp.status_code
+                        ) from None
                     return Response(resp.status_code, b"", final_url=location)
                 if resp.status_code >= 400:
                     raise FeedError(f"HTTP {resp.status_code}", status=resp.status_code)
@@ -375,7 +407,7 @@ def http_fetch(
                 )
         except FeedError:
             raise
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             raise FeedError(type(exc).__name__) from None
 
     return fetch  # one shared client; httpx.Client is thread-safe
@@ -431,6 +463,8 @@ class Robots:
                         rules.parse([])
                     else:
                         result = None
+                except Exception:  # noqa: BLE001 — a broken robots.txt answer refuses this host only
+                    result = None
                 self._cache[origin] = result
             cached = self._cache[origin]
         return cached is not None and cached.can_fetch(USER_AGENT, url)
@@ -752,12 +786,16 @@ def _get(
     conditional: tuple[str | None, dict[str, str]],
     retry_pause: float,
     robots: "Robots | None" = None,
+    stop_at: float | None = None,
 ) -> Response:
-    """One retry for a transient failure (network blip, 429/5xx); everything else fails at once."""
+    """One retry for a transient failure (network blip, 429/5xx); everything else fails at once.
+    No retry once the run budget would be passed."""
     try:
         return _follow(fetch, url, conditional, robots)
     except FeedError as exc:
         if not str(exc).startswith(TRANSIENT):
+            raise
+        if stop_at is not None and time.monotonic() + retry_pause >= stop_at:
             raise
     time.sleep(retry_pause)
     return _follow(fetch, url, conditional, robots)
@@ -771,12 +809,25 @@ def _encodable(items: list[dict[str, Any]]) -> None:
         raise FeedError("text is not valid UTF-8") from None
 
 
+def rule_fingerprint(feed: Feed) -> str:
+    """How a feed is read (URL, kind, parser spec, keep, max_items). Validators issued under another
+    rule are not sent, so a parser or registry change re-reads the body instead of getting a 304."""
+    rule = json.dumps(
+        [feed.url, feed.kind, feed.spec, feed.keep, feed.max_items],
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(rule.encode("utf-8")).hexdigest()[:12]
+
+
 def fetch_feed(
     feed: Feed,
     fetch: Fetch,
     feed_state: dict[str, Any],
     robots: Robots | None,
     retry_pause: float = RETRY_PAUSE_SECONDS,
+    stop_at: float | None = None,
 ) -> FeedResult:
     started = time.monotonic()
 
@@ -788,7 +839,13 @@ def fetch_feed(
             **kw,
         )
 
-    if feed.kind == "html" and robots is not None and not robots.allowed(feed.url):
+    try:
+        denied = (
+            feed.kind == "html" and robots is not None and not robots.allowed(feed.url)
+        )
+    except Exception:  # noqa: BLE001 — never let one host's robots.txt stop the run
+        denied = True
+    if denied:
         return done(
             "robots-denied",
             http_status=None,
@@ -797,11 +854,12 @@ def fetch_feed(
             bytes=0,
         )
     headers = {}
+    same_rule = feed_state.get("rule") in (None, rule_fingerprint(feed))
     # Validators belong to the URL that issued them (after redirects); they go to that URL only.
     validator_url = feed_state.get("validator_url") or feed_state.get("url") or feed.url
-    if feed_state.get("etag"):
+    if same_rule and feed_state.get("etag"):
         headers["If-None-Match"] = feed_state["etag"]
-    if feed_state.get("last_modified"):
+    if same_rule and feed_state.get("last_modified"):
         headers["If-Modified-Since"] = feed_state["last_modified"]
     answered: int | None = None
     try:
@@ -811,6 +869,7 @@ def fetch_feed(
             (validator_url, headers),
             retry_pause,
             robots if feed.kind == "html" else None,
+            stop_at,
         )
         answered = resp.status
         if resp.status == 304:
@@ -854,6 +913,14 @@ def fetch_feed(
     )
 
 
+def _overdue_first(feeds: list[Feed], state: dict[str, Any]) -> list[Feed]:
+    """Never-fetched feeds first, then the longest wait: a feed deferred by the run budget starts
+    early next time instead of queueing behind the same hourly feeds again."""
+    return sorted(
+        feeds, key=lambda f: str((state.get(f.id) or {}).get("last_fetch") or "")
+    )
+
+
 def fetch_all(
     feeds: list[Feed],
     fetch: Fetch,
@@ -862,38 +929,62 @@ def fetch_all(
     workers: int = MAX_WORKERS,
     pause: float = HOST_PAUSE_SECONDS,
     budget: float = RUN_BUDGET_SECONDS,
+    grace: float = FEED_DEADLINE_SECONDS + TIMEOUT_SECONDS,
 ) -> list[FeedResult]:
     """Hosts in parallel, feeds of one host one after another with a pause (politeness).
 
-    Fetching stops at `budget` seconds: feeds not started by then are left out of the results, so
-    their state is untouched and they stay due for the next run (a slow host cannot hold the run
-    past the workflow timeout and lose what the other hosts returned)."""
+    No feed starts after `budget` seconds, and the call returns at `budget + grace` whatever is
+    still in flight: workers are daemon threads, so a stalled connection is abandoned (it ends with
+    the process) instead of holding the run past the workflow timeout. Feeds not finished by then are
+    left out of the results; their state is untouched and they stay due, first in line next run."""
+    import queue
+
     robots = Robots(fetch)
     stop_at = time.monotonic() + budget
-    by_host: dict[str, list[Feed]] = defaultdict(list)
-    for feed in feeds:
-        by_host[feed.host].append(feed)
-
-    def run_host(group: list[Feed]) -> list[FeedResult]:
-        out = []
-        for index, feed in enumerate(group):
-            if index:
-                time.sleep(max(pause, HOST_MIN_PAUSE.get(feed.host, 0.0)))
-            if time.monotonic() >= stop_at:
-                break
-            out.append(
-                fetch_feed(
-                    feed, fetch, state.get(feed.id) or {}, robots, retry_pause=pause * 3
-                )
-            )
-        return out
-
+    by_host: dict[str, list[Feed]] = {}
+    for feed in _overdue_first(feeds, state):
+        by_host.setdefault(feed.host, []).append(feed)
+    groups: queue.Queue[list[Feed]] = queue.Queue()
+    for group in by_host.values():
+        groups.put(group)
     results: list[FeedResult] = []
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        for chunk in pool.map(run_host, by_host.values()):
-            results.extend(chunk)
+    lock = threading.Lock()
+
+    def worker() -> None:
+        while True:
+            try:
+                group = groups.get_nowait()
+            except queue.Empty:
+                return
+            for index, feed in enumerate(group):
+                if index:
+                    time.sleep(max(pause, HOST_MIN_PAUSE.get(feed.host, 0.0)))
+                if time.monotonic() >= stop_at:
+                    break
+                res = fetch_feed(
+                    feed,
+                    fetch,
+                    state.get(feed.id) or {},
+                    robots,
+                    retry_pause=pause * 3,
+                    stop_at=stop_at,
+                )
+                with lock:
+                    results.append(res)
+
+    threads = [
+        threading.Thread(target=worker, daemon=True, name=f"open-feeds-{n}")
+        for n in range(max(1, min(workers, len(by_host))))
+    ]
+    for thread in threads:
+        thread.start()
+    hard_stop = stop_at + grace
+    for thread in threads:
+        thread.join(max(0.0, hard_stop - time.monotonic()))
+    with lock:
+        done = list(results)
     order = {feed.id: i for i, feed in enumerate(feeds)}
-    return sorted(results, key=lambda r: order[r.feed.id])
+    return sorted(done, key=lambda r: order[r.feed.id])
 
 
 def build_rows(
@@ -947,6 +1038,7 @@ def build_rows(
             entry["etag"] = res.etag
             entry["last_modified"] = res.last_modified
             entry["validator_url"] = res.final_url or feed.url
+            entry["rule"] = rule_fingerprint(feed)
             entry.pop("url", None)
         else:
             entry["errors"] = int(prev.get("errors") or 0) + 1
@@ -973,10 +1065,17 @@ def build_rows(
 
 
 def lake_fingerprint(data_lake_uri: str) -> str:
-    """Names the lake a state belongs to without storing the URI (no bucket names in the cache)."""
-    return hashlib.sha256(
-        data_lake_uri.strip().rstrip("/").encode("utf-8")
-    ).hexdigest()[:16]
+    """Names the lake a state belongs to without storing the URI or the endpoint (no bucket or
+    account names in the cache): the same s3:// URI on MinIO and on R2 are different lakes."""
+    endpoint = ""
+    if data_lake_uri.startswith("s3://"):
+        endpoint = (
+            os.environ.get("DATA_LAKE_S3_ENDPOINT")
+            or os.environ.get("AWS_ENDPOINT_URL")
+            or ""
+        )
+    key = f"{data_lake_uri.strip().rstrip('/')}|{endpoint.strip().rstrip('/')}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 def read_state(path: Path, lake: str | None = None) -> dict[str, Any]:
@@ -1479,9 +1578,9 @@ def main(
         print(json.dumps({"status": "error", "error": type(exc).__name__}))
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
-    due_count = result["feeds_due"]
+    attempted = result["feeds_due"] - result["feeds_deferred"]
     enabled = result["feeds_enabled"]
-    if (due_count and result["errors"] / due_count > FAIL_RATIO) or (
+    if (attempted and result["errors"] / attempted > FAIL_RATIO) or (
         enabled and result["feeds_failing"] / enabled > FAIL_RATIO
     ):
         # Most feeds failing (this run, or on their latest fetch when nothing was due) = the runner

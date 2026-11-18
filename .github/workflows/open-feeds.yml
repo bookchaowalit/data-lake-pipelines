@@ -72,7 +72,7 @@ jobs:
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           # Status, counts, failing feed ids and manifest keys only (public log).
-          jq '{status, error, detail, fetched_at, state_loaded, feeds_registered, feeds_enabled, feeds_due, ok, not_modified, errors, robots_denied, feeds_failing, items_new, items_skipped, items_truncated, failed_feeds, manifests}' "$RUNNER_TEMP/result.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq '{status, error, detail, fetched_at, state_loaded, feeds_registered, feeds_enabled, feeds_due, feeds_deferred, ok, not_modified, errors, robots_denied, feeds_failing, items_new, items_skipped, items_truncated, failed_feeds, manifests}' "$RUNNER_TEMP/result.json" | tee -a "$GITHUB_STEP_SUMMARY"
           exit $code
 
       - name: Save feed state

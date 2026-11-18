@@ -153,6 +153,8 @@ class RegistryTest(unittest.TestCase):
         # Reddit is `later` in source-coverage.yaml (Data API terms): never fetched from here.
         self.assertFalse([f.id for f in feeds if "reddit.com" in f.host])
         self.assertFalse([f.id for f in enabled if of.blocked_host(f.host)])
+        kev = next(f for f in feeds if f.id == "cisa-kev")
+        self.assertIn("dueDate", kev.spec.get("changes", []))
         usgs = next(f for f in feeds if f.id == "usgs-quakes")
         self.assertEqual(usgs.spec.get("changes"), ["properties.updated"])
         import yaml
@@ -622,6 +624,111 @@ class RunTest(unittest.TestCase):
             self.assertEqual(
                 of.read_state(sp, of.lake_fingerprint("s3://other/lake")), {}
             )
+
+    def test_hard_deadline_abandons_a_stalled_feed(self):
+        import threading
+        import time as _t
+
+        release = threading.Event()
+
+        class Stall(FakeFetch):
+            def __call__(self, url, headers, follow_redirects=True):
+                if "stuck" in url:
+                    release.wait(5)
+                return super().__call__(url, headers)
+
+        feeds = [
+            feed(id="ok1", url="https://a.test/rss"),
+            feed(id="stuck1", url="https://stuck.test/rss"),
+        ]
+        started = _t.monotonic()
+        results = of.fetch_all(
+            feeds,
+            Stall({"https://a.test/rss": RSS, "https://stuck.test/rss": RSS}),
+            {},
+            pause=0,
+            budget=0.2,
+            grace=0.3,
+        )
+        release.set()
+        self.assertLess(_t.monotonic() - started, 2)
+        self.assertEqual(
+            [r.feed.id for r in results], ["ok1"]
+        )  # the stalled one stays due
+
+    def test_overdue_feeds_go_first(self):
+        feeds = [feed(id="new1"), feed(id="old1"), feed(id="mid1")]
+        state = {
+            "old1": {"last_fetch": "2026-11-18T01:00:00+00:00"},
+            "mid1": {"last_fetch": "2026-11-18T05:00:00+00:00"},
+        }
+        self.assertEqual(
+            [f.id for f in of._overdue_first(feeds, state)], ["new1", "old1", "mid1"]
+        )
+
+    def test_rule_change_drops_validators(self):
+        f = feed()
+        fetch = FakeFetch({"https://ex.test/feed": RSS})
+        fetch_feed(
+            f, fetch, {"etag": '"v1"', "rule": "something-else"}, None, retry_pause=0
+        )
+        self.assertEqual(fetch.calls[-1][1], {})
+        fetch_feed(
+            f,
+            fetch,
+            {"etag": '"v1"', "rule": of.rule_fingerprint(f)},
+            None,
+            retry_pause=0,
+        )
+        self.assertEqual(fetch.calls[-1][1], {"If-None-Match": '"v1"'})
+
+    def test_broken_robots_answer_is_isolated(self):
+        class Boom(FakeFetch):
+            def __call__(self, url, headers, follow_redirects=True):
+                if url.endswith("/robots.txt"):
+                    raise ValueError("bad location")
+                return super().__call__(url, headers)
+
+        f = feed(kind="html", url="https://ex.test/trending", spec={"item": "a"})
+        res = of.fetch_all(
+            [f, feed(id="f2", url="https://b.test/rss")],
+            Boom({"https://b.test/rss": RSS}),
+            {},
+            pause=0,
+        )
+        self.assertEqual(
+            [(r.feed.id, r.status) for r in res],
+            [("f1", "robots-denied"), ("f2", "ok")],
+        )
+
+    def test_blocked_host_normalised(self):
+        self.assertTrue(of.blocked_host("WWW.Reddit.com."))
+        self.assertFalse(of.blocked_host("notreddit.com"))
+
+    def test_lake_fingerprint_includes_endpoint(self):
+        import os
+
+        old = {
+            k: os.environ.pop(k, None)
+            for k in ("DATA_LAKE_S3_ENDPOINT", "AWS_ENDPOINT_URL")
+        }
+        try:
+            os.environ["DATA_LAKE_S3_ENDPOINT"] = "http://minio:9000"
+            minio = of.lake_fingerprint("s3://b/p")
+            os.environ["DATA_LAKE_S3_ENDPOINT"] = "https://acct.r2.example"
+            self.assertNotEqual(minio, of.lake_fingerprint("s3://b/p"))
+        finally:
+            for k, v in old.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+
+    def test_guarded_backend_refuses_private_addresses(self):
+        fetch = of.http_fetch()
+        for url in ("https://localhost/x", "https://127.0.0.1/x", "https://[::1]/x"):
+            with self.subTest(url=url), self.assertRaises(FeedError) as ctx:
+                fetch(url, {})
+            self.assertIn("public internet", str(ctx.exception))
 
     def test_http_status_kept_on_error(self):
         res = fetch_feed(
