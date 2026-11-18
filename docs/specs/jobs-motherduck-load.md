@@ -70,9 +70,12 @@ exception type. stderr stays in a runner temp file.
 
 ## Owner steps to switch it on
 
-1. Sign up MotherDuck Lite (EU region if offered) at https://app.motherduck.com/ and create a
-   read-write and a read-only service token.
-2. Store both in Infisical `/motherduck` (`MOTHERDUCK_TOKEN`, `MOTHERDUCK_TOKEN_RO`).
+1. Sign up MotherDuck Lite (EU region if offered) at https://app.motherduck.com/. Lite has no
+   read-only token (ADR-0016 1.1 §3), so create two service accounts, each with a Read/Write
+   token: `loader` (this load step) and `reader` (Preset). `reader` gets data only through a
+   share (see `jobs-preset-dashboard.md`).
+2. Store both in Infisical `/motherduck` (`MOTHERDUCK_TOKEN` for `loader`,
+   `MOTHERDUCK_READER_TOKEN` for `reader`).
 3. Copy `MOTHERDUCK_TOKEN` to this repository's Actions secrets
    (https://github.com/bookchaowalit/data-lake-pipelines/settings/secrets/actions). The next
    scheduled run loads; check its summary for `status: loaded` and the counts.

@@ -77,7 +77,7 @@ Dashboard title: `Jobs insights`.
 What the check proves: the committed dashboard reads only the repository's dataset SQL (the export
 check refuses anything else), and that SQL returned the jobs-insights numbers on every check for
 14 days. It does not see how a chart aggregates or filters a dataset in the Preset UI; the owner's
-look at the dashboard (step 7) covers that.
+look at the dashboard (step 8) covers that.
 
 Locally, against a DuckDB file named `empire_gold.duckdb` that `motherduck_load.py` loaded:
 
@@ -91,25 +91,36 @@ Locally, against a DuckDB file named `empire_gold.duckdb` that `motherduck_load.
    warehouse step reports `status: loaded`.
 2. Sign up for Preset Starter at https://preset.io/pricing/ with the personal owner identity (EU
    region if offered). Store the login in Infisical `/preset`.
-3. Add a database: Settings → Database Connections → + Database → MotherDuck (or DuckDB).
+3. Give the `reader` service account read-only access (ADR-0016 1.1 §3; MotherDuck Lite has no
+   read-only token):
+   - As `loader`, in the MotherDuck UI: `CREATE SHARE empire_gold_reader FROM empire_gold (ACCESS RESTRICTED, UPDATE AUTOMATIC);`
+     then grant it to `reader` (`GRANT READ ON SHARE empire_gold_reader TO <reader username>;`).
+   - As `reader`: `ATTACH '<share URL>' AS empire_gold;` so the dataset SQL's
+     `empire_gold.jobs.<mart>` names resolve.
+   - Check: as `reader`, `select count(*) from empire_gold.jobs.jobs_board_health` works and
+     `create table empire_gold.jobs.x as select 1` fails. Do not continue until both hold.
+   - The exact share statements are from MotherDuck's docs and not yet run on this account;
+     follow the UI if they differ.
+4. Add a database in Preset: Settings → Database Connections → + Database → MotherDuck (or DuckDB).
    - SQLAlchemy URI: `duckdb:///md:empire_gold`
    - Advanced → Security → Secure Extra:
-     `{"connect_args": {"config": {"motherduck_token": "<MOTHERDUCK_TOKEN_RO from Infisical /motherduck>"}}}`
-   - Use the **read-only** token. If Preset only accepts the token in the URI
+     `{"connect_args": {"config": {"motherduck_token": "<MOTHERDUCK_READER_TOKEN from Infisical /motherduck>"}}}`
+   - Use the `reader` token, never `loader`'s. If Preset only accepts the token in the URI
      (`?motherduck_token=…`; not confirmed for Preset), that works too, but the export will then
      carry the token: the export check refuses it, and the token must be removed from
      `databases/*.yaml` before the ZIP is committed.
-4. SQL Lab → paste each file from `infra/bi/preset/jobs/datasets/` unchanged → Save → Save
+   - Log in at least every 3 weeks: Starter hibernates a workspace not accessed for 30 days.
+5. SQL Lab → paste each file from `infra/bi/preset/jobs/datasets/` unchanged → Save → Save
    dataset, named after the file (`jobs_kpis` and so on).
-5. Build the charts and the `Jobs insights` dashboard above.
-6. Dashboards → ⋯ → Export. Save the ZIP as `infra/bi/preset/jobs/jobs-dashboard.zip`, then:
+6. Build the charts and the `Jobs insights` dashboard above.
+7. Dashboards → ⋯ → Export. Save the ZIP as `infra/bi/preset/jobs/jobs-dashboard.zip`, then:
 
    ```bash
    .venv/bin/python infra/scripts/data_lake/preset_export_check.py
    ```
 
    Commit the ZIP only when it prints `ok`. Export again and commit after every dashboard change.
-7. Right after committing the first export, compare each dashboard chart with
+8. Right after committing the first export, compare each dashboard chart with
    https://jobs-insights.pages.dev once by eye (same tiles, chart points, skills and companies).
    P3 is done when a jobs-marts run summary shows `p3_parity_met: true` (14 days with that same
    export) and a second look at the end still matches. jobs-insights keeps running until the
