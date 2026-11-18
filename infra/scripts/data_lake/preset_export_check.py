@@ -76,6 +76,21 @@ SQL_WORDS = frozenset(
 EXPRESSION_KEYS = ("sqlExpression", "expression", "where", "having")
 
 
+# Line breaks other than \n (and \r\n): a parser that ends a -- comment on one of these would run
+# text the normaliser treats as comment.
+ODD_LINE_BREAKS = ("\r", "\v", "\f", "\x85", "\u2028", "\u2029")
+
+
+def _plain_sql(sql: str) -> bool:
+    """False for SQL the normaliser and DuckDB could read differently: block comments or odd line breaks."""
+    text = sql.replace("\r\n", "\n")
+    return (
+        "/*" not in text
+        and "*/" not in text
+        and not any(mark in text for mark in ODD_LINE_BREAKS)
+    )
+
+
 def _normal_sql(sql: str) -> str:
     """Comments dropped, whitespace collapsed and case folded outside quoted text only."""
     out: list[str] = []
@@ -178,9 +193,12 @@ def _dataset(path: str, doc: dict[str, Any]) -> tuple[list[str], set[str]]:
     listed = [c for c in doc.get("columns") or [] if isinstance(c, dict)]
     problems: list[str] = []
     if sql:
-        # Block comments are refused outright: the normaliser only knows line comments, and
-        # DuckDB ignores `--` inside /* */, so the two could disagree on what runs.
-        if "/*" in sql or "*/" in sql or _normal_sql(sql) not in APPROVED_SQL:
+        # Refused outright: block comments (DuckDB ignores -- inside /* */) and line breaks other
+        # than \n, so the compared and the executed SQL cannot differ.
+        if (
+            not _plain_sql(sql)
+            or _normal_sql(sql.replace("\r\n", "\n")) not in APPROVED_SQL
+        ):
             return [
                 f"{path}: SQL dataset is not one of infra/bi/preset/jobs/datasets/*.sql"
             ], set()

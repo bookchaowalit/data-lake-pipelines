@@ -582,6 +582,17 @@ class PresetExportCheckTests(unittest.TestCase):
                     "from as_of a", "from as_of a /* x */"
                 )
             },
+            # A double-quoted YAML string keeps a bare CR (a block scalar would fold it to \n).
+            "SQL dataset hiding code behind a bare carriage return": {
+                KPIS: "table_name: jobs_kpis\nschema: null\nuuid: u-jobs_kpis\ndatabase_uuid: u-db\nsql: "
+                + json.dumps(
+                    _indented_sql("jobs_kpis").replace(
+                        "from as_of a",
+                        "from as_of a -- note\r union all select 1, 2, 3, 4, 5, 6",
+                    )
+                )
+                + "\n"
+            },
             "chart on a dataset outside the export": {
                 CHART: "slice_name: x\ndataset_uuid: other\n"
             },
@@ -592,6 +603,15 @@ class PresetExportCheckTests(unittest.TestCase):
         for label, override in cases.items():
             with self.subTest(label):
                 self.assertTrue(self._problems(_export(**override)), label)
+
+    def test_windows_line_endings_still_match(self):
+        from data_lake.preset_export_check import APPROVED_SQL, _normal_sql, _plain_sql
+        from data_lake.preset_parity import dataset_sql
+
+        crlf = dataset_sql("jobs_kpis").replace("\n", "\r\n")
+        self.assertTrue(_plain_sql(crlf))
+        self.assertIn(_normal_sql(crlf.replace("\r\n", "\n")), APPROVED_SQL)
+        self.assertFalse(_plain_sql("select 1 -- x\rselect 2"))
 
     def test_problems_do_not_echo_export_values(self):
         problems = self._problems(
