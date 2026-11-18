@@ -189,6 +189,65 @@ class MotherDuckLoadTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(out.getvalue())["status"], "skipped_not_latest")
 
+    def test_file_named_jobs_does_not_shadow_the_schema(self):
+        from data_lake.motherduck_load import load_jobs_gold
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
+            gold = self._gold(root)
+            target = str(Path(out) / "jobs.duckdb")  # catalog "jobs" == schema "jobs"
+            first = load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, now=NOW)
+            self.assertEqual(first["status"], "loaded")
+            again = load_jobs_gold(gold["manifest_key"], target, data_lake_uri=root, now=NOW)
+            self.assertEqual(again["status"], "unchanged")
+
+    def test_restore_by_manifest_key_does_not_need_a_pointer(self):
+        from data_lake import motherduck_load
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as tmp:
+            gold = self._gold(root)
+            with mock.patch.object(
+                motherduck_load, "latest_pointer", side_effect=AssertionError("pointer read")
+            ):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = motherduck_load.main([
+                        "--json", "--target", str(Path(tmp) / "w.duckdb"), "--data-lake-uri", root,
+                        "--manifest-key", gold["manifest_key"],
+                    ])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out.getvalue())["status"], "loaded")
+
+    def test_load_of_an_older_publish_is_refused_inside_the_transaction(self):
+        from data_lake.motherduck_load import load_jobs_gold
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
+            gold = self._gold(root)
+            store = ObjectStore(root)
+            manifest = json.loads(store.get_bytes(gold["manifest_key"]))
+            manifest["gold_run_id"] = "gold-second"
+            for mart in manifest["marts"]:
+                data = store.get_bytes(mart["key"])
+                mart["key"] = mart["key"].replace(gold["gold_run_id"], "gold-second")
+                store.put_bytes(mart["key"], data)
+            second_key = gold["manifest_key"].replace(gold["gold_run_id"], "gold-second")
+            store.put_bytes(second_key, json.dumps(manifest).encode("utf-8"))
+            target = str(Path(out) / "w.duckdb")
+            # The newer publish (B) lands first; the older one (A) arrives late.
+            newer = load_jobs_gold(second_key, target, data_lake_uri=root, published_key="p/published_at=2", now=NOW)
+            self.assertEqual(newer["status"], "loaded")
+            older = load_jobs_gold(
+                gold["manifest_key"], target, data_lake_uri=root, published_key="p/published_at=1", now=NOW
+            )
+            self.assertEqual(older["status"], "skipped_not_latest")
+            import duckdb
+
+            con = duckdb.connect(target, read_only=True)
+            try:
+                held = con.sql("select gold_run_id from jobs._gold_loads order by seq desc limit 1").fetchall()
+            finally:
+                con.close()
+            self.assertEqual(held, [("gold-second",)])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,13 @@ as R2 Gold. Done when the row counts in MotherDuck equal the Gold manifest count
    unchanged or skipped; 2 failed.
 7. `--require-latest` skips a manifest that is no longer the newest jobs Gold run
    (`skipped_not_latest`). The scheduled job sets it, so re-running an old workflow run cannot
-   put older data back; restoring an older run on purpose is the CLI without the flag.
+   put older data back. The run's pointer key (keys sort by publish time) is stored in
+   `_gold_loads.published_key` and checked again inside the load transaction, so a slow or
+   concurrent load of an older run is refused too; two loads racing on the same tables conflict
+   in the warehouse and one fails. Restoring an older run on purpose is `--manifest-key` without
+   the flag, which never reads the pointer.
+   Tables are addressed as `"<catalog>"."jobs"."<mart>"`, so an attached database named `jobs`
+   cannot shadow the schema.
 8. The `warehouse` job in `jobs-marts.yml` runs after `build` (same gate as `bi`: exit 0 or 3).
    A failed or cancelled load adds `jobs-warehouse` to the `jobs-marts` heartbeat. Gold and the
    BI site do not depend on it. Without the secret the job reports `skipped_no_token` before

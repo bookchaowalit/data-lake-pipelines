@@ -103,30 +103,36 @@ def _read_manifest(store: ObjectStore, manifest_key: str) -> tuple[dict[str, Any
     return manifest, marts
 
 
-def _already_loaded(con, gold_run_id: str, marts: dict[str, dict[str, Any]]) -> bool:
-    schema = WAREHOUSE_SCHEMA
-    exists = con.execute(
-        "SELECT count(*) FROM information_schema.tables "
-        "WHERE table_catalog = current_database() AND table_schema = ? AND table_name = ?",
-        [schema, LOAD_LOG],
-    ).fetchone()[0]
-    if not exists:
+def _schema_ref(con) -> str:
+    """``"<catalog>"."jobs"``: qualified so an attached database named ``jobs`` cannot shadow it."""
+    catalog = con.execute("SELECT current_database()").fetchone()[0]
+    return f'"{catalog}"."{WAREHOUSE_SCHEMA}"'
+
+
+def _log_exists(con) -> bool:
+    return bool(
+        con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_catalog = current_database() AND table_schema = ? AND table_name = ?",
+            [WAREHOUSE_SCHEMA, LOAD_LOG],
+        ).fetchone()[0]
+    )
+
+
+def _already_loaded(con, ref: str, gold_run_id: str, marts: dict[str, dict[str, Any]]) -> bool:
+    if not _log_exists(con):
         return False
-    row = con.execute(
-        f'SELECT gold_run_id FROM "{schema}"."{LOAD_LOG}" ORDER BY seq DESC LIMIT 1'
-    ).fetchone()
+    row = con.execute(f'SELECT gold_run_id FROM {ref}."{LOAD_LOG}" ORDER BY seq DESC LIMIT 1').fetchone()
     if not row or row[0] != gold_run_id:
         return False
-    return _table_counts(con, marts) == {name: int(mart["rows"]) for name, mart in marts.items()}
+    return _table_counts(con, ref, marts) == {name: int(mart["rows"]) for name, mart in marts.items()}
 
 
-def _table_counts(con, marts: dict[str, dict[str, Any]]) -> dict[str, int | None]:
+def _table_counts(con, ref: str, marts: dict[str, dict[str, Any]]) -> dict[str, int | None]:
     counts: dict[str, int | None] = {}
     for name in marts:
         try:
-            counts[name] = int(
-                con.execute(f'SELECT count(*) FROM "{WAREHOUSE_SCHEMA}"."{name}"').fetchone()[0]
-            )
+            counts[name] = int(con.execute(f'SELECT count(*) FROM {ref}."{name}"').fetchone()[0])
         except Exception:  # noqa: BLE001 - a missing table counts as a mismatch
             counts[name] = None
     return counts
@@ -137,9 +143,18 @@ def load_jobs_gold(
     target: str,
     *,
     data_lake_uri: str = "",
+    published_key: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Replace the jobs tables in ``target`` with the marts of one Gold manifest."""
+    """Replace the jobs tables in ``target`` with the marts of one Gold manifest.
+
+    ``published_key`` is the Gold pointer key of this run (keys sort by publish
+    time). When given, the load is refused inside its own transaction if the
+    warehouse already holds a run published later, so a slow or concurrent
+    load of an older run cannot replace newer tables. Two loads racing on the
+    same tables conflict in the warehouse and one of them fails (exit 2).
+    Without it (a deliberate restore) no order check is made.
+    """
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     store = ObjectStore(default_data_lake_uri(data_lake_uri=data_lake_uri))
     manifest, marts = _read_manifest(store, manifest_key)
@@ -157,7 +172,8 @@ def load_jobs_gold(
 
     con = _connect(target)
     try:
-        if _already_loaded(con, gold_run_id, marts):
+        ref = _schema_ref(con)
+        if _already_loaded(con, ref, gold_run_id, marts):
             return {**result, "status": "unchanged", "loaded_rows": expected}
 
         with tempfile.TemporaryDirectory(prefix="solo-empire-jobs-warehouse-") as temp_dir:
@@ -172,26 +188,30 @@ def load_jobs_gold(
 
             con.execute("BEGIN TRANSACTION")
             try:
-                con.execute(f'CREATE SCHEMA IF NOT EXISTS "{WAREHOUSE_SCHEMA}"')
+                con.execute(f"CREATE SCHEMA IF NOT EXISTS {ref}")
+                con.execute(
+                    f'CREATE TABLE IF NOT EXISTS {ref}."{LOAD_LOG}" (seq BIGINT, gold_run_id VARCHAR, '
+                    "manifest_key VARCHAR, published_key VARCHAR, rows_json VARCHAR, loaded_at TIMESTAMPTZ)"
+                )
+                if published_key:
+                    newest = con.execute(f'SELECT max(published_key) FROM {ref}."{LOAD_LOG}"').fetchone()[0]
+                    if newest and newest > published_key:
+                        con.execute("ROLLBACK")
+                        return {**result, "status": "skipped_not_latest"}
                 for name, path in parts.items():
                     con.execute(
-                        f'CREATE OR REPLACE TABLE "{WAREHOUSE_SCHEMA}"."{name}" AS '
-                        "SELECT * FROM read_parquet(?)",
+                        f'CREATE OR REPLACE TABLE {ref}."{name}" AS SELECT * FROM read_parquet(?)',
                         [str(path)],
                     )
-                loaded = _table_counts(con, marts)
+                loaded = _table_counts(con, ref, marts)
                 if loaded != expected:
                     raise WarehouseLoadError("loaded row counts do not match the Gold manifest")
                 con.execute(
-                    f'CREATE TABLE IF NOT EXISTS "{WAREHOUSE_SCHEMA}"."{LOAD_LOG}" ('
-                    "seq BIGINT, gold_run_id VARCHAR, manifest_key VARCHAR, rows_json VARCHAR, loaded_at TIMESTAMPTZ)"
-                )
-                con.execute(
                     # seq orders loads even when two share a timestamp; it is written in the
                     # same transaction as the tables, so the newest row is what they hold.
-                    f'INSERT INTO "{WAREHOUSE_SCHEMA}"."{LOAD_LOG}" '
-                    f'SELECT coalesce(max(seq), 0) + 1, ?, ?, ?, ? FROM "{WAREHOUSE_SCHEMA}"."{LOAD_LOG}"',
-                    [gold_run_id, manifest_key, json.dumps(expected, sort_keys=True), now],
+                    f'INSERT INTO {ref}."{LOAD_LOG}" '
+                    f'SELECT coalesce(max(seq), 0) + 1, ?, ?, ?, ?, ? FROM {ref}."{LOAD_LOG}"',
+                    [gold_run_id, manifest_key, published_key, json.dumps(expected, sort_keys=True), now],
                 )
                 con.execute("COMMIT")
             except BaseException:
@@ -202,13 +222,18 @@ def load_jobs_gold(
         con.close()
 
 
-def latest_manifest_key(*, data_lake_uri: str = "") -> str:
-    """Newest jobs Gold manifest, found through the publish-time pointer."""
+def latest_pointer(*, data_lake_uri: str = "") -> tuple[str, str]:
+    """(pointer key, manifest key) of the newest jobs Gold publish; pointer keys sort by publish time."""
     store = ObjectStore(default_data_lake_uri(data_lake_uri=data_lake_uri))
     pointers = sorted(key for key in store.list_keys(GOLD_POINTER_PREFIX) if key.endswith(".json"))
     if not pointers:
         raise WarehouseLoadError("no jobs Gold pointer found")
-    return json.loads(store.get_bytes(pointers[-1]))["manifest_key"]
+    return pointers[-1], json.loads(store.get_bytes(pointers[-1]))["manifest_key"]
+
+
+def latest_manifest_key(*, data_lake_uri: str = "") -> str:
+    """Newest jobs Gold manifest, found through the publish-time pointer."""
+    return latest_pointer(data_lake_uri=data_lake_uri)[1]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -234,12 +259,22 @@ def main(argv: list[str] | None = None) -> int:
         code = 0
     else:
         try:
-            latest = latest_manifest_key(data_lake_uri=args.data_lake_uri)
-            manifest_key = args.manifest_key or latest
+            # A given --manifest-key without --require-latest is a restore: the pointer
+            # is not read, so it works even when no pointer is readable.
+            published_key: str | None = None
+            manifest_key = args.manifest_key
+            if args.require_latest or not manifest_key:
+                published_key, latest = latest_pointer(data_lake_uri=args.data_lake_uri)
+                manifest_key = manifest_key or latest
             if args.require_latest and manifest_key != latest:
                 result = {"status": "skipped_not_latest", "layer": "warehouse"}
             else:
-                result = load_jobs_gold(manifest_key, target, data_lake_uri=args.data_lake_uri)
+                result = load_jobs_gold(
+                    manifest_key,
+                    target,
+                    data_lake_uri=args.data_lake_uri,
+                    published_key=published_key if args.require_latest else None,
+                )
             code = 0
         except Exception as exc:  # noqa: BLE001 - reported as a failed load
             result = {"status": "failed", "layer": "warehouse", "error": f"{type(exc).__name__}: {exc}"}
