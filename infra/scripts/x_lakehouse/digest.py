@@ -154,12 +154,23 @@ def contains_term(text: str, denylist: Sequence[str]) -> bool:
 
 def _strings(obj: Any) -> list[str]:
     """Every scalar inside a nested structure, as text (screened raw, not via a JSON encoding that
-    would turn a line break inside a client name into the letters ``\\n``)."""
+    would turn a line break inside a client name into the letters ``\\n``). A string holding a JSON
+    object or array (raw ``_extra`` / ``_coerce_errors``) is screened both as it is and decoded."""
     if isinstance(obj, dict):
         return [x for v in obj.values() for x in _strings(v)]
     if isinstance(obj, (list, tuple, set)):
         return [x for v in obj for x in _strings(v)]
-    return [] if obj is None else [str(obj)]
+    if obj is None:
+        return []
+    text = str(obj)
+    if isinstance(obj, str) and text.lstrip()[:1] in ("{", "["):
+        try:
+            inner = json.loads(text)
+        except ValueError:
+            return [text]
+        if isinstance(inner, (dict, list)):
+            return [text, *_strings(inner)]
+    return [text]
 
 
 def any_term(obj: Any, denylist: Sequence[str]) -> bool:
