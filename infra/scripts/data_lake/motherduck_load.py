@@ -156,11 +156,34 @@ def _managed_tables(con) -> set[str]:
     return {row[0] for row in rows} - {LOAD_LOG}
 
 
+def _loader_tables(con, ref: str) -> set[str]:
+    """Marts this loader has ever written (from its own log); nothing else is ever dropped."""
+    if not _log_exists(con):
+        return set()
+    names: set[str] = set()
+    for (rows_json,) in con.execute(f'SELECT rows_json FROM {ref}."{LOAD_LOG}"').fetchall():
+        names.update(json.loads(rows_json or "{}"))
+    return names & _managed_tables(con)
+
+
+def _table_columns(con, name: str) -> list[str]:
+    return [
+        row[0]
+        for row in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_catalog = current_database() "
+            "AND table_schema = ? AND table_name = ? ORDER BY ordinal_position",
+            [WAREHOUSE_SCHEMA, name],
+        ).fetchall()
+    ]
+
+
 def _already_loaded(con, ref: str, gold_run_id: str, marts: dict[str, dict[str, Any]]) -> bool:
     if not _log_exists(con):
         return False
-    if _managed_tables(con) - set(marts):
+    if _loader_tables(con, ref) - set(marts):
         return False  # a mart whose export was withdrawn is still there: reload to drop it
+    if any(_table_columns(con, name) != list(EXPORT_APPROVED[name]) for name in marts):
+        return False  # approved columns changed: reload with the approved projection
     row = con.execute(f'SELECT gold_run_id FROM {ref}."{LOAD_LOG}" ORDER BY seq DESC LIMIT 1').fetchone()
     if not row or row[0] != gold_run_id:
         return False
@@ -223,19 +246,22 @@ def load_jobs_gold(
     con = _connect(target)
     try:
         ref = _schema_ref(con)
-        if _already_loaded(con, ref, gold_run_id, marts):
-            if published_key:
-                # Same run re-published later: advance the publish watermark without rewriting the
-                # marts, so a slower load of a run published in between is still refused.
-                con.execute("BEGIN TRANSACTION")
-                try:
-                    newest = con.execute(f'SELECT max(published_key) FROM {ref}."{LOAD_LOG}"').fetchone()[0]
-                    if not newest or published_key > newest:
-                        _log_load(con, ref, gold_run_id, manifest_key, published_key, expected, now)
-                    con.execute("COMMIT")
-                except BaseException:
-                    con.execute("ROLLBACK")
-                    raise
+        # The held-run check and the watermark move share one transaction, so a load that
+        # commits in between makes this one conflict instead of advancing a stale watermark.
+        con.execute("BEGIN TRANSACTION")
+        try:
+            held = _already_loaded(con, ref, gold_run_id, marts)
+            if held and published_key:
+                # Same run re-published later: advance the publish watermark without rewriting
+                # the marts, so a slower load of a run published in between is still refused.
+                newest = con.execute(f'SELECT max(published_key) FROM {ref}."{LOAD_LOG}"').fetchone()[0]
+                if not newest or published_key > newest:
+                    _log_load(con, ref, gold_run_id, manifest_key, published_key, expected, now)
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+        if held:
             return {**result, "status": "unchanged", "loaded_rows": expected}
 
         with tempfile.TemporaryDirectory(prefix="solo-empire-jobs-warehouse-") as temp_dir:
@@ -273,7 +299,7 @@ def load_jobs_gold(
                         [str(path)],
                     )
                 # Marts whose export was withdrawn leave the warehouse in the same transaction.
-                dropped = sorted(_managed_tables(con) - set(parts))
+                dropped = sorted(_loader_tables(con, ref) - set(parts))
                 for name in dropped:
                     con.execute(f"DROP TABLE {ref}.{_ident(name)}")
                 loaded = _table_counts(con, ref, marts)

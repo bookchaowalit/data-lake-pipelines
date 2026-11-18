@@ -17,8 +17,13 @@ as R2 Gold. Done when the row counts in MotherDuck equal the Gold manifest count
    from the publisher's `JOBS_MARTS`: a mart new to Gold is reported in `not_exported` and never
    loaded until it is classified as holding no personal data and added there. Approval covers
    the columns too: a part whose columns differ from the approved list is refused, and only the
-   approved columns are selected. A mart taken off the list is dropped from the warehouse in the
-   next load's transaction (`dropped`), and `unchanged` is never reported while one remains.
+   approved columns are selected; `unchanged` is never reported while a warehouse table's
+   columns differ from the approved list. A mart taken off the list is dropped in the next load's
+   transaction (`dropped`), but only tables the loader's own `_gold_loads` log shows it wrote;
+   other tables in the schema are never touched.
+   Classification (owner, ADR-0016 §2, 2026-11-17): jobs marts are public postings and
+   aggregates; `company` is the employer named in a public job ad (a business, not a person).
+   A board that lets individuals post under their own name would need a review of that column.
    The load refuses a key outside
    `control/manifests/gold/source=book-job-data/domain=jobs/`, a manifest that is not jobs Gold,
    one that lists a mart twice or does not list exactly the published marts (`JOBS_MARTS`), a part key other than
@@ -48,7 +53,9 @@ as R2 Gold. Done when the row counts in MotherDuck equal the Gold manifest count
    Tables are addressed as `"<catalog>"."jobs"."<mart>"`, so an attached database named `jobs`
    cannot shadow the schema. When the same Gold run is re-published, the `unchanged` path still
    appends a log row with the newer pointer key (no mart is rewritten), so the watermark moves.
-   The workflow step also skips (`skipped_stale_revision`) unless its commit is main's head, so
+   The held-run check and the watermark move run in one transaction.
+   The workflow step also skips (`skipped_stale_revision`) unless its commit is main's head (and
+   fails if main's head cannot be read), so
    "Re-run all jobs" on an old run, which rebuilds Gold with old code and a new publish time,
    cannot write the warehouse.
 8. The `warehouse` job in `jobs-marts.yml` runs after `build` (same gate as `bi`: exit 0 or 3).
