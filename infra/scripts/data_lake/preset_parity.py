@@ -10,7 +10,8 @@ what the static jobs-insights site computes from the same Gold run
 - the overview tiles (postings, last 90 days, last 7 days, boards, companies);
 - postings per day and board over the 90-day window (the chart's own points);
 - the last complete week's top 20 tags;
-- every company with its 30-day and all-time postings, boards and last posting date, in page order.
+- every company with its 30-day and all-time postings, boards and last posting date, in page order;
+- every board row of the Boards page.
 
 Each check appends one row to ``jobs._preset_parity`` in the warehouse, with the
 fingerprint of the dashboard export committed at that revision (``export_sha256``;
@@ -20,7 +21,7 @@ Two streaks are reported. ``dataset_matching_days`` counts matching checks of th
 dataset SQL alone. ``dashboard_matching_days`` counts only checks made with the
 same committed dashboard export, so it restarts when the dashboard is exported
 again. A streak also restarts after a mismatch or a gap of more than
-``MAX_CHECK_GAP`` between two checks (time nobody checked is not evidence).
+``MAX_CHECK_GAP`` (3 h) between two checks (time nobody checked is not evidence).
 ``p3_parity_met`` is true once the dashboard streak reaches 14 days.
 
 The warehouse's Gold run and every dataset are read, and the result written, in
@@ -62,11 +63,42 @@ DATASETS = (
     "jobs_daily_90d",
     "jobs_skills_last_week",
     "jobs_companies_30d",
+    "jobs_boards",
 )
+# Output columns of each dataset SQL (preset_jobs_test checks them against the SQL itself); the
+# export check lets a Preset dataset use only these.
+DATASET_COLUMNS = {
+    "jobs_kpis": (
+        "as_of_date",
+        "postings",
+        "postings_90d",
+        "postings_7d",
+        "boards",
+        "companies",
+    ),
+    "jobs_daily_90d": ("posted_date", "board", "postings"),
+    "jobs_skills_last_week": ("posted_week", "demand_rank", "tag", "postings"),
+    "jobs_companies_30d": (
+        "company",
+        "postings_30d",
+        "postings_total",
+        "boards",
+        "last_posted_date",
+    ),
+    "jobs_boards": (
+        "board",
+        "postings_total",
+        "postings_7d",
+        "companies",
+        "last_posted_date",
+        "last_seen_at",
+    ),
+}
+BOARD_FIELDS = DATASET_COLUMNS["jobs_boards"]
 PARITY_LOG = "_preset_parity"
 PARITY_DAYS = 14
-# jobs-marts runs every 2 h; more than 6 h between two checks breaks a streak.
-MAX_CHECK_GAP = timedelta(hours=6)
+# jobs-marts runs every 2 h; one missed or failed check (3 h or more between two) breaks a streak.
+MAX_CHECK_GAP = timedelta(hours=3)
 KPI_KEYS = ("postings", "postings_90d", "postings_7d", "boards", "companies")
 
 
@@ -121,6 +153,7 @@ def site_values(snapshot: Snapshot) -> dict[str, Any]:
             _company(r, ", ".join(str(b) for b in (r["boards"] or [])))
             for r in snapshot.companies
         ],
+        "boards": [tuple(r[f] for f in BOARD_FIELDS) for r in snapshot.boards],
     }
 
 
@@ -148,6 +181,10 @@ def warehouse_values(con: Any) -> dict[str, Any]:
             _company(r, r["boards"])
             for r in _rows(con, dataset_sql("jobs_companies_30d"))
         ],
+        "boards": [
+            tuple(r[f] for f in BOARD_FIELDS)
+            for r in _rows(con, dataset_sql("jobs_boards"))
+        ],
     }
 
 
@@ -160,7 +197,13 @@ def compare(site: dict[str, Any], warehouse: dict[str, Any]) -> list[str]:
     ]
     diffs += [
         key
-        for key in ("as_of_date", "daily_90d", "skills_last_week", "companies")
+        for key in (
+            "as_of_date",
+            "daily_90d",
+            "skills_last_week",
+            "companies",
+            "boards",
+        )
         if site[key] != warehouse[key]
     ]
     return diffs

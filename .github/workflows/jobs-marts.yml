@@ -172,7 +172,9 @@ jobs:
     # ADR-0016 P2: replace the jobs tables in MotherDuck empire_gold with this Gold run
     # (motherduck_load.py). Until the MOTHERDUCK_TOKEN secret exists it reports
     # skipped_no_token and succeeds. Same gate as bi: stale Gold is still correct for its input.
-    needs: build
+    # Runs after bi so the Preset parity check counts only runs whose jobs-insights site was
+    # published; the load itself does not depend on bi.
+    needs: [build, bi]
     if: ${{ always() && (needs.build.outputs.exit_code == '0' || needs.build.outputs.exit_code == '3') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -196,6 +198,7 @@ jobs:
           SOLO_EMPIRE_DATA_LAKE_URI: ${{ secrets.JOB_DATA_LAKE_URI }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           MANIFEST_KEY: ${{ needs.build.outputs.manifest_key }}
+          BI_RESULT: ${{ needs.bi.result }}
         run: |
           if [ -z "$MOTHERDUCK_TOKEN" ]; then
             echo '{"status": "skipped_no_token"}' | tee -a "$GITHUB_STEP_SUMMARY"
@@ -225,7 +228,12 @@ jobs:
                error: (if .error then (.error | split(":")[0]) else null end)}' "$RUNNER_TEMP/warehouse.json" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$code" != 0 ]; then exit $code; fi
-          # Only a warehouse that holds this run is checked (skipped_not_latest also exits 0).
+          # Only a warehouse that holds this run is checked (skipped_not_latest also exits 0), and
+          # only when jobs-insights was published from this run: otherwise there is nothing to match.
+          if [ "$BI_RESULT" != "success" ]; then
+            echo '{"parity": "skipped_site_not_published"}' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           case "$(jq -r .status "$RUNNER_TEMP/warehouse.json")" in
             loaded|unchanged) ;;
             *) exit 0 ;;

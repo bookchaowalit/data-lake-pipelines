@@ -47,7 +47,7 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
   ทั้งหมดใน transaction เดียวจาก Gold manifest (ตรวจ sha256 และ allow-list เฉพาะ jobs marts) แล้วเทียบจำนวนแถวกับ manifest;
   รันซ้ำ Gold run เดิมได้ `unchanged`; ลองในเครื่องด้วย `--target /tmp/x.duckdb` แทน MotherDuck
 - Preset (ADR-0016 P3, [`docs/specs/jobs-preset-dashboard.md`](docs/specs/jobs-preset-dashboard.md)): dashboard สร้างใน UI ของ Preset
-  จาก SQL ใน `infra/bi/preset/jobs/datasets/` เท่านั้น; `preset_parity.py` นับวันที่ตัวเลขตรงกับ jobs-insights ต่อเนื่อง (ขาดตรวจเกิน 6 ชม. หรือไม่ตรงนับใหม่; ครบ 14 วันกับ export เดียวกัน = `p3_parity_met`);
+  จาก SQL ใน `infra/bi/preset/jobs/datasets/` เท่านั้น; `preset_parity.py` นับวันที่ตัวเลขตรงกับ jobs-insights ต่อเนื่อง (ขาดตรวจตั้งแต่ 3 ชม. ขึ้นไป หรือไม่ตรง ให้นับใหม่; นับเฉพาะรอบที่ jobs-insights เผยแพร่จาก run เดียวกัน; ครบ 14 วันกับ export เดียวกัน = `p3_parity_met`);
   export ZIP เก็บที่ `infra/bi/preset/jobs/` และต้องผ่าน `preset_export_check.py` (ไม่มี token, เฉพาะ marts/คอลัมน์ที่อนุมัติ)
 - lineage: `lake.silver-job-postings` → `lake.gold-jobs-marts` → `consumer.jobs-insights-site` ใน metadata catalog ของ architecture-docs
 

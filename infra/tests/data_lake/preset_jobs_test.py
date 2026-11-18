@@ -175,7 +175,7 @@ class PresetParityTests(unittest.TestCase):
                 export_sha256="a",
             )
             self.assertEqual(bad["status"], "mismatch")
-            self.assertEqual(bad["mismatches"], ["kpis.postings_7d"])
+            self.assertEqual(bad["mismatches"], ["kpis.postings_7d", "boards"])
             self.assertEqual(bad["dashboard_matching_days"], 0)
             self._sql(
                 target,
@@ -287,6 +287,41 @@ class PresetParityTests(unittest.TestCase):
             )
             self.assertIn("daily_90d", result["mismatches"])
 
+    def test_dataset_columns_are_what_the_sql_returns(self):
+        from data_lake.preset_parity import DATASET_COLUMNS, DATASETS, dataset_sql
+
+        with TEMP() as root, TEMP() as out:
+            _, target = self._loaded(root, out)
+            import duckdb
+
+            con = duckdb.connect(target, read_only=True)
+            try:
+                for name in DATASETS:
+                    columns = tuple(
+                        c[0] for c in con.execute(dataset_sql(name)).description
+                    )
+                    self.assertEqual(columns, DATASET_COLUMNS[name], name)
+            finally:
+                con.close()
+
+    def test_a_changed_board_row_is_a_mismatch(self):
+        from data_lake.preset_parity import check_parity
+
+        with TEMP() as root, TEMP() as out:
+            gold, target = self._loaded(root, out)
+            self._sql(
+                target,
+                "update jobs.jobs_board_health set last_seen_at = last_seen_at - interval 1 hour",
+            )
+            result = check_parity(
+                gold["manifest_key"],
+                target,
+                data_lake_uri=root,
+                now=NOW,
+                export_sha256="a",
+            )
+            self.assertEqual(result["mismatches"], ["boards"])
+
     def test_skills_week_and_order_match_the_site(self):
         import duckdb
 
@@ -362,25 +397,30 @@ def _indented_sql(name: str) -> str:
 
 
 def _sql_dataset(name: str) -> str:
-    return f"table_name: {name}\nschema: null\nuuid: u-{name}\nsql: |\n{_indented_sql(name)}\n"
+    return f"table_name: {name}\nschema: null\nuuid: u-{name}\ndatabase_uuid: u-db\nsql: |\n{_indented_sql(name)}\n"
 
 
 def _export(**overrides: str | None) -> dict[str, str]:
-    others = ("jobs_daily_90d", "jobs_skills_last_week", "jobs_companies_30d")
+    others = (
+        "jobs_daily_90d",
+        "jobs_skills_last_week",
+        "jobs_companies_30d",
+        "jobs_boards",
+    )
     position = {
         f"CHART-{n}": {"type": "CHART", "meta": {"uuid": f"c-{n}"}}
         for n in ("jobs_kpis", *others)
     }
     files: dict[str, str | None] = {
         "dashboard_export/metadata.yaml": "version: 1.0.0\ntype: Dashboard\n",
-        DB: "database_name: MotherDuck\nsqlalchemy_uri: duckdb:///md:empire_gold\nextra:\n  allows_virtual_table_explore: true\n",
+        DB: "database_name: MotherDuck\nuuid: u-db\nsqlalchemy_uri: duckdb:///md:empire_gold\nextra:\n  allows_virtual_table_explore: true\n",
         KPIS: (
             _sql_dataset("jobs_kpis")
             + "columns:\n- column_name: postings\n- column_name: boards\n"
             "metrics:\n- metric_name: count\n  expression: COUNT(*)\n"
         ),
         HEALTH: (
-            "table_name: jobs_board_health\nschema: jobs\nuuid: u-health\ncolumns:\n- column_name: board\n"
+            "table_name: jobs_board_health\nschema: jobs\nuuid: u-health\ndatabase_uuid: u-db\ncolumns:\n- column_name: board\n"
             "- column_name: postings_total\n- column_name: share\n  expression: postings_total * 1.0\n"
             "metrics:\n- metric_name: total\n  expression: SUM(postings_total)\n"
         ),
@@ -421,7 +461,7 @@ class PresetExportCheckTests(unittest.TestCase):
 
     def test_secrets_are_refused_without_echoing_them(self):
         token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0dXNlciJ9.c2lnbmF0dXJl"
-        base = "database_name: MotherDuck\nsqlalchemy_uri: duckdb:///md:empire_gold\n"
+        base = "database_name: MotherDuck\nuuid: u-db\nsqlalchemy_uri: duckdb:///md:empire_gold\n"
         cases = {
             "token in URI": {
                 DB: f"database_name: MotherDuck\nsqlalchemy_uri: duckdb:///md:empire_gold?motherduck_token={token}\n"
@@ -522,6 +562,21 @@ class PresetExportCheckTests(unittest.TestCase):
                     "jobs_companies_30d"
                 ).replace("', '", "',  '")
             },
+            "dataset on another database": {
+                DS + "jobs_boards.yaml": _sql_dataset("jobs_boards").replace(
+                    "u-db", "u-other"
+                )
+            },
+            "filter options predicate": {
+                HEALTH: _export()[HEALTH]
+                + "fetch_values_predicate: board in (select handle from posts)\n"
+            },
+            "SQL dataset lists a column its SQL does not return": {
+                KPIS: _sql_dataset("jobs_kpis") + "columns:\n- column_name: email\n"
+            },
+            "a second dashboard misses datasets": {
+                "dashboard_export/dashboards/Other.yaml": "dashboard_title: Other\nposition: '{}'\n"
+            },
             "chart on a dataset outside the export": {
                 CHART: "slice_name: x\ndataset_uuid: other\n"
             },
@@ -532,6 +587,19 @@ class PresetExportCheckTests(unittest.TestCase):
         for label, override in cases.items():
             with self.subTest(label):
                 self.assertTrue(self._problems(_export(**override)), label)
+
+    def test_problems_do_not_echo_export_values(self):
+        problems = self._problems(
+            _export(
+                **{
+                    HEALTH: _export()[HEALTH].replace(
+                        "SUM(postings_total)", "SUM(hunter2col)"
+                    )
+                }
+            )
+        )
+        self.assertTrue(problems)
+        self.assertFalse(any("hunter2col" in p for p in problems))
 
     def test_fingerprint_needs_a_passing_committed_export(self):
         from data_lake import preset_export_check as check

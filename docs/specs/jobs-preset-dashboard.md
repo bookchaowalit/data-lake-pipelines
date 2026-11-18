@@ -21,7 +21,7 @@ everything that can be checked:
 
 ## Datasets
 
-All four read `empire_gold.jobs.<mart>` (three-part names, so another MotherDuck database cannot
+All five read `empire_gold.jobs.<mart>` (three-part names, so another MotherDuck database cannot
 shadow the schema). Windows end on the newest capture date (`max(as_of_date)`), as on
 jobs-insights, not on today.
 
@@ -31,8 +31,10 @@ jobs-insights, not on today.
 | `jobs_daily_90d` | `posted_date`, `board`, `postings` for the 90-day window | Overview chart and per-board table |
 | `jobs_skills_last_week` | top 20 `demand_rank`, `tag`, `postings` of the last complete week (Monday start) | Skills, first table |
 | `jobs_companies_30d` | `company`, `postings_30d`, `postings_total`, `boards`, `last_posted_date`, in page order | Companies |
+| `jobs_boards` | `board`, `postings_total`, `postings_7d`, `companies`, `last_posted_date`, `last_seen_at`, in page order | Boards |
 
-The physical marts (`jobs.jobs_board_health` and the others) may also be used as datasets, with
+The physical marts may also be used as datasets, but charts on them are not parity-checked; prefer
+the SQL datasets. A physical dataset may use only the mart's approved columns,
 their approved columns only.
 
 ## Charts (suggested layout)
@@ -41,7 +43,7 @@ their approved columns only.
 2. Stacked bar on `jobs_daily_90d`: x `posted_date`, metric `sum(postings)`, dimension `board`.
 3. Table on `jobs_skills_last_week`, ordered by `demand_rank`.
 4. Table on `jobs_companies_30d` with a filter on `company`.
-5. Table on `jobs.jobs_board_health` (board, postings_total, postings_7d, companies, last_posted_date, last_seen_at).
+5. Table on `jobs_boards`.
 
 Dashboard title: `Jobs insights`.
 
@@ -52,7 +54,7 @@ Dashboard title: `Jobs insights`.
 
 - It builds the jobs-insights snapshot from the same Gold manifest and takes the site's own
   numbers (`jobs_bi_site.overview_kpis`, `skills_last_week`, the daily rows and the company rows).
-- In one transaction it reads the warehouse's newest `_gold_loads` run, runs the four dataset SQL
+- In one transaction it reads the warehouse's newest `_gold_loads` run, runs the five dataset SQL
   files and writes the result, so a load from another session cannot mix two Gold runs. A
   different run (the load was skipped or another session loaded) gives `skipped_run_mismatch`
   and nothing is recorded.
@@ -64,8 +66,12 @@ Dashboard title: `Jobs insights`.
 - Each check appends a row to `jobs._preset_parity` (`seq`, `gold_run_id`, `checked_at`, `ok`,
   `mismatches_json`, `export_sha256`). `export_sha256` fingerprints the dashboard export ZIPs
   committed at that revision, and is empty when none is committed or one fails the export check.
-- Two streaks, both broken by a mismatch or by more than 6 h between two checks (jobs-marts runs
-  every 2 h; time nobody checked is not evidence):
+- It runs only when the `bi` job of the same run succeeded, so every counted check compares
+  against a jobs-insights site built from that Gold run; otherwise it reports
+  `skipped_site_not_published`.
+- Two streaks, both broken by a mismatch or by 3 h or more between two checks (jobs-marts runs
+  every 2 h, so one missed, failed or skipped check breaks it; time nobody checked is not
+  evidence):
   - `dataset_matching_days`: the dataset SQL alone matched. This says nothing about a dashboard.
   - `dashboard_matching_days`: only checks made with the same committed export count, so it starts
     when the export is first committed and restarts after every re-export.
@@ -92,7 +98,11 @@ Locally, against a DuckDB file named `empire_gold.duckdb` that `motherduck_load.
 2. Sign up for Preset Starter at https://preset.io/pricing/ with the personal owner identity (EU
    region if offered). Store the login in Infisical `/preset`.
 3. Give the `reader` service account read-only access (ADR-0016 1.1 §3; MotherDuck Lite has no
-   read-only token):
+   read-only token). A share covers the whole database, so `empire_gold` holds only what
+   `motherduck_load.py` writes (approved marts and approved columns) plus the two logs
+   `_gold_loads` and `_preset_parity` (run ids, keys, counts, mismatch names; no personal data).
+   Never create anything else in `empire_gold`; another domain or anything unapproved goes in its
+   own database with its own share:
    - As `loader`, in the MotherDuck UI: `CREATE SHARE empire_gold_reader FROM empire_gold (ACCESS RESTRICTED, UPDATE AUTOMATIC);`
      then grant it to `reader` (`GRANT READ ON SHARE empire_gold_reader TO <reader username>;`).
    - As `reader`: `ATTACH '<share URL>' AS empire_gold;` so the dataset SQL's
@@ -146,7 +156,11 @@ Locally, against a DuckDB file named `empire_gold.duckdb` that `motherduck_load.
   and a fixed list of SQL keywords and functions, or uses a quoted or dotted name, a comment or
   `;`; a chart points at a dataset that is not in the export;
 - a dashboard holds SQL, shows a chart that is not in the export, or does not show at least one
-  chart on each of the four SQL datasets (the parity check proves only what they return);
+  chart on each of the five SQL datasets (each dashboard on its own; the parity check proves
+  only what they return);
+- a dataset does not point at the `duckdb:///md:empire_gold` database in the same export, a SQL
+  dataset lists a column its SQL does not return, or a `fetch_values_predicate` (the WHERE Preset
+  adds when it loads filter options) names anything but the dataset's columns;
 - an entry is not YAML, has an absolute or `..` path, or is over 5 MB; or there is no dashboard.
 
 Problems name the file and the rule, never the matched text.

@@ -46,7 +46,7 @@ from data_lake.motherduck_load import (
     WAREHOUSE_DATABASE,
     WAREHOUSE_SCHEMA,
 )  # noqa: E402
-from data_lake.preset_parity import DATASETS, dataset_sql  # noqa: E402
+from data_lake.preset_parity import DATASET_COLUMNS, DATASETS, dataset_sql  # noqa: E402
 
 EXPORT_DIR = ROOT / "infra" / "bi" / "preset" / "jobs"
 DATABASE_URI = f"duckdb:///md:{WAREHOUSE_DATABASE}"
@@ -168,7 +168,7 @@ def _expression_problem(expression: str, columns: set[str]) -> str | None:
         return "uses a dotted (qualified) name"
     for word in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
         if word not in columns and word.lower() not in SQL_WORDS:
-            return f"names {word!r}, which is not a column of its dataset"
+            return "names something that is not a column of its dataset"
     return None
 
 
@@ -182,7 +182,13 @@ def _dataset(path: str, doc: dict[str, Any]) -> tuple[list[str], set[str]]:
             return [
                 f"{path}: SQL dataset is not one of infra/bi/preset/jobs/datasets/*.sql"
             ], set()
-        columns = {str(c.get("column_name")) for c in listed if not c.get("expression")}
+        # The approved SQL's own output columns, not what the export claims.
+        columns = set(DATASET_COLUMNS[APPROVED_SQL[_normal_sql(sql)]])
+        if any(
+            not c.get("expression") and c.get("column_name") not in columns
+            for c in listed
+        ):
+            problems.append(f"{path}: lists a column the dataset SQL does not return")
     else:
         table = doc.get("table_name")
         if (
@@ -198,11 +204,14 @@ def _dataset(path: str, doc: dict[str, Any]) -> tuple[list[str], set[str]]:
                 and column.get("column_name") not in columns
             ):
                 problems.append(
-                    f"{path}: column {column.get('column_name')!r} is not approved for {table}"
+                    f"{path}: lists a column that is not approved for {table}"
                 )
-    fragments = [c.get("expression") for c in listed] + [
-        m.get("expression") for m in doc.get("metrics") or [] if isinstance(m, dict)
-    ]
+    # fetch_values_predicate is the WHERE Preset adds when it loads filter options.
+    fragments = (
+        [c.get("expression") for c in listed]
+        + [m.get("expression") for m in doc.get("metrics") or [] if isinstance(m, dict)]
+        + [doc.get("fetch_values_predicate")]
+    )
     for fragment in fragments:
         if fragment and (problem := _expression_problem(str(fragment), columns)):
             problems.append(f"{path}: an expression {problem}")
@@ -245,6 +254,11 @@ def check_zip(zip_path: Path) -> list[str]:
                 kind = entry.parts[1] if len(entry.parts) > 2 else ""
                 docs[info.filename] = (kind, doc)
 
+    databases = {
+        str(doc.get("uuid"))
+        for kind, doc in docs.values()
+        if kind == "databases" and str(doc.get("sqlalchemy_uri") or "") == DATABASE_URI
+    }
     dataset_columns: dict[str, set[str]] = {}
     dataset_names: dict[str, str] = {}
     for path, (kind, doc) in docs.items():
@@ -256,6 +270,10 @@ def check_zip(zip_path: Path) -> list[str]:
         elif kind == "datasets":
             found, columns = _dataset(path, doc)
             problems += found
+            if str(doc.get("database_uuid")) not in databases:
+                problems.append(
+                    f"{path}: dataset does not use the {DATABASE_URI} database in this export"
+                )
             dataset_columns[str(doc.get("uuid"))] = columns
             if name := APPROVED_SQL.get(_normal_sql(str(doc.get("sql") or ""))):
                 dataset_names[str(doc.get("uuid"))] = name
@@ -281,8 +299,8 @@ def check_zip(zip_path: Path) -> list[str]:
     ]
     if not dashboards:
         problems.append(f"{zip_path.name}: no dashboard in the export")
-    shown: set[str] = set()
     for path, doc in dashboards:
+        shown: set[str] = set()
         for key, value in _walk(doc):
             if key in EXPRESSION_KEYS and value:
                 problems.append(f"{path}: the dashboard holds SQL ({key})")
@@ -295,12 +313,12 @@ def check_zip(zip_path: Path) -> list[str]:
                     continue
                 if name := dataset_names.get(chart_datasets[chart]):
                     shown.add(name)
-    # The parity check only proves what these four datasets return: the dashboard must show each.
-    for name in DATASETS:
-        if dashboards and name not in shown:
-            problems.append(
-                f"{zip_path.name}: no dashboard chart uses the {name} dataset"
-            )
+        # The parity check only proves what the SQL datasets return: each dashboard shows every one.
+        problems += [
+            f"{path}: no chart on this dashboard uses the {name} dataset"
+            for name in DATASETS
+            if name not in shown
+        ]
     return problems
 
 
