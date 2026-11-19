@@ -57,7 +57,7 @@ POSTGRES_SQL_COLUMNS = textwrap.dedent("""
     ORDER BY a.attnum
 """)
 POSTGRES_FETCH_FK = "select 1 where :table > 0"
-POSTGRES_PARTITION_DETAILS = "select * from pg_partitioned_table where :table_name = :schema_name"
+POSTGRES_PARTITION_DETAILS = "select 1 where :table_name = :schema_name"
 NOT_A_QUERY = 42
 '''
 
@@ -185,13 +185,17 @@ class CollateProbeTests(unittest.TestCase):
         with self.assertRaises(Inconclusive):
             run_catalog(runner, _queries(), server_version=160002)
 
-    def test_dialect_stage_reads_the_version_and_skips_stock_columns(self):
+    def test_dialect_stage_reads_the_version_and_classifies_like_the_connector(self):
+        import contextlib
+
         from data_lake.collate_probe import run_dialect
         from data_lake.motherduck_load import EXPORT_APPROVED
 
         calls: list[str] = []
 
         class Inspector:
+            unique_error: type[BaseException] | None = None
+
             def get_table_names(self, schema):
                 return list(EXPORT_APPROVED)
 
@@ -205,17 +209,60 @@ class CollateProbeTests(unittest.TestCase):
             def get_pk_constraint(self, table, schema):
                 return {}
 
-            get_indexes = get_unique_constraints = get_pk_constraint
+            def get_unique_constraints(self, table, schema):
+                if self.unique_error:
+                    raise self.unique_error("x")
+                return []
 
-        engine = type(
-            "E", (), {"dialect": type("D", (), {"server_version_info": (9, 6, 24)})()}
-        )()
-        with mock.patch("sqlalchemy.inspect", return_value=Inspector()):
+            def get_indexes(self, table, schema):
+                raise RuntimeError("no indexes")
+
+        class Dialect:
+            server_version_info = (9, 6, 24)
+            enums_fail = False
+
+            def _load_domains(self, conn):
+                return {}
+
+            def _load_enums(self, conn, schema=None):
+                if self.enums_fail:
+                    raise RuntimeError("no pg_enum")
+                return []
+
+        class Engine:
+            dialect = Dialect()
+
+            def connect(self):
+                return contextlib.nullcontext(object())
+
+        engine = Engine()
+        inspector = Inspector()
+        with mock.patch("sqlalchemy.inspect", return_value=inspector):
             result, version = run_dialect(engine)
         self.assertEqual(version, 90624)
         self.assertEqual(calls, [])
-        self.assertTrue(result["steps"]["dialect_connect"]["ok"])
-        self.assertFalse(result["steps"]["view_names"]["ok"])
+        steps = result["steps"]
+        self.assertTrue(
+            steps["dialect_connect"]["ok"]
+            and steps["domains"]["ok"]
+            and steps["enums"]["ok"]
+        )
+        self.assertFalse(
+            steps["view_names"]["required"]
+            or steps["jobs_board_health.indexes"]["required"]
+        )
+        # NotImplementedError on a constraint passes, as in the connector; an SQL error fails.
+        inspector.unique_error = NotImplementedError
+        with mock.patch("sqlalchemy.inspect", return_value=inspector):
+            result, _ = run_dialect(engine)
+        self.assertTrue(result["steps"]["jobs_board_health.unique"]["ok"])
+        inspector.unique_error = RuntimeError
+        engine.dialect.enums_fail = True
+        with mock.patch("sqlalchemy.inspect", return_value=inspector):
+            result, _ = run_dialect(engine)
+        self.assertFalse(result["steps"]["jobs_board_health.unique"]["ok"])
+        self.assertTrue(result["steps"]["jobs_board_health.unique"]["required"])
+        self.assertFalse(result["steps"]["enums"]["ok"])
         with mock.patch(
             "sqlalchemy.inspect",
             side_effect=AssertionError("Could not determine version"),
@@ -225,6 +272,35 @@ class CollateProbeTests(unittest.TestCase):
             (failed["steps"]["dialect_connect"]["error"], version),
             ("AssertionError", None),
         )
+
+    def test_partition_and_foreign_key_errors_are_required_failures(self):
+        from data_lake.collate_probe import probe_duckdb
+
+        queries = dict(
+            _queries(),
+            POSTGRES_PARTITION_DETAILS="select * from pg_partitioned_table where :table_name = :schema_name",
+        )
+        with TEMP() as root, TEMP() as out:
+            result = probe_duckdb(
+                self._warehouse(root, out), queries=queries, server_version=90600
+            )
+        self.assertFalse(result["viable"])
+        self.assertIn("catalog.jobs_board_health.partitions", result["required_failed"])
+
+    def test_test_connection_queries_do_not_decide(self):
+        from data_lake.collate_probe import probe_duckdb
+
+        queries = dict(
+            _queries(),
+            TEST_COLUMN_METADATA="select no_such_function()",
+            POSTGRES_TABLE_COMMENTS="select no_such_function()",
+        )
+        with TEMP() as root, TEMP() as out:
+            result = probe_duckdb(
+                self._warehouse(root, out), queries=queries, server_version=90600
+            )
+        self.assertTrue(result["viable"], result["required_failed"])
+        self.assertIn("catalog.test_column_metadata", result["optional_failed"])
 
     def test_cli_prints_a_verdict_or_a_type_only_failure(self):
         from data_lake import collate_probe as probe

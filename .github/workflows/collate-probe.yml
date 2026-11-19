@@ -39,9 +39,12 @@ jobs:
             exit 0
           fi
           python -m pip install --disable-pip-version-check uv==0.13.1
-          uv sync --frozen --no-dev
           set +e
-          .venv/bin/python infra/scripts/data_lake/collate_probe.py > "$RUNNER_TEMP/probe.json"
+          # The connector's own stack (OpenMetadata 2.0.8 ingestion: psycopg2-binary, SQLAlchemy
+          # >=2.0,<2.1), not the project lock (psycopg 3, SQLAlchemy 2.1), whose start-up queries differ.
+          uv run --no-project --isolated --python 3.13 \
+            --with sqlalchemy==2.0.56 --with psycopg2-binary==2.9.13 \
+            python infra/scripts/data_lake/collate_probe.py > "$RUNNER_TEMP/probe.json"
           code=$?
           set -e
           tee -a "$GITHUB_STEP_SUMMARY" < "$RUNNER_TEMP/probe.json"

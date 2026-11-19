@@ -51,7 +51,7 @@ career-job-scraper (Track B, "17 */6")      → Bronze job_postings
   export ZIP เก็บที่ `infra/bi/preset/jobs/` และต้องผ่าน `preset_export_check.py` (ไม่มี token, เฉพาะ marts/คอลัมน์ที่อนุมัติ)
 - Collate (ADR-0016 P4, [`docs/specs/jobs-collate-connector-test.md`](docs/specs/jobs-collate-connector-test.md)): ก่อนสมัคร Collate
   `collate_probe.py` รัน query ของ connector PostgreSQL (ดาวน์โหลด `queries.py` ของ OpenMetadata ตาม commit ที่ pin ไว้และตรวจ sha256 ตอนรัน; ไม่เก็บใน repo เพราะเป็น Collate Community License) กับ Postgres endpoint ของ MotherDuck ในฐานะ `reader`
-  (workflow `collate-probe.yml` กดรันเอง); `viable: false` = ปิด P4 ใช้ YAML catalog ต่อ; dry run กับ DuckDB: query คอลัมน์ล้มเพราะ `pg_get_serial_sequence`
+  (workflow `collate-probe.yml` กดรันเอง); `viable: false` = ปิด P4 ใช้ YAML catalog ต่อ; dry run กับ DuckDB: query คอลัมน์ล้ม (`pg_get_serial_sequence`) และ query partition ล้ม (`pg_partitioned_table`) ซึ่ง connector จะทิ้งตารางนั้น
 - lineage: `lake.silver-job-postings` → `lake.gold-jobs-marts` → `consumer.jobs-insights-site` ใน metadata catalog ของ architecture-docs
 
 ## Event plane: Kafka → Bronze (ADR-0008 M4)

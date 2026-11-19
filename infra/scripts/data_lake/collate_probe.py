@@ -7,19 +7,24 @@ not support PostgreSQL's ``pg_*`` functions. Before anyone signs up for Collate,
 this runs what that connector runs and says whether it can discover
 ``empire_gold.jobs``:
 
-1. SQLAlchemy dialect (endpoint only): the connector connects through
-   SQLAlchemy's PostgreSQL dialect, whose version check must pass, and reflects
-   table names and primary keys with it. The server version the dialect reads is
-   what the connector uses to build its column query.
+1. SQLAlchemy dialect (endpoint only), on the connector's own stack (psycopg2,
+   SQLAlchemy 2.0; ``collate-probe.yml`` runs it in that environment): the
+   version check on connect, the domains and enums its ``get_columns`` loads,
+   and primary keys and unique constraints (an SQL error fails, an empty answer
+   or NotImplementedError passes, as in the connector). The server version the
+   dialect reads is what the connector uses to build its column query.
 2. Catalog queries: the connector's own SQL, rendered for that server version.
    The SQL is not stored in this repository: OpenMetadata's ingestion code is
    under the Collate Community License, so the probe downloads ``queries.py`` at
    a pinned commit at run time, checks its sha256, and reads the SQL strings with
    ``ast`` (nothing from the file is executed).
 
-``required`` steps are what metadata ingestion of ``empire_gold.jobs`` needs;
-the others (owners, views, foreign keys, partitions, policies, procedures) only
-fill optional fields. The result is ``viable`` when every required step works
+``required`` steps are those whose SQL error makes the connector drop a table or
+stop: databases, schemas, tables, schema comments, and per mart columns, foreign
+keys and partition details (an empty answer passes). The rest are diagnostic:
+the three test-connection queries (optional in the connector's own definition),
+table comments (read with errors caught), owners, views, policies, procedures,
+functions and indexes. The result is ``viable`` when every required step works
 and the connector's own column query returns each approved jobs mart with
 exactly its approved columns. Columns are judged by the connector's query only:
 OpenMetadata replaces SQLAlchemy's ``get_columns``.
@@ -81,10 +86,12 @@ CATALOG_STEPS: tuple[tuple[str, str, bool], ...] = (
     ("schemas", "POSTGRES_GET_SCHEMA_NAMES", True),
     ("tables", "POSTGRES_GET_TABLE_NAMES", True),
     ("schema_comments", "POSTGRES_SCHEMA_COMMENTS", True),
-    ("table_comments", "POSTGRES_TABLE_COMMENTS", True),
-    ("test_column_metadata", "TEST_COLUMN_METADATA", True),
-    ("test_table_comments", "TEST_TABLE_COMMENTS", True),
-    ("test_information_schema_columns", "TEST_INFORMATION_SCHEMA_COLUMNS", True),
+    # Diagnostic only: table comments are read with errors caught, and the three test queries
+    # are optional in the connector's test-connection definition.
+    ("table_comments", "POSTGRES_TABLE_COMMENTS", False),
+    ("test_column_metadata", "TEST_COLUMN_METADATA", False),
+    ("test_table_comments", "TEST_TABLE_COMMENTS", False),
+    ("test_information_schema_columns", "TEST_INFORMATION_SCHEMA_COLUMNS", False),
     ("table_owners", "POSTGRES_TABLE_OWNERS", False),
     ("view_definitions", "POSTGRES_VIEW_DEFINITIONS", False),
     ("policy_tags", "POSTGRES_TEST_GET_TAGS", False),
@@ -95,8 +102,10 @@ CATALOG_STEPS: tuple[tuple[str, str, bool], ...] = (
 # Per approved mart, after the table oid is known.
 PER_TABLE_STEPS: tuple[tuple[str, str, bool], ...] = (
     ("columns", "POSTGRES_SQL_COLUMNS", True),
-    ("foreign_keys", "POSTGRES_FETCH_FK", False),
-    ("partitions", "POSTGRES_PARTITION_DETAILS", False),
+    # Required: the connector reads foreign keys and partition details for every table before
+    # it yields it, and an SQL error there drops the table (an empty answer is fine).
+    ("foreign_keys", "POSTGRES_FETCH_FK", True),
+    ("partitions", "POSTGRES_PARTITION_DETAILS", True),
 )
 NEEDED = {key for _, key, _ in CATALOG_STEPS + PER_TABLE_STEPS} | {
     "POSTGRES_COL_IDENTITY"
@@ -331,27 +340,48 @@ def run_dialect(
         steps[name] = {"required": required, "ok": True}
         return value
 
+    def constraint(name: str, fn: Callable[[], Any]) -> None:
+        # The connector reads constraints before columns and skips only NotImplementedError.
+        try:
+            fn()
+        except NotImplementedError:
+            steps[name] = {"required": True, "ok": True, "note": "not implemented"}
+        except fatal as exc:
+            raise Inconclusive(_error(exc)) from None
+        except Exception as exc:  # noqa: BLE001
+            steps[name] = {"required": True, "ok": False, "error": _error(exc)}
+        else:
+            steps[name] = {"required": True, "ok": True}
+
+    # The connector lists tables with its own query (catalog stage); this is diagnostic.
     tables = call(
-        "table_names", True, partial(inspector.get_table_names, schema=WAREHOUSE_SCHEMA)
+        "table_names",
+        False,
+        partial(inspector.get_table_names, schema=WAREHOUSE_SCHEMA),
     )
     call(
         "view_names", False, partial(inspector.get_view_names, schema=WAREHOUSE_SCHEMA)
     )
+    # Its get_columns loads the dialect's domains and enums before it returns any column.
+    try:
+        with engine.connect() as conn:
+            call("domains", True, partial(engine.dialect._load_domains, conn))
+            call("enums", True, partial(engine.dialect._load_enums, conn, schema="*"))
+    except fatal as exc:
+        raise Inconclusive(_error(exc)) from None
     for mart in EXPORT_APPROVED:
-        call(
+        constraint(
             f"{mart}.pk",
-            True,
             partial(inspector.get_pk_constraint, mart, schema=WAREHOUSE_SCHEMA),
+        )
+        constraint(
+            f"{mart}.unique",
+            partial(inspector.get_unique_constraints, mart, schema=WAREHOUSE_SCHEMA),
         )
         call(
             f"{mart}.indexes",
             False,
             partial(inspector.get_indexes, mart, schema=WAREHOUSE_SCHEMA),
-        )
-        call(
-            f"{mart}.unique",
-            False,
-            partial(inspector.get_unique_constraints, mart, schema=WAREHOUSE_SCHEMA),
         )
     found = {"tables_listed": sorted(set(tables or []) & set(EXPORT_APPROVED))}
     return {"steps": steps, "found": found}, version
@@ -416,20 +446,31 @@ def probe_duckdb(
 def probe_postgres(
     host: str, token: str, *, port: int = 5432, queries: dict[str, str] | None = None
 ) -> dict[str, Any]:
-    import psycopg
+    """Both stages on the endpoint, with the connector's own stack: psycopg2 and SQLAlchemy 2.0.
+
+    Run it in that environment (see ``collate-probe.yml``): the project lock carries psycopg 3
+    and SQLAlchemy 2.1, whose start-up queries differ from the connector's.
+    """
+    import psycopg2  # type: ignore[import-untyped]
     from sqlalchemy import create_engine
     from sqlalchemy.engine import URL
+    from sqlalchemy.exc import (
+        InterfaceError as SAInterfaceError,
+        OperationalError as SAOperationalError,
+    )
 
     queries = queries or load_queries()
     # verify-full + the system CA store: the token goes only to a server that proves it is the host.
     tls = {"sslmode": "verify-full", "sslrootcert": "system"}
     fatal: tuple[type[BaseException], ...] = (
-        psycopg.OperationalError,
-        psycopg.InterfaceError,
+        psycopg2.OperationalError,
+        psycopg2.InterfaceError,
+        SAOperationalError,
+        SAInterfaceError,
     )
     stages: dict[str, dict[str, Any]] = {}
     url = URL.create(
-        "postgresql+psycopg",
+        "postgresql+psycopg2",
         username="postgres",
         password=token,
         host=host,
@@ -441,40 +482,40 @@ def probe_postgres(
         url, pool_pre_ping=False, connect_args={"connect_timeout": 20}
     )
     try:
-        from sqlalchemy.exc import (
-            InterfaceError as SAInterfaceError,
-            OperationalError as SAOperationalError,
-        )
-
-        stages["dialect"], version = run_dialect(
-            engine, fatal + (SAOperationalError, SAInterfaceError)
-        )
+        try:
+            stages["dialect"], version = run_dialect(engine, fatal)
+        except fatal as exc:
+            raise Inconclusive(_error(exc)) from None
     finally:
         engine.dispose()
     try:
-        with psycopg.connect(
+        conn = psycopg2.connect(
             host=host,
             port=port,
             user="postgres",
             password=token,
             dbname=WAREHOUSE_DATABASE,
             connect_timeout=20,
-            autocommit=True,
-            sslmode=tls["sslmode"],
-            sslrootcert=tls["sslrootcert"],
-        ) as conn:
-            if version is None:
-                # The dialect could not read a version (already a required failure); render as
-                # the libpq-reported version so the catalog answers are still recorded.
-                version = conn.info.server_version
-            runner = Runner(
-                lambda sql, params: conn.execute(sql, params).fetchall(),
-                "psycopg",
-                fatal=fatal,
-            )
-            stages["catalog"] = run_catalog(runner, queries, server_version=version)
+            **tls,
+        )
     except fatal as exc:
         raise Inconclusive(_error(exc)) from None
+    try:
+        conn.autocommit = True
+        if version is None:
+            # The dialect could not read a version (already a required failure); render as the
+            # libpq-reported version so the catalog answers are still recorded.
+            version = conn.server_version
+
+        def execute(sql: str, params: dict[str, Any] | None) -> list[tuple]:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall() if cur.description is not None else []
+
+        runner = Runner(execute, "psycopg", fatal=fatal)
+        stages["catalog"] = run_catalog(runner, queries, server_version=version)
+    finally:
+        conn.close()
     return {
         "target": "motherduck_postgres_endpoint",
         "server_version": version,

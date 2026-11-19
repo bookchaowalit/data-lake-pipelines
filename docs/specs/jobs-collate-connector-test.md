@@ -18,14 +18,17 @@ The probe answers it before anyone signs up for Collate.
 
 `infra/scripts/data_lake/collate_probe.py`:
 
-1. **SQLAlchemy dialect** (endpoint only). The connector connects through SQLAlchemy's PostgreSQL
-   dialect, whose version check must pass, and takes table names, primary keys, indexes and
-   unique constraints from it. The server version the dialect reads is the one the connector uses
-   to build its column query. Columns are not taken from the dialect: OpenMetadata replaces its
-   `get_columns`.
+1. **SQLAlchemy dialect** (endpoint only), on the connector's own stack: psycopg2-binary and
+   SQLAlchemy 2.0 (OpenMetadata 2.0.8 ingestion pins `sqlalchemy>=2.0.0,<2.1`; the workflow runs
+   the probe in an isolated environment with `sqlalchemy==2.0.56` and `psycopg2-binary==2.9.13`,
+   not the project lock's psycopg 3 and SQLAlchemy 2.1, whose start-up queries differ). It checks
+   the dialect's version check on connect, the domains and enums the connector's `get_columns`
+   loads, and primary keys and unique constraints. The server version the dialect reads is the
+   one the connector uses to build its column query. Columns are not taken from the dialect:
+   OpenMetadata replaces its `get_columns`.
 2. **Catalog queries.** The connector's own SQL, rendered for that server version: databases,
    schemas, tables, comments, the three test-connection queries, then per approved mart the column
-   query, foreign keys and partitions.
+   query, foreign keys and partition details.
 
 The SQL is **not stored in this repository**. OpenMetadata's ingestion code, including
 `postgres/queries.py`, is under the Collate Community License 1.0 (copyright Collate), not
@@ -34,10 +37,16 @@ downloads `queries.py` at a pinned commit (`dd013e2…`, tag `2.0.8-release`) at
 its sha256, and reads the SQL strings with `ast`; nothing in the file is executed. Bump the pin
 and the hash when Collate's ingestion version moves.
 
-Required steps are those metadata ingestion of `empire_gold.jobs` needs (dialect connect, table
-names, primary keys; databases, schemas, tables, comments, the test queries, columns). The rest
-only fill optional fields. `viable` is true when every required step works and the connector's
-column query returns each approved mart with exactly its approved columns.
+**Required** steps are those whose SQL error makes the connector stop or drop a table: dialect
+connect, domains, enums, primary keys and unique constraints (NotImplementedError passes, as in
+the connector), databases, schemas, tables, schema comments, and per mart the column query,
+foreign keys and partition details. An empty answer passes; the connector reads foreign keys and
+partition details for every table before it yields it, even one with neither. **Diagnostic** only:
+the three test-connection queries (optional in the connector's own test-connection definition),
+table comments (read with errors caught), owners, views, policies, procedures, functions, indexes
+and the dialect's table list (the connector lists tables with its own query). `viable` is true when
+every required step works and the connector's column query returns each approved mart with exactly
+its approved columns.
 
 The endpoint connection uses `sslmode=verify-full` with the system CA store, so the `reader` token
 goes only to a server that proves it is the host. A dropped or refused connection is
@@ -55,13 +64,15 @@ answer (`collate_probe.py --duckdb <file> [--assume-server-version N]`; the test
 
 | Step | Result |
 |---|---|
-| databases, schemas, tables, schema/table comments, test queries, table owners, foreign keys | ok; `jobs` and all four marts listed |
-| **columns** (required) | **fails**: the query includes the identity sub-select for servers 10 and later, which calls `pg_get_serial_sequence`; DuckDB has no such function. With the pre-10 form it works and returns the approved columns |
-| server_version, view definitions, policies, procedures, functions, partitions (optional) | fail (`SHOW server_version_num`, `pg_get_viewdef` signature, `pg_policy`, `regtype`, `pg_partitioned_table`) |
+| databases, schemas, tables, schema comments, foreign keys, table owners | ok; `jobs` and all four marts listed |
+| **columns** (required) | **fails** for a server reporting 10 or later: the identity sub-select calls `pg_get_serial_sequence`, which DuckDB lacks. The pre-10 form works and returns the approved columns |
+| **partition details** (required) | **fails** at any version: `pg_partitioned_table` does not exist, so the connector would drop every table |
+| test queries, table comments | ok (diagnostic) |
+| server version, view definitions, policies, procedures, functions (diagnostic) | fail |
 
-So the connector works only if the endpoint reports a PostgreSQL version below 10, and SQLAlchemy's
-dialect also needs a `version()` string it can parse (DuckDB returns `v2.0.0`). Both depend on how
-the endpoint presents itself, which only the endpoint run shows. Expect a fail; the run settles it.
+So unless the endpoint's catalog differs from DuckDB's (a `pg_partitioned_table`, a pre-10 server
+version, and a `version()` string SQLAlchemy's dialect can parse, where DuckDB returns `v2.0.0`),
+the connector cannot ingest `empire_gold.jobs`. Expect `viable: false`; the endpoint run settles it.
 
 ## Owner steps
 
