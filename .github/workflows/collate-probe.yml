@@ -1,0 +1,56 @@
+# ADR-0016 P4 connector test (collate_probe.py): can Collate's PostgreSQL connector discover
+# empire_gold.jobs through MotherDuck's Postgres endpoint? Run by hand once the reader account
+# and its share exist (docs/specs/jobs-collate-connector-test.md). Read-only; the public log
+# shows the verdict, step names and error types only. It downloads OpenMetadata's pinned
+# queries.py (sha256-checked) at run time; that SQL is not stored here (Collate Community License).
+name: Collate connector probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: collate-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Probe the MotherDuck Postgres endpoint as reader
+        env:
+          MOTHERDUCK_READER_TOKEN: ${{ secrets.MOTHERDUCK_READER_TOKEN }}
+          MOTHERDUCK_PG_HOST: ${{ secrets.MOTHERDUCK_PG_HOST }}
+        run: |
+          if [ -z "$MOTHERDUCK_READER_TOKEN" ] || [ -z "$MOTHERDUCK_PG_HOST" ]; then
+            echo '{"status": "skipped_no_secret"}' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python -m pip install --disable-pip-version-check uv==0.13.1
+          uv sync --frozen --no-dev
+          set +e
+          .venv/bin/python infra/scripts/data_lake/collate_probe.py > "$RUNNER_TEMP/probe.json"
+          code=$?
+          set -e
+          tee -a "$GITHUB_STEP_SUMMARY" < "$RUNNER_TEMP/probe.json"
+          # Accept 0 (viable) or 1 (not viable: a finding, not a failed run) only with a complete
+          # verdict; anything else (inconclusive, crash, killed) fails the run.
+          status=$(jq -r '.status // empty' "$RUNNER_TEMP/probe.json" 2>/dev/null || true)
+          viable=$(jq -r 'if has("viable") then .viable else empty end' "$RUNNER_TEMP/probe.json" 2>/dev/null || true)
+          if [ "$status" = verdict ]; then
+            if [ "$code" = 0 ] && [ "$viable" = true ]; then exit 0; fi
+            if [ "$code" = 1 ] && [ "$viable" = false ]; then exit 0; fi
+          fi
+          exit 2
