@@ -46,6 +46,26 @@ COLUMNS = (
 )
 
 
+# The Chief Data bot stamped every non-news x_feed row with its machine clock (UTC+9, written without a zone, so
+# read as ICT) from the 2026-11-17 evening run on: those stamps are 2 h late (a 19:00 run reads 21:00). News rows
+# used ICT. Raw keeps what the bot sent; readers move such stamps back here and in Gold ({x_feed} in run_queries).
+# CLOCK_SKEW_UNTIL: the first stamp of the bot's fixed clock, once a run shows it (None = still skewed).
+CLOCK_SKEW = timedelta(hours=2)
+CLOCK_SKEW_FROM = datetime(2026, 11, 17, 15, 0, tzinfo=TZ)
+CLOCK_SKEW_UNTIL: datetime | None = None
+
+
+def skewed(row: dict[str, Any]) -> bool:
+    at = row.get("collected_at")
+    return (isinstance(at, datetime) and row.get("watch_type") != "news" and at >= CLOCK_SKEW_FROM
+            and (CLOCK_SKEW_UNTIL is None or at < CLOCK_SKEW_UNTIL))
+
+
+def fix_clock(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows with the bot's late stamps moved back by CLOCK_SKEW (copies; the input rows stay as they are)."""
+    return [{**r, "collected_at": r["collected_at"] - CLOCK_SKEW} if skewed(r) else r for r in rows]
+
+
 def engagement(row: dict[str, Any]) -> int:
     return (
         int(row.get("likes") or 0)
@@ -157,10 +177,10 @@ def daily(rows: list[dict[str, Any]], start: datetime, end: datetime, key: Any =
 
 
 def load_rows(store: Any, prefix: str, start: datetime) -> list[dict[str, Any]]:
-    """Every raw x_feed row stored from the day before ``start`` (ICT) on, all columns."""
+    """Every raw x_feed row stored from the day before ``start`` (ICT) on, all columns, stamps fixed (fix_clock)."""
     since = (start.astimezone(TZ) - timedelta(days=1)).date()
     tbl = read_dataset(store, prefix, X_FEED, since)
-    return [] if tbl is None else tbl.to_pylist()
+    return [] if tbl is None else fix_clock(tbl.to_pylist())
 
 
 def load(store: Any, prefix: str, start: datetime, end: datetime) -> FeedWindow:

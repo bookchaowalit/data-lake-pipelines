@@ -182,5 +182,33 @@ class GoldTests(unittest.TestCase):
         self.assertEqual((logs[0]["event"], logs[0]["status"]), ("gold", "error"))
 
 
+class FeedClockSkewSqlTests(unittest.TestCase):
+    """{x_feed} in a Gold query reads x_feed with the bot's +2 h stamps moved back (feed.fix_clock's twin)."""
+
+    def test_x_feed_placeholder_corrects_non_news_rows_in_the_period(self):
+        from x_lakehouse import run_queries
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "raw" / "x_feed" / "date=2026-11-25"
+            path.mkdir(parents=True)
+            con = duckdb.connect()
+            con.execute("set timezone = 'Asia/Bangkok'")
+            con.execute(
+                "copy (select * from (values ('1', 'keyword', TIMESTAMPTZ '2026-11-25 10:00:00+07'),"
+                " ('2', 'news', TIMESTAMPTZ '2026-11-25 08:00:00+07'),"
+                " ('3', 'keyword', TIMESTAMPTZ '2026-11-17 14:00:00+07'))"
+                f" t(post_id, watch_type, collected_at)) to '{path / 'part-0000.parquet'}' (format parquet)")
+            sql = run_queries.render("select post_id, strftime(collected_at, '%m-%d %H:%M') from {x_feed} "
+                                     "order by post_id", d, NOW)
+            self.assertNotIn("{", sql)
+            self.assertEqual(con.execute(sql).fetchall(),
+                             [("1", "11-25 08:00"), ("2", "11-25 08:00"), ("3", "11-17 14:00")])
+
+    def test_gold_queries_read_x_feed_through_the_placeholder(self):
+        for f in gold.QUERIES.glob("*.sql"):
+            text = f.read_text()
+            self.assertNotIn("raw/x_feed/", text, f.name)
+
+
 if __name__ == "__main__":
     unittest.main()

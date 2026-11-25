@@ -22,16 +22,29 @@ if __package__ in (None, ""):
 
 import duckdb  # noqa: E402
 
+from . import feed  # noqa: E402
 from .config import Config  # noqa: E402
 
 QUERIES = Path(__file__).resolve().parent / "queries"
 
 
+def x_feed_source() -> str:
+    """Raw x_feed with the bot's late stamps moved back (feed.fix_clock's twin, same constants)."""
+    until = (f" and collected_at < TIMESTAMPTZ '{feed.CLOCK_SKEW_UNTIL.isoformat()}'"
+             if feed.CLOCK_SKEW_UNTIL is not None else "")
+    hours = int(feed.CLOCK_SKEW.total_seconds() // 3600)
+    fixed = (f"case when coalesce(watch_type, '') <> 'news' and collected_at >= "
+             f"TIMESTAMPTZ '{feed.CLOCK_SKEW_FROM.isoformat()}'{until} "
+             f"then collected_at - interval {hours} hour else collected_at end")
+    return (f"(select * replace ({fixed} as collected_at) from read_parquet('{{lake}}/raw/x_feed/date=*/*.parquet', "
+            "hive_partitioning = true, union_by_name = true))")
+
+
 def render(sql: str, root: str, now: datetime | None = None) -> str:
-    """Fill ``{lake}`` and ``{now}``. Queries use ``{now}``, never DuckDB's now(), so a run (and a test) decides the
-    clock its windows end at."""
+    """Fill ``{x_feed}``, ``{lake}`` and ``{now}``. Queries use ``{now}``, never DuckDB's now(), so a run (and a test)
+    decides the clock its windows end at; they read x_feed only through ``{x_feed}`` (stamps fixed)."""
     at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-    return sql.replace("{lake}", root).replace("{now}", f"TIMESTAMPTZ '{at}'")
+    return sql.replace("{x_feed}", x_feed_source()).replace("{lake}", root).replace("{now}", f"TIMESTAMPTZ '{at}'")
 
 
 def connect(cfg: Config, lake: str) -> tuple[duckdb.DuckDBPyConnection, str]:

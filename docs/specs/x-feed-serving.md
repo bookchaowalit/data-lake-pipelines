@@ -46,3 +46,22 @@ would run dry within a week. `x_feed` still arrives on every run.
 | `/claims/` | the open queue as it stood, with a note that no new claims arrive since 13 November 2026. Claims need AI extraction, so there is no raw twin. |
 
 Without a feed window (lake read failed) every page falls back to the signal version, as before.
+
+## Bot clock skew (2026-11-26)
+
+From the 2026-11-17 evening run on, the Chief Data bot (`build.py`) stamped every non-news `x_feed` row with its
+machine clock, UTC+9, written without a zone, so the lake reads it as ICT and the stamp is 2 h late (a run that
+reached the inbox at 19:01 ICT carries `collected_at` 21:00). Rows with `watch_type = news` used ICT and are right.
+Evidence: inbox `received_at` against `collected_at` per run, and morning rows stamped after the 08:2x cron that
+ingested them (none before 2026-11-17, every morning after).
+
+Raw stays as the bot sent it (raw-only rule). Readers correct it:
+
+- `feed.fix_clock` (applied in `feed.load_rows`, so the serving tab, digest, site and weekly) moves a non-news row
+  stamped in `[CLOCK_SKEW_FROM, CLOCK_SKEW_UNTIL)` back by `CLOCK_SKEW` (2 h).
+- Gold queries read `{x_feed}`, which `run_queries.x_feed_source()` fills with the same rule in SQL; no query reads
+  `raw/x_feed/` directly.
+- `CLOCK_SKEW_UNTIL` is `None` (still skewed) until a bot run shows the fixed clock; then it is set to that run's
+  first stamp. Chief Data reported the fix on 2026-11-25; run1125e (19:01 ICT) was still 2 h late.
+
+The 88 news rows sent twice on 2026-11-23 (07:48 and 07:57) stay in raw: every reader counts a post once.

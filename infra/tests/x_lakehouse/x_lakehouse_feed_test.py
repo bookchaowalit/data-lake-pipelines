@@ -361,5 +361,43 @@ class SiteFeedPagesTests(unittest.TestCase):
         self.assertEqual(info["pages"], 5)
 
 
+class ClockSkewTests(unittest.TestCase):
+    """The bot stamped non-news x_feed rows with a UTC+9 clock from the 2026-11-17 evening run on (+2 h)."""
+
+    ICT = timezone(timedelta(hours=7))
+
+    def test_non_news_rows_in_the_skew_period_move_back_two_hours(self):
+        at = datetime(2026, 11, 25, 10, 0, tzinfo=self.ICT)
+        [fixed] = feed.fix_clock([row("1", at)])
+        self.assertEqual(fixed["collected_at"], at - timedelta(hours=2))
+
+    def test_news_rows_and_rows_before_the_period_keep_their_stamp(self):
+        news = row("1", datetime(2026, 11, 25, 8, 0, tzinfo=self.ICT), watch=("news", "n1"))
+        early = row("2", datetime(2026, 11, 17, 14, 59, tzinfo=self.ICT))
+        self.assertEqual(feed.fix_clock([news, early]), [news, early])
+
+    def test_rows_from_the_fixed_bot_keep_their_stamp(self):
+        at = datetime(2026, 11, 27, 8, 0, tzinfo=self.ICT)
+        old = feed.CLOCK_SKEW_UNTIL
+        feed.CLOCK_SKEW_UNTIL = datetime(2026, 11, 26, 0, 0, tzinfo=self.ICT)
+        self.addCleanup(setattr, feed, "CLOCK_SKEW_UNTIL", old)
+        self.assertEqual(feed.fix_clock([row("1", at)])[0]["collected_at"], at)
+
+    def test_the_input_rows_are_not_changed(self):
+        r = row("1", datetime(2026, 11, 25, 10, 0, tzinfo=self.ICT))
+        feed.fix_clock([r])
+        self.assertEqual(r["collected_at"], datetime(2026, 11, 25, 10, 0, tzinfo=self.ICT))
+
+    def test_load_reads_corrected_stamps(self):
+        import pyarrow as pa
+        from unittest import mock
+
+        tbl = pa.Table.from_pylist([row("1", datetime(2026, 11, 25, 10, 0, tzinfo=self.ICT))])
+        with mock.patch.object(feed, "read_dataset", return_value=tbl):
+            win = feed.load(None, "", datetime(2026, 11, 25, 7, 0, tzinfo=self.ICT),
+                            datetime(2026, 11, 25, 9, 0, tzinfo=self.ICT))
+        self.assertEqual([p["post_id"] for p in win.posts], ["1"])
+
+
 if __name__ == "__main__":
     unittest.main()
