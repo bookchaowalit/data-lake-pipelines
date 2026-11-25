@@ -48,7 +48,7 @@ if __package__ in (None, ""):
 
 import httpx  # noqa: E402
 
-from . import backfill, digest, feed, inbox, private, serve_sheet  # noqa: E402
+from . import backfill, digest, feed, inbox, intake_checks, private, serve_sheet  # noqa: E402
 from . import curated as cur  # noqa: E402
 from .lake import open_store  # noqa: E402
 from .coerce import TZ  # noqa: E402
@@ -74,11 +74,13 @@ def _issues(events: list[dict[str, object]]) -> list[str]:
     out: list[str] = []
     for e in events:
         ev = e.get("event")
-        if ev not in ("meta", "digest", "weekly", "gold", "bi"):
+        if ev not in ("meta", "digest", "weekly", "gold", "bi", "intake_checks"):
             continue
         if e.get("status") == "error":
             out.append(f"{ev}: error {str(e.get('error', '')).split(':', 1)[0][:60]}")
             continue
+        if ev == "intake_checks":  # fixed-vocabulary lines built from counts and run ids (intake_checks.py)
+            out.extend(str(i) for i in e.get("issues") or [])
         if ev == "meta":  # step-level errors inside an ok run (counts and exception types only)
             if e.get("ocr_errors"):
                 out.append(f"meta ocr: {e.get('ocr_errors')} failed")
@@ -124,6 +126,17 @@ def _ops_alert(cfg: Config) -> None:
         _log(event="ops_alert", status="sent" if r.status_code == 200 else f"http {r.status_code}", issues=len(issues))
     except httpx.HTTPError as exc:
         _log(event="ops_alert", status="error", error=type(exc).__name__, issues=len(issues))  # no URL: it has the token
+
+
+def _intake_checks(cfg: Config, conn: object, now: datetime) -> None:
+    """Warn-only sanity checks on what the bots sent (intake_checks.py); X_LAKE_INTAKE_CHECKS=off skips them.
+    A failure is one logged error, never fatal to the run."""
+    if cfg.get("X_LAKE_INTAKE_CHECKS", "on").lower() == "off":
+        return
+    try:
+        _log(event="intake_checks", **intake_checks.check(conn, now, intake_checks.Settings.from_cfg(cfg)))
+    except Exception as exc:  # noqa: BLE001 - reported, the lake run's result stands
+        _log(event="intake_checks", status="error", error=f"{type(exc).__name__}: {str(exc)[:200]}")
 
 
 def _backfill() -> tuple[int, dict[str, object]]:
@@ -383,6 +396,7 @@ def _run_inbox(cfg: Config) -> int:
             ok = ok and pdrained.get("unmarked", 0) == 0
         else:
             _log(event="drain_private", status="schema_missing", note="x_intel_private not created yet; skipped")
+        _intake_checks(cfg, lock, started)
         since = (started.astimezone(TZ) - timedelta(days=1)).date()
         if source == "both":
             catchup_at = datetime.now(timezone.utc) - timedelta(minutes=1)  # before the Sheet read
