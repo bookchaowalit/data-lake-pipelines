@@ -9,6 +9,7 @@ import json
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -659,7 +660,11 @@ class RunTest(unittest.TestCase):
         )
 
     def test_legacy_state_fingerprint_accepted(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        # pinned before LEGACY_FINGERPRINT_UNTIL: after it the legacy print is refused (next test)
+        before = of.LEGACY_FINGERPRINT_UNTIL - timedelta(days=1)
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(
+            of, "_now", return_value=before
+        ):
             sp = Path(tmp) / "s.gz"
             of.write_state(
                 sp, {"f1": {"seen": ["x"]}}, "t", of._legacy_fingerprint("s3://b/p")
@@ -671,6 +676,10 @@ class RunTest(unittest.TestCase):
             self.assertEqual(
                 of.lake_fingerprint("/tmp/lake"), of._legacy_fingerprint("/tmp/lake")
             )
+
+    def test_legacy_state_fingerprint_refused_after_cutoff(self):
+        with unittest.mock.patch.object(of, "_now", return_value=of.LEGACY_FINGERPRINT_UNTIL):
+            self.assertIsNone(of._legacy_fingerprint("s3://b/p"))
 
     def test_rule_change_replays_current_items(self):
         res = fetch_feed(

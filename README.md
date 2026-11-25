@@ -129,6 +129,13 @@ cd infra/dbt && ../../.venv/bin/dbt build --profiles-dir . --select path:models/
 - `meta_value_stream_coverage` — หนึ่งแถวต่อ value stream (8 ตัว): จำนวน stage, stage ที่มี system รันอยู่, broken step และ `flow_status`
   (flowing = ทุก stage มี system, partial, missing)
 
+Catalog ของ platform-empire (SPEC-002 rollout step 5): cron `registry-export` รอบเดียวกันยังอ่าน `GET /v1/catalog/concepts`
+และ `/v1/catalog/metrics` ของ tasks-api (`EMPIRE_TASKS_API`) ด้วย token ของ automation `catalog-export` (`CATALOG_EXPORT_TOKEN`,
+token-rotate ต่ออายุให้; มีแค่ `catalog.concept:read` + `catalog.metric-definition:read`) แล้วเขียน Bronze 2 dataset
+`catalog_concepts` และ `catalog_metric_definitions` (`infra/scripts/data_lake/catalog_lake_export.py`). Metric ส่งเฉพาะ
+classification `public`/`internal` (D7b) และไม่ส่ง `read_permission`. ไม่ตั้งทั้งสองตัวแปร = `"catalog": "skipped"`,
+ตั้งตัวเดียว = fail.
+
 หน้า Markdown ของ landscape เดียวกันนี้ render จากไฟล์ต้นทางชุดเดียวกัน (ไม่ต้องมี lake) ไว้ที่
 `architecture-docs/operations/platform/SYSTEM-LANDSCAPE-GENERATED.md`. cron `registry-export` render หน้าใหม่ทุกรอบ และ commit เข้า
 architecture-docs `main` เองเมื่อเนื้อหาเปลี่ยน (ต้องมี `LANDSCAPE_COMMIT_TOKEN`; ถ้าไม่มีจะรายงาน `"landscape": "skipped"` แต่ไม่ fail). ผลลัพธ์ไม่มี timestamp จึง diff ได้ และ `--check` บอกว่าไฟล์เก่าหรือไม่:

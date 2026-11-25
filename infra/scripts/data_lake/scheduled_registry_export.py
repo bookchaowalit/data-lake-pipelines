@@ -12,7 +12,9 @@ step reports "skipped". Exit code 0 = exported (or nothing new), 1 = failed.
 
 Environment: GITHUB_TOKEN (contents:read on both repositories), SOLO_EMPIRE_DATA_LAKE_URI,
 REGISTRY_REF (default main), HEARTBEAT_TOKEN (optional), LANDSCAPE_COMMIT_TOKEN (optional), plus the R2 variables that
-data_lake/storage.py needs for s3:// URIs.
+data_lake/storage.py needs for s3:// URIs. With EMPIRE_TASKS_API and CATALOG_EXPORT_TOKEN (the platform-empire
+`catalog-export` automation, renewed by token-rotate) it also exports the SPEC-002 catalog (catalog_lake_export.py);
+with neither set that step reports "skipped", with only one set the run fails.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ SCRIPTS = ROOT / "infra" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from data_lake import catalog_lake_export  # noqa: E402
 from data_lake.observability import run_with_reporting  # noqa: E402
 from data_lake.registry_lake_export import export, load_records  # noqa: E402
 from data_lake.system_landscape import build, render  # noqa: E402
@@ -143,6 +146,7 @@ def run(
     fetch: Fetch = github_fetch,
     heartbeat: Callable[[bool], None] = post_heartbeat,
     publish: Publish = github_publish,
+    catalog_get: catalog_lake_export.Get = catalog_lake_export.http_get,
 ) -> int:
     parser = argparse.ArgumentParser(description="Hosted registry export into the lake.")
     parser.add_argument("--dry-run", action="store_true", help="fetch and count; write nothing, no heartbeat")
@@ -170,13 +174,16 @@ def run(
             report = export(dirs["registries"], dirs["catalog"], lake_uri, dry_run=args.dry_run)
             page = render(build(load_records(dirs["registries"], dirs["catalog"])))
             landscape = "dry-run" if args.dry_run else "local" if local else publish(page, env.get("REGISTRY_REF", "main"), env)
-    except (FetchError, ValueError, OSError) as error:
+            catalog = catalog_lake_export.export(env, lake_uri, dry_run=args.dry_run, get=catalog_get)
+    except (FetchError, catalog_lake_export.CatalogError, ValueError, OSError) as error:
         print(json.dumps({"status": "failed", "error": type(error).__name__, "detail": str(error)[:200]}))
         beat(False)
         return 1
 
     counts = {name: {k: v for k, v in result.items() if k in ("records", "new")} for name, result in report["datasets"].items()}
-    print(json.dumps({"status": report["status"], "datasets": counts, "landscape": landscape}, sort_keys=True))
+    for name, result in catalog.get("datasets", {}).items():
+        counts[name] = {k: v for k, v in result.items() if k in ("records", "new")}
+    print(json.dumps({"status": report["status"], "datasets": counts, "landscape": landscape, "catalog": catalog["status"]}, sort_keys=True))
     beat(True)
     return 0
 
