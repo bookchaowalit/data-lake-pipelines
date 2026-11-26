@@ -12,7 +12,7 @@ repo นี้คงโครงสร้าง `infra/...` เดิมไว�
 - `infra/dbt/` — dbt projection (`dbt_lake_test.py`) รวม metadata models ใน `models/metadata/` (`meta_source_coverage`, `meta_source_lineage`, `meta_lake_datasets`)
 - `repository-catalog/registries/source-coverage.yaml` — Source coverage registry: แต่ละ SaaS/แหล่งข้อมูลเข้า platform ได้ทางไหน (API → MCP → scraping), สถานะวันนี้, verdict และ owner action; รอบละ 20 แหล่ง รายงานใน `docs/source-coverage/`. ตรวจด้วย `python3 infra/scripts/utils/source_coverage_check.py --summary`
 - `infra/scripts/data_lake/github_activity.py` — repo + event public ของ owner บน GitHub เข้า Bronze `domain=engineering` วันละครั้ง (workflow `github-activity`, spec `docs/specs/github-activity.md`)
-- `infra/scripts/data_lake/registry_lake_export.py` — ส่ง registry ของ solo-empire (data-sources, online-systems) และ metadata catalog ของ architecture-docs (catalog, lineage) เข้า lake เป็น Bronze `domain=metadata` ดู [Metadata ใน lake](#metadata-ใน-lake)
+- `infra/scripts/data_lake/registry_lake_export.py` — ส่ง registry ของ bookchaowalit-empire (data-sources, online-systems) และ metadata catalog ของ architecture-docs (catalog, lineage) เข้า lake เป็น Bronze `domain=metadata` ดู [Metadata ใน lake](#metadata-ใน-lake)
 - `infra/tests/` — test ทั้งหมดของโค้ดข้างต้น
 - ผลิตภัณฑ์ข้อมูล `job.v1` (ผู้บริโภคคือ `book-job-data` และ `crm` job-radar) — `book-job-data` ยังเป็น repo ของตัวเอง; ที่นี่มีเฉพาะ adapter/readiness/e2e
 
@@ -106,7 +106,7 @@ for t in $(find infra/tests -name '*_test.py' | sort); do .venv/bin/python "$t" 
 
 ## Metadata ใน lake
 
-ต้นฉบับยังอยู่ใน Git: registry ใน `solo-empire/repository-catalog/registries` และ catalog/lineage ใน
+ต้นฉบับยังอยู่ใน Git: registry ใน `bookchaowalit-empire/repository-catalog/registries` และ catalog/lineage ใน
 `architecture-docs/systems/ai-data/metadata-catalog`. Exporter อ่านสอง checkout นี้แล้วเขียน Bronze 8 dataset
 (`data_sources`, `systems`, `catalog_assets`, `lineage_edges`, `capability_domains`, `system_capabilities`,
 `value_streams`, `value_stream_stages`) ผ่าน ingest ปกติ. ส่งเฉพาะโครงสร้าง ไม่ส่ง `notes`.
@@ -114,7 +114,7 @@ batch อิงเนื้อหา รันซ้ำบน registry เดิ
 
 ```bash
 .venv/bin/python infra/scripts/data_lake/registry_lake_export.py \
-  --registries ~/solo-empire/repository-catalog/registries \
+  --registries ~/bookchaowalit-empire/repository-catalog/registries \
   --catalog <architecture-docs>/systems/ai-data/metadata-catalog
 cd infra/dbt && ../../.venv/bin/dbt build --profiles-dir . --select path:models/metadata
 ../../.venv/bin/dbt docs generate --profiles-dir .   # lineage ของทุก model ใน target/
@@ -144,12 +144,12 @@ architecture ตั้งแต่ cutover ของ architecture-docs SPEC-001 
 
 ```bash
 .venv/bin/python infra/scripts/data_lake/system_landscape.py \
-  --registries ~/solo-empire/repository-catalog/registries \
+  --registries ~/bookchaowalit-empire/repository-catalog/registries \
   --catalog <architecture-docs>/systems/ai-data/metadata-catalog \
   --output <architecture-docs>/operations/platform/SYSTEM-LANDSCAPE-GENERATED.md   # เพิ่ม --check เพื่อตรวจอย่างเดียว
 ```
 
-Gate: solo-empire `registry_check.py` (guard `business-capabilities`) fail ถ้ามี system ใน online-systems.yaml ที่ไม่ได้ map domain,
+Gate: bookchaowalit-empire `infra/scripts/utils/registry_check.py` (guard `business-capabilities`) fail ถ้ามี system ใน online-systems.yaml ที่ไม่ได้ map domain,
 และ dbt test `meta_system_landscape.capability_mapped` fail ถ้าข้อมูลใน lake มี system ที่ไม่มี domain.
 
 metadata models อ่าน batch ล่าสุดเท่านั้น จึงต้อง export อย่างน้อยหนึ่งครั้งก่อน `dbt build`.
@@ -157,14 +157,14 @@ metadata models อ่าน batch ล่าสุดเท่านั้น �
 ### Export อัตโนมัติ (Railway cron `registry-export`)
 
 Railway project `data-schedules`, service `registry-export`, cron `40 23 * * *` UTC (06:40 เวลาไทย), restart NEVER.
-แต่ละรอบรัน `infra/scripts/data_lake/scheduled_registry_export.py`: ดึงไฟล์ต้นทาง 5 ไฟล์ (registry 3 ไฟล์จาก `main` ของ solo-empire
-ผ่าน GitHub API, metadata catalog 2 ไฟล์จาก store space `architecture-docs`) แล้ว export เข้า R2 lake เดียวกับ news-capture (เขียนแค่ `bronze/domain=metadata`,
+แต่ละรอบรัน `infra/scripts/data_lake/scheduled_registry_export.py`: ดึงไฟล์ต้นทาง 5 ไฟล์ (registry 3 ไฟล์จาก `main` ของ bookchaowalit-empire
+(hub ตั้งแต่ solo-empire ถูก archive 2026-11-13) ผ่าน GitHub API, metadata catalog 2 ไฟล์จาก store space `architecture-docs`) แล้ว export เข้า R2 lake เดียวกับ news-capture (เขียนแค่ `bronze/domain=metadata`,
 `landing/source=solo-empire-registry`, `control/*/source=solo-empire-registry`) พิมพ์แค่จำนวนแถว และส่ง heartbeat `registry-export`
 ไปที่ uptime Worker (แจ้งเตือนถ้าเกิน 26 ชม. หรือรอบที่ล้มเหลว)
 
 | Variable | Value |
 |---|---|
-| `GITHUB_TOKEN` | fine-grained token, Contents: read บน solo-empire |
+| `GITHUB_TOKEN` | fine-grained token, Contents: read บน bookchaowalit-empire |
 | `SOLO_EMPIRE_DATA_LAKE_URI` | `s3://solo-empire-portfolio/portfolio-demo/free-cloud-e2e-001` |
 | `DATA_LAKE_CLOUD_WRITE_ENABLED` | `true` |
 | `DATA_LAKE_S3_ENDPOINT`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION=auto` | R2 key ของ bucket `solo-empire-portfolio` จาก Infisical `/job-data` |

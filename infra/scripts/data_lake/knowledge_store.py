@@ -122,12 +122,15 @@ class KnowledgeStore:
             return None
         if response.status_code != 200:
             raise self._fail(response, f"read {space}:{path}")
-        document = response.json()["document"]
-        if document.get("encoding") == "utf-8":
-            content = str(document["content"]).encode("utf-8")
-        else:
-            content = base64.b64decode(document["content_base64"])
-        return Document(content, int(document["version"]), str(document["sha256"]))
+        try:
+            document = response.json()["document"]
+            if document.get("encoding") == "utf-8":
+                content = str(document["content"]).encode("utf-8")
+            else:
+                content = base64.b64decode(document["content_base64"], validate=True)
+            return Document(content, int(document["version"]), str(document["sha256"]))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise StoreError(f"read {space}:{path}: malformed store response") from None
 
     def put(self, space: str, path: str, content: bytes, *, if_version: int) -> int:
         """Write a new version; refused (409) when the document is no longer at ``if_version``."""
@@ -135,4 +138,7 @@ class KnowledgeStore:
         response = self._call("PUT", {"space": space, "path": path}, write=True, body=body)
         if response.status_code not in (200, 201):
             raise self._fail(response, f"write {space}:{path}")
-        return int(response.json()["document"]["version"])
+        try:
+            return int(response.json()["document"]["version"])
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise StoreError(f"write {space}:{path}: malformed store response") from None

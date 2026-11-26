@@ -2,7 +2,8 @@
 """Hosted run of registry_lake_export (Railway cron `registry-export` in `data-schedules`).
 
 Fetches only the five source files: the three registries from GitHub (`main` of the private
-solo-empire repository) with a read-only token, and the two metadata-catalog files from the hosted
+bookchaowalit-empire repository, the hub since solo-empire was archived on 2026-11-13) with a
+read-only token, and the two metadata-catalog files from the hosted
 knowledge store, space architecture-docs (the source of the architecture documents since the
 architecture-docs SPEC-001 phase 3 cutover; the Git repository is archived). It writes them to a
 temporary directory and exports them to SOLO_EMPIRE_DATA_LAKE_URI. Prints dataset counts only,
@@ -12,7 +13,7 @@ when it differs from the store's copy, writes it there as a new version (``if_ve
 someone else changed since the read is refused and the run fails). Exit code 0 = exported (or
 nothing new), 1 = failed.
 
-Environment: GITHUB_TOKEN (contents:read on solo-empire), SOLO_EMPIRE_DATA_LAKE_URI,
+Environment: GITHUB_TOKEN (contents:read on bookchaowalit-empire), SOLO_EMPIRE_DATA_LAKE_URI,
 EMPIRE_KNOWLEDGE_API + SOLO_WEB_PUBLIC_ORIGIN + KNOWLEDGE_STORE_KEY + KNOWLEDGE_STORE_SUBJECT
 (knowledge_store.py; the store-sync key in Infisical /knowledge-sync),
 REGISTRY_REF (default main), HEARTBEAT_TOKEN (optional), plus the R2 variables that
@@ -51,7 +52,7 @@ OWNER = "bookchaowalit"
 STORE = "store:architecture-docs"
 STORE_SPACE = "architecture-docs"
 SOURCES = {
-    "registries": ("solo-empire", "repository-catalog/registries", ("data-sources.yaml", "online-systems.yaml", "business-capabilities.yaml")),
+    "registries": ("bookchaowalit-empire", "repository-catalog/registries", ("data-sources.yaml", "online-systems.yaml", "business-capabilities.yaml")),
     "catalog": (STORE, "systems/ai-data/metadata-catalog", ("catalog.yaml", "lineage.yaml")),
 }
 LANDSCAPE_PATH = "operations/platform/SYSTEM-LANDSCAPE-GENERATED.md"

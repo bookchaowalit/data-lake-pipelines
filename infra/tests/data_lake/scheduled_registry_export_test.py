@@ -85,9 +85,9 @@ class ScheduledRegistryExportTests(unittest.TestCase):
         self.run_job({**STORE_ENV, "GITHUB_TOKEN": "t", "SOLO_EMPIRE_DATA_LAKE_URI": "s3://unused"}, recording_fetch,
                      ["--dry-run"], store=recording_store)
         self.assertEqual(sorted(seen), [
-            ("solo-empire", "repository-catalog/registries/business-capabilities.yaml"),
-            ("solo-empire", "repository-catalog/registries/data-sources.yaml"),
-            ("solo-empire", "repository-catalog/registries/online-systems.yaml"),
+            ("bookchaowalit-empire", "repository-catalog/registries/business-capabilities.yaml"),
+            ("bookchaowalit-empire", "repository-catalog/registries/data-sources.yaml"),
+            ("bookchaowalit-empire", "repository-catalog/registries/online-systems.yaml"),
             ("store:architecture-docs", "systems/ai-data/metadata-catalog/catalog.yaml"),
             ("store:architecture-docs", "systems/ai-data/metadata-catalog/lineage.yaml"),
         ])
@@ -230,6 +230,13 @@ class StorePublishTests(unittest.TestCase):
         with mock.patch.object(knowledge_store.httpx, "request", store):
             self.assertEqual(job.store_publish("new", "feature", self.env), "skipped")
         self.assertEqual(store.calls, [])
+
+    def test_a_malformed_store_answer_fails_the_run_cleanly(self):
+        def broken(method, url, **kwargs):
+            return httpx.Response(200, json={"unexpected": True}, request=httpx.Request(method, url))
+
+        with self.assertRaisesRegex(job.FetchError, "malformed store response"):
+            self.publish(broken, "new")
 
     def test_store_errors_name_status_and_code_only(self):
         with self.assertRaisesRegex(job.FetchError, "HTTP 503 boom"):
