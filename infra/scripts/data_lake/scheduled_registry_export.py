@@ -102,7 +102,10 @@ def store_fetch(env: Mapping[str, str]) -> Callable[[str], bytes]:
 
 
 def store_publish(text: str, ref: str, env: Mapping[str, str]) -> str:
-    """Write the landscape page to store space architecture-docs when it changed."""
+    """Write the landscape page to store space architecture-docs when it changed. The store has
+    one copy (no branches), so only a run from the registries' main branch may write it."""
+    if ref != "main":
+        return "skipped"
     try:
         store = KnowledgeStore(env)
         current = store.get(STORE_SPACE, LANDSCAPE_PATH)

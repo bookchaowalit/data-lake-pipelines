@@ -225,6 +225,12 @@ class StorePublishTests(unittest.TestCase):
             self.publish(racing, "new")
         self.assertEqual(store.docs[job.LANDSCAPE_PATH], (b"someone else", 4))
 
+    def test_a_run_from_another_branch_never_writes_the_one_store_copy(self):
+        store = FakeStore({job.LANDSCAPE_PATH: (b"old", 3)})
+        with mock.patch.object(knowledge_store.httpx, "request", store):
+            self.assertEqual(job.store_publish("new", "feature", self.env), "skipped")
+        self.assertEqual(store.calls, [])
+
     def test_store_errors_name_status_and_code_only(self):
         with self.assertRaisesRegex(job.FetchError, "HTTP 503 boom"):
             self.publish(FakeStore(fail=503), "new")
