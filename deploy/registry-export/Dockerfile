@@ -13,7 +13,7 @@ RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install "aw
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project --extra sentry
+RUN uv sync --frozen --no-dev --no-install-project --extra sentry --extra store
 COPY infra/scripts/data_lake infra/scripts/data_lake
 COPY infra/scripts/utils/_env.py infra/scripts/utils/
 COPY infra/tests/fixtures/registry_lake_export /app/smoke/
