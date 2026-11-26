@@ -137,8 +137,10 @@ classification `public`/`internal` (D7b) และไม่ส่ง `read_permi
 ตั้งตัวเดียว = fail.
 
 หน้า Markdown ของ landscape เดียวกันนี้ render จากไฟล์ต้นทางชุดเดียวกัน (ไม่ต้องมี lake) ไว้ที่
-`architecture-docs/operations/platform/SYSTEM-LANDSCAPE-GENERATED.md`. cron `registry-export` render หน้าใหม่ทุกรอบ และ commit เข้า
-architecture-docs `main` เองเมื่อเนื้อหาเปลี่ยน (ต้องมี `LANDSCAPE_COMMIT_TOKEN`; ถ้าไม่มีจะรายงาน `"landscape": "skipped"` แต่ไม่ fail). ผลลัพธ์ไม่มี timestamp จึง diff ได้ และ `--check` บอกว่าไฟล์เก่าหรือไม่:
+`operations/platform/SYSTEM-LANDSCAPE-GENERATED.md` ใน hosted knowledge store space `architecture-docs` (ต้นทางของเอกสาร
+architecture ตั้งแต่ cutover ของ architecture-docs SPEC-001 phase 3; repository ถูก archive แล้ว). cron `registry-export` render หน้าใหม่ทุกรอบ
+และเขียนเป็น version ใหม่ใน store เมื่อเนื้อหาเปลี่ยน (`if_version`: ถ้ามีคนแก้หน้านั้นหลังอ่าน จะถูกปฏิเสธและรอบนั้น fail ไม่เขียนทับ).
+ผลลัพธ์ไม่มี timestamp จึง diff ได้ และ `--check` บอกว่าไฟล์เก่าหรือไม่ (`<architecture-docs>` = working copy จาก `task arch:pull` ของ platform-ops-cli หรือ snapshot `~/.cache/solo-empire/architecture-docs`):
 
 ```bash
 .venv/bin/python infra/scripts/data_lake/system_landscape.py \
@@ -155,19 +157,21 @@ metadata models อ่าน batch ล่าสุดเท่านั้น �
 ### Export อัตโนมัติ (Railway cron `registry-export`)
 
 Railway project `data-schedules`, service `registry-export`, cron `40 23 * * *` UTC (06:40 เวลาไทย), restart NEVER.
-แต่ละรอบรัน `infra/scripts/data_lake/scheduled_registry_export.py`: ดึงไฟล์ต้นทาง 5 ไฟล์จาก `main` ของ solo-empire และ
-architecture-docs ผ่าน GitHub API แล้ว export เข้า R2 lake เดียวกับ news-capture (เขียนแค่ `bronze/domain=metadata`,
+แต่ละรอบรัน `infra/scripts/data_lake/scheduled_registry_export.py`: ดึงไฟล์ต้นทาง 5 ไฟล์ (registry 3 ไฟล์จาก `main` ของ solo-empire
+ผ่าน GitHub API, metadata catalog 2 ไฟล์จาก store space `architecture-docs`) แล้ว export เข้า R2 lake เดียวกับ news-capture (เขียนแค่ `bronze/domain=metadata`,
 `landing/source=solo-empire-registry`, `control/*/source=solo-empire-registry`) พิมพ์แค่จำนวนแถว และส่ง heartbeat `registry-export`
 ไปที่ uptime Worker (แจ้งเตือนถ้าเกิน 26 ชม. หรือรอบที่ล้มเหลว)
 
 | Variable | Value |
 |---|---|
-| `GITHUB_TOKEN` | fine-grained token, Contents: read บน solo-empire และ architecture-docs |
+| `GITHUB_TOKEN` | fine-grained token, Contents: read บน solo-empire |
 | `SOLO_EMPIRE_DATA_LAKE_URI` | `s3://solo-empire-portfolio/portfolio-demo/free-cloud-e2e-001` |
 | `DATA_LAKE_CLOUD_WRITE_ENABLED` | `true` |
 | `DATA_LAKE_S3_ENDPOINT`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION=auto` | R2 key ของ bucket `solo-empire-portfolio` จาก Infisical `/job-data` |
 | `HEARTBEAT_TOKEN` | Infisical `/monitoring` |
-| `LANDSCAPE_COMMIT_TOKEN` | optional: fine-grained token, Contents: read and write บน architecture-docs เท่านั้น (commit หน้า landscape) |
+| `EMPIRE_KNOWLEDGE_API` | `https://gateway.bookchaowalit.com/v1/knowledge` (edge gateway) |
+| `SOLO_WEB_PUBLIC_ORIGIN` | `https://solo-web-one.vercel.app` (issuer ของ JWT, ไม่ใช่ secret) |
+| `KNOWLEDGE_STORE_KEY`, `KNOWLEDGE_STORE_SUBJECT` | store-sync key จาก Infisical `/knowledge-sync` (`KNOWLEDGE_SYNC_KEY`, `KNOWLEDGE_SYNC_SUBJECT`); token อายุ 60 วินาทีต่อ request (`infra/scripts/data_lake/knowledge_store.py`) |
 
 Deploy: CLI upload (`railway up` ของ `git archive`, `RAILWAY_DOCKERFILE_PATH=deploy/registry-export/Dockerfile`) แบบเดียวกับ
 sheet-summaries; push ขึ้น main ไม่ redeploy เอง. image build รัน dry run บน fixture ถ้าพังจะ build ไม่ผ่าน.

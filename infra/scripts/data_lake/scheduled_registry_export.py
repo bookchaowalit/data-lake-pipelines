@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Hosted run of registry_lake_export (Railway cron `registry-export` in `data-schedules`).
 
-Fetches only the five source files from GitHub (`main` of the private solo-empire and
-architecture-docs repositories) with a read-only token, writes them to a temporary
-directory and exports them to SOLO_EMPIRE_DATA_LAKE_URI. Prints dataset counts only,
+Fetches only the five source files: the three registries from GitHub (`main` of the private
+solo-empire repository) with a read-only token, and the two metadata-catalog files from the hosted
+knowledge store, space architecture-docs (the source of the architecture documents since the
+architecture-docs SPEC-001 phase 3 cutover; the Git repository is archived). It writes them to a
+temporary directory and exports them to SOLO_EMPIRE_DATA_LAKE_URI. Prints dataset counts only,
 reports a failed run to Sentry (opt-in) and posts the `registry-export` heartbeat to the
 uptime Worker. After the export it renders the system landscape page (system_landscape.py) and,
-when it differs from architecture-docs main, commits it there through the GitHub Contents API with
-LANDSCAPE_COMMIT_TOKEN (contents:write on architecture-docs only); without that token the page
-step reports "skipped". Exit code 0 = exported (or nothing new), 1 = failed.
+when it differs from the store's copy, writes it there as a new version (``if_version``: a page
+someone else changed since the read is refused and the run fails). Exit code 0 = exported (or
+nothing new), 1 = failed.
 
-Environment: GITHUB_TOKEN (contents:read on both repositories), SOLO_EMPIRE_DATA_LAKE_URI,
-REGISTRY_REF (default main), HEARTBEAT_TOKEN (optional), LANDSCAPE_COMMIT_TOKEN (optional), plus the R2 variables that
+Environment: GITHUB_TOKEN (contents:read on solo-empire), SOLO_EMPIRE_DATA_LAKE_URI,
+EMPIRE_KNOWLEDGE_API + SOLO_WEB_PUBLIC_ORIGIN + KNOWLEDGE_STORE_KEY + KNOWLEDGE_STORE_SUBJECT
+(knowledge_store.py; the store-sync key in Infisical /knowledge-sync),
+REGISTRY_REF (default main), HEARTBEAT_TOKEN (optional), plus the R2 variables that
 data_lake/storage.py needs for s3:// URIs. With EMPIRE_TASKS_API and CATALOG_EXPORT_TOKEN (the platform-empire
 `catalog-export` automation, renewed by token-rotate) it also exports the SPEC-002 catalog (catalog_lake_export.py);
 with neither set that step reports "skipped", with only one set the run fails.
@@ -20,7 +24,6 @@ with neither set that step reports "skipped", with only one set the run fails.
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import sys
@@ -37,25 +40,27 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from data_lake import catalog_lake_export  # noqa: E402
+from data_lake.knowledge_store import KnowledgeStore, StoreError, configured  # noqa: E402
 from data_lake.observability import run_with_reporting  # noqa: E402
 from data_lake.registry_lake_export import export, load_records  # noqa: E402
 from data_lake.system_landscape import build, render  # noqa: E402
 
 OWNER = "bookchaowalit"
-# name -> (repository, directory, files); names match the export() arguments
+# name -> (source, directory, files); names match the export() arguments. The source is a GitHub
+# repository, or STORE for store space architecture-docs.
+STORE = "store:architecture-docs"
+STORE_SPACE = "architecture-docs"
 SOURCES = {
     "registries": ("solo-empire", "repository-catalog/registries", ("data-sources.yaml", "online-systems.yaml", "business-capabilities.yaml")),
-    "catalog": ("architecture-docs", "systems/ai-data/metadata-catalog", ("catalog.yaml", "lineage.yaml")),
+    "catalog": (STORE, "systems/ai-data/metadata-catalog", ("catalog.yaml", "lineage.yaml")),
 }
-LANDSCAPE_REPO = "architecture-docs"
 LANDSCAPE_PATH = "operations/platform/SYSTEM-LANDSCAPE-GENERATED.md"
-LANDSCAPE_MESSAGE = "docs(landscape): regenerate from registries (registry-export cron)"
 HEARTBEAT_URL = "https://monitor.bookchaowalit.com/heartbeat/registry-export"
 # Cloudflare answers 403 to default client User-Agents on workers.dev.
 USER_AGENT = "registry-export/1"
 
 Fetch = Callable[[str, str, str, str], bytes]
-# publish(text, ref, env) -> "unchanged" | "committed" | "skipped"; raises FetchError on failure
+# publish(text, ref, env) -> "unchanged" | "written"; raises FetchError on failure
 Publish = Callable[[str, str, Mapping[str, str]], str]
 
 
@@ -80,42 +85,34 @@ def github_fetch(repo: str, path: str, ref: str, token: str) -> bytes:
     return response.content
 
 
-def _github_headers(token: str) -> dict[str, str]:
-    return {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
-        "User-Agent": USER_AGENT,
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+def store_fetch(env: Mapping[str, str]) -> Callable[[str], bytes]:
+    """path -> bytes from store space architecture-docs (a missing document fails the run)."""
+    store = KnowledgeStore(env)
+
+    def fetch(path: str) -> bytes:
+        try:
+            document = store.get(STORE_SPACE, path)
+        except StoreError as error:
+            raise FetchError(str(error)) from None
+        if document is None:
+            raise FetchError(f"{STORE}:{path} not found")
+        return document.content
+
+    return fetch
 
 
-def github_publish(text: str, ref: str, env: Mapping[str, str]) -> str:
-    """Commit the landscape page to architecture-docs when it changed."""
-    url = f"https://api.github.com/repos/{OWNER}/{LANDSCAPE_REPO}/contents/{urllib.parse.quote(LANDSCAPE_PATH)}"
-    read_token = env.get("GITHUB_TOKEN", "").strip()
+def store_publish(text: str, ref: str, env: Mapping[str, str]) -> str:
+    """Write the landscape page to store space architecture-docs when it changed."""
     try:
-        current = httpx.get(url, params={"ref": ref}, headers=_github_headers(read_token), timeout=30)
-    except httpx.HTTPError as error:
-        raise FetchError(f"{LANDSCAPE_REPO}:{LANDSCAPE_PATH} {type(error).__name__}") from None
-    if current.status_code not in (200, 404):
-        raise FetchError(f"{LANDSCAPE_REPO}:{LANDSCAPE_PATH} HTTP {current.status_code}")
-    body = current.json() if current.status_code == 200 else {}
-    if body and base64.b64decode(body.get("content", "")).decode("utf-8") == text:
-        return "unchanged"
-    write_token = env.get("LANDSCAPE_COMMIT_TOKEN", "").strip()
-    if not write_token:
-        return "skipped"
-    payload = {"message": LANDSCAPE_MESSAGE, "branch": ref,
-               "content": base64.b64encode(text.encode("utf-8")).decode("ascii")}
-    if body.get("sha"):
-        payload["sha"] = body["sha"]
-    try:
-        response = httpx.put(url, json=payload, headers=_github_headers(write_token), timeout=30)
-    except httpx.HTTPError as error:
-        raise FetchError(f"commit {LANDSCAPE_PATH} {type(error).__name__}") from None
-    if response.status_code not in (200, 201):
-        raise FetchError(f"commit {LANDSCAPE_PATH} HTTP {response.status_code}")
-    return "committed"
+        store = KnowledgeStore(env)
+        current = store.get(STORE_SPACE, LANDSCAPE_PATH)
+        content = text.encode("utf-8")
+        if current is not None and current.content == content:
+            return "unchanged"
+        store.put(STORE_SPACE, LANDSCAPE_PATH, content, if_version=current.version if current else 0)
+    except StoreError as error:
+        raise FetchError(str(error)) from None
+    return "written"
 
 
 def post_heartbeat(ok: bool) -> None:
@@ -129,13 +126,15 @@ def post_heartbeat(ok: bool) -> None:
         print(json.dumps({"event": "heartbeat", "status": "error"}))
 
 
-def _download(target: Path, fetch: Fetch, ref: str, token: str) -> dict[str, Path]:
+def _download(target: Path, fetch: Fetch, ref: str, token: str, fetch_store: Callable[[str], bytes]) -> dict[str, Path]:
     dirs: dict[str, Path] = {}
     for name, (repo, directory, files) in SOURCES.items():
         dirs[name] = target / name
         dirs[name].mkdir()
         for file_name in files:
-            (dirs[name] / file_name).write_bytes(fetch(repo, f"{directory}/{file_name}", ref, token))
+            path = f"{directory}/{file_name}"
+            data = fetch_store(path) if repo == STORE else fetch(repo, path, ref, token)
+            (dirs[name] / file_name).write_bytes(data)
     return dirs
 
 
@@ -145,8 +144,9 @@ def run(
     env: Mapping[str, str],
     fetch: Fetch = github_fetch,
     heartbeat: Callable[[bool], None] = post_heartbeat,
-    publish: Publish = github_publish,
+    publish: Publish = store_publish,
     catalog_get: catalog_lake_export.Get = catalog_lake_export.http_get,
+    fetch_store: Callable[[Mapping[str, str]], Callable[[str], bytes]] = store_fetch,
 ) -> int:
     parser = argparse.ArgumentParser(description="Hosted registry export into the lake.")
     parser.add_argument("--dry-run", action="store_true", help="fetch and count; write nothing, no heartbeat")
@@ -159,6 +159,8 @@ def run(
     lake_uri = env.get("SOLO_EMPIRE_DATA_LAKE_URI", "").strip()
     local = args.registries is not None and args.catalog is not None
     missing = [name for name, value in (("GITHUB_TOKEN", token or local), ("SOLO_EMPIRE_DATA_LAKE_URI", lake_uri or args.dry_run)) if not value]
+    if not local:
+        missing += configured(env)  # the catalog source and the landscape page live in the store
     if missing:
         print(json.dumps({"status": "failed", "error": f"missing {', '.join(missing)}"}))
         beat(False)
@@ -170,12 +172,12 @@ def run(
             if args.registries is not None and args.catalog is not None:
                 dirs = {"registries": args.registries, "catalog": args.catalog}
             else:
-                dirs = _download(Path(temp_dir), fetch, env.get("REGISTRY_REF", "main"), token)
+                dirs = _download(Path(temp_dir), fetch, env.get("REGISTRY_REF", "main"), token, fetch_store(env))
             report = export(dirs["registries"], dirs["catalog"], lake_uri, dry_run=args.dry_run)
             page = render(build(load_records(dirs["registries"], dirs["catalog"])))
             landscape = "dry-run" if args.dry_run else "local" if local else publish(page, env.get("REGISTRY_REF", "main"), env)
             catalog = catalog_lake_export.export(env, lake_uri, dry_run=args.dry_run, get=catalog_get)
-    except (FetchError, catalog_lake_export.CatalogError, ValueError, OSError) as error:
+    except (FetchError, StoreError, catalog_lake_export.CatalogError, ValueError, OSError) as error:
         print(json.dumps({"status": "failed", "error": type(error).__name__, "detail": str(error)[:200]}))
         beat(False)
         return 1

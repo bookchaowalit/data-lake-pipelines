@@ -122,11 +122,11 @@ class CatalogExportTests(unittest.TestCase):
 
 class ScheduledJobCatalogTests(unittest.TestCase):
     def run_job(self, env, catalog_get, argv=None):
-        from scheduled_registry_export_test import fixture_fetch
+        from scheduled_registry_export_test import STORE_ENV, fixture_fetch, fixture_store
 
         self.beats: list[bool] = []
-        return job.run(argv or [], env=env, fetch=fixture_fetch, heartbeat=self.beats.append,
-                       publish=lambda *a: "committed", catalog_get=catalog_get)
+        return job.run(argv or [], env={**STORE_ENV, **env}, fetch=fixture_fetch, heartbeat=self.beats.append,
+                       publish=lambda *a: "written", catalog_get=catalog_get, fetch_store=fixture_store)
 
     def test_cron_exports_registries_and_catalog(self):
         if not has_pyarrow():
