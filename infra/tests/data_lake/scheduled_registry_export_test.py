@@ -200,7 +200,7 @@ class StorePublishTests(unittest.TestCase):
     def test_unchanged_page_is_not_written(self):
         store = FakeStore({job.LANDSCAPE_PATH: (b"same", 3)})
         self.assertEqual(self.publish(store, "same"), "unchanged")
-        self.assertEqual([c[0] for c in store.calls], ["GET"])
+        self.assertEqual([c[0] for c in store.calls], ["GET", "GET"])  # mirror check, page
 
     def test_changed_page_is_written_with_if_version(self):
         store = FakeStore({job.LANDSCAPE_PATH: (b"old", 3)})
@@ -224,6 +224,11 @@ class StorePublishTests(unittest.TestCase):
         with self.assertRaisesRegex(job.FetchError, "409 version_conflict"):
             self.publish(racing, "new")
         self.assertEqual(store.docs[job.LANDSCAPE_PATH], (b"someone else", 4))
+
+    def test_nothing_is_written_while_the_git_mirror_still_runs(self):
+        store = FakeStore({job.LANDSCAPE_PATH: (b"old", 3), job.MIRROR_PATH: (b"on: push", 1)})
+        self.assertEqual(self.publish(store, "new"), "skipped-before-cutover")
+        self.assertEqual(store.docs[job.LANDSCAPE_PATH], (b"old", 3))
 
     def test_a_run_from_another_branch_never_writes_the_one_store_copy(self):
         store = FakeStore({job.LANDSCAPE_PATH: (b"old", 3)})

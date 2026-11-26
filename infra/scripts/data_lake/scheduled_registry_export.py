@@ -56,6 +56,7 @@ SOURCES = {
     "catalog": (STORE, "systems/ai-data/metadata-catalog", ("catalog.yaml", "lineage.yaml")),
 }
 LANDSCAPE_PATH = "operations/platform/SYSTEM-LANDSCAPE-GENERATED.md"
+MIRROR_PATH = ".github/workflows/store-mirror.yml"
 HEARTBEAT_URL = "https://monitor.bookchaowalit.com/heartbeat/registry-export"
 # Cloudflare answers 403 to default client User-Agents on workers.dev.
 USER_AGENT = "registry-export/1"
@@ -109,6 +110,10 @@ def store_publish(text: str, ref: str, env: Mapping[str, str]) -> str:
         return "skipped"
     try:
         store = KnowledgeStore(env)
+        # Until the cutover Git is the source and store-mirror (--prune) would undo this write;
+        # the cutover removes that workflow from the store.
+        if store.get(STORE_SPACE, MIRROR_PATH) is not None:
+            return "skipped-before-cutover"
         current = store.get(STORE_SPACE, LANDSCAPE_PATH)
         content = text.encode("utf-8")
         if current is not None and current.content == content:
