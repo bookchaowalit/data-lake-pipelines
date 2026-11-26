@@ -49,10 +49,11 @@ COLUMNS = (
 # The Chief Data bot stamped every non-news x_feed row with its machine clock (UTC+9, written without a zone, so
 # read as ICT) from the 2026-11-17 evening run on: those stamps are 2 h late (a 19:00 run reads 21:00). News rows
 # used ICT. Raw keeps what the bot sent; readers move such stamps back here and in Gold ({x_feed} in run_queries).
-# CLOCK_SKEW_UNTIL: the first stamp of the bot's fixed clock, once a run shows it (None = still skewed).
+# CLOCK_SKEW_UNTIL: the first stamp of the bot's fixed clock. run1125e (stamped 21:00) was the last UTC+9 run;
+# run1126m (relanded 2026-11-26 08:57, stamps 07:40-07:52) is the first ICT one.
 CLOCK_SKEW = timedelta(hours=2)
 CLOCK_SKEW_FROM = datetime(2026, 11, 17, 15, 0, tzinfo=TZ)
-CLOCK_SKEW_UNTIL: datetime | None = None
+CLOCK_SKEW_UNTIL: datetime | None = datetime(2026, 11, 26, 7, 40, tzinfo=TZ)
 
 
 def skewed(row: dict[str, Any]) -> bool:

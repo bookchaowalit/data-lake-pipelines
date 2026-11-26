@@ -383,6 +383,15 @@ class ClockSkewTests(unittest.TestCase):
         self.addCleanup(setattr, feed, "CLOCK_SKEW_UNTIL", old)
         self.assertEqual(feed.fix_clock([row("1", at)])[0]["collected_at"], at)
 
+    def test_the_skew_ends_at_the_first_run1126m_stamp(self):
+        # Chief Data 2026-11-26: run1125e (stamped 21:00) was the last UTC+9 run; run1126m starts at 07:40 ICT.
+        self.assertEqual(feed.CLOCK_SKEW_UNTIL, datetime(2026, 11, 26, 7, 40, tzinfo=self.ICT))
+        last_skewed = datetime(2026, 11, 25, 21, 0, tzinfo=self.ICT)
+        first_fixed = datetime(2026, 11, 26, 7, 40, tzinfo=self.ICT)
+        a, b = feed.fix_clock([row("1", last_skewed), row("2", first_fixed)])
+        self.assertEqual(a["collected_at"], datetime(2026, 11, 25, 19, 0, tzinfo=self.ICT))
+        self.assertEqual(b["collected_at"], first_fixed)
+
     def test_the_input_rows_are_not_changed(self):
         r = row("1", datetime(2026, 11, 25, 10, 0, tzinfo=self.ICT))
         feed.fix_clock([r])

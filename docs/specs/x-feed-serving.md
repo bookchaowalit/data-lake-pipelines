@@ -61,7 +61,9 @@ Raw stays as the bot sent it (raw-only rule). Readers correct it:
   stamped in `[CLOCK_SKEW_FROM, CLOCK_SKEW_UNTIL)` back by `CLOCK_SKEW` (2 h).
 - Gold queries read `{x_feed}`, which `run_queries.x_feed_source()` fills with the same rule in SQL; no query reads
   `raw/x_feed/` directly.
-- `CLOCK_SKEW_UNTIL` is `None` (still skewed) until a bot run shows the fixed clock; then it is set to that run's
-  first stamp. Chief Data reported the fix on 2026-11-25; run1125e (19:01 ICT) was still 2 h late.
+- `CLOCK_SKEW_UNTIL` is the first stamp of the fixed clock: `2026-11-26 07:40 ICT`. Chief Data reported the fix on
+  2026-11-25; run1125e (received 19:01, stamped 21:00) was the last 2 h-late run. run1126m (collected 07:30-07:52,
+  relanded as `run1126m_reland` at 08:57) is stamped 07:40-07:52, before its arrival, so it uses ICT. Rows of
+  `run1124m_reland` keep their old 09:59 stamps and are still corrected (they fall inside the window).
 
 The 88 news rows sent twice on 2026-11-23 (07:48 and 07:57) stay in raw: every reader counts a post once.
