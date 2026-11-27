@@ -13,18 +13,19 @@ flowchart LR
   JQ --> SINK
   TRB["career-job-scraper Track B every 6 h"] --> BRONZE
   NEWS["news-capture, Railway cron every 2 h"] --> BRONZE
-  XL["x-lakehouse, Railway cron 3 times a day: inbox, curated tables in Supabase x_intel"] --> BRONZE
+  XL["x-lakehouse, Railway cron 3 times a day: inbox"] --> XLAKE[("R2 x-intel-lake raw/ + Supabase x_intel curated tables, not the marts Bronze")]
   CAP --> BRONZE[("R2 lake: Bronze Parquet + manifests")]
   SINK --> BRONZE
   BRONZE --> MARTS["marts workflows via queue: jobs 47 */2, news 35 */2, sales 20 *"]
   JQ --> MARTS
-  MARTS --> GATE{"quality checks pass? Silver quarantine under 2 percent"}
-  GATE -->|no| FAIL["workflow fails; heartbeat missing, uptime Worker alerts"]
-  GATE -->|yes| GOLD[("R2 Gold marts + Gold manifest")]
-  GOLD --> BI["BI snapshot + static site, deploy when Gold run id changes"]
+  MARTS --> GATE{"quality checks pass? jobs/news Silver: at most 2 percent invalid (sales reads Bronze directly)"}
+  GATE -->|"no (build error)"| FAIL["workflow fails; heartbeat step sends ok:false with the cause, no heartbeat at all means uptime Worker alerts"]
+  GATE -->|"yes, or stale / rejects (exit 3, still published, heartbeat ok:false)"| GOLD[("R2 Gold marts + Gold manifest")]
+  GOLD --> BI["BI snapshot + static site, deploy when gold_run_id@commit is not live or on manual dispatch"]
   BI --> PAGES["Cloudflare Pages behind Access: jobs, news, revenue insights"]
   GOLD -.->|"needs MOTHERDUCK_TOKEN, else skipped_no_token"| MD["MotherDuck load, jobs marts only"]
-  REG["registry-export daily + sheet-summaries daily, Railway cron"] --> BRONZE
+  REG["registry-export daily, Railway cron"] --> BRONZE
+  SHEETS["sheet-summaries daily, Railway cron: Google Sheets via AI Gateway"] --> SUMTABS["AI Summaries tabs in the sheet, not Bronze"]
   OWNER["owner machine: local crons and CLIs, cloud write needs explicit approval env"] -.-> BRONZE
 ```
 
@@ -47,11 +48,12 @@ flowchart LR
   MARTS --> GOLD[("R2 Gold")]
   GOLD --> BI["static BI site"]
   BI --> PAGES["Cloudflare Pages behind Access"]
-  GOLD --> MD["MotherDuck load, active"]
+  GOLD -->|"jobs marts only, approved columns"| MD["MotherDuck load, active"]
   MD --> PRESET["Preset dashboard, parity with jobs-insights"]
   MD --> COLLATE["Collate catalog connector if probe viable"]
-  XTABS["X Sheet tabs frozen, bots write only the lake"] --> BRONZE
-  EMAIL["email-intake and meta-intake sources, deployed"] --> BRONZE
+  XBOT["X bot via x_intel.ingest(), Sheet tabs frozen"] --> XLAKE[("R2 x-intel-lake raw/ + x_intel")]
+  EMAIL["email-intake, deployed"] --> MAIL[("R2 mail-lake, own bucket-scoped token")]
+  META["meta-intake via Telegram bot, deployed: meta/landing then x-lakehouse writes meta/raw and x_intel.meta_posts"] --> XLAKE
 ```
 
 Sources: `docs/specs/jobs-motherduck-load.md`, `docs/specs/jobs-preset-dashboard.md`, `docs/specs/jobs-collate-connector-test.md` (ADR-0016 P2-P4), `docs/plans/2026-11-10-x-sheet-cutover-runbook.md`, `docs/specs/email-intake.md`, `docs/specs/meta-intake.md`
