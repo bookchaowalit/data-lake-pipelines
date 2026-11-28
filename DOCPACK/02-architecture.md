@@ -124,7 +124,7 @@ flowchart LR
 | R2 | ↔ | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DATA_LAKE_S3_ENDPOINT`, `SOLO_EMPIRE_DATA_LAKE_URI`, GH secrets `JOB_DATA_*` | live |
 | Aiven Kafka | consume / produce heartbeat | `STREAM_KAFKA_BOOTSTRAP`, `STREAM_KAFKA_CA_PEM`, SASL users `lake-sink`, `ops-heartbeat` | live 2026-11-04 (`54a5cb2`) |
 | platform-jobs-worker | → `workflow_dispatch` | GitHub token ของ worker [ต้องยืนยัน] | live (`aace807`) |
-| GitHub API | ← registries (solo-empire) | `GITHUB_TOKEN` | live |
+| GitHub API | ← registries (bookchaowalit-empire) | GitHub App installation token (`GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY`, contents:read บน bookchaowalit-empire) หรือ `GITHUB_TOKEN` (fallback) | live |
 | Knowledge store (space architecture-docs) | ← metadata catalog; → landscape page (`if_version`) | `EMPIRE_KNOWLEDGE_API`, `SOLO_WEB_PUBLIC_ORIGIN`, `KNOWLEDGE_STORE_KEY`, `KNOWLEDGE_STORE_SUBJECT` | live after the architecture-docs cutover |
 | intake-api x-feed | ← pulls, → mark exported | `EMPIRE_INTAKE_API`, `EMPIRE_TOKEN` | code merged `15a5e6f`; schedule [ต้องยืนยัน] |
 | Google Sheets | ↔ | service account (extra `sheets`) | live 19:00 BKK |

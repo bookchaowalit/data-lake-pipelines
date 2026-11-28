@@ -13,7 +13,9 @@ when it differs from the store's copy, writes it there as a new version (``if_ve
 someone else changed since the read is refused and the run fails). Exit code 0 = exported (or
 nothing new), 1 = failed.
 
-Environment: GITHUB_TOKEN (contents:read on bookchaowalit-empire), SOLO_EMPIRE_DATA_LAKE_URI,
+Environment: GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY (github_app.py: an installation token per run,
+down-scoped to contents:read on bookchaowalit-empire), or, while those are unset, GITHUB_TOKEN (a
+fine-grained PAT, contents:read on bookchaowalit-empire); SOLO_EMPIRE_DATA_LAKE_URI,
 EMPIRE_KNOWLEDGE_API + SOLO_WEB_PUBLIC_ORIGIN + KNOWLEDGE_STORE_KEY + KNOWLEDGE_STORE_SUBJECT
 (knowledge_store.py; the store-sync key in Infisical /knowledge-sync),
 REGISTRY_REF (default main), HEARTBEAT_TOKEN (optional), plus the R2 variables that
@@ -41,6 +43,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from data_lake import catalog_lake_export  # noqa: E402
+from data_lake.github_app import GitHubApp, GitHubAppError, app_configured  # noqa: E402
 from data_lake.knowledge_store import KnowledgeStore, StoreError, configured  # noqa: E402
 from data_lake.observability import run_with_reporting  # noqa: E402
 from data_lake.registry_lake_export import export, load_records  # noqa: E402
@@ -60,6 +63,9 @@ MIRROR_PATH = ".github/workflows/store-mirror.yml"
 HEARTBEAT_URL = "https://monitor.bookchaowalit.com/heartbeat/registry-export"
 # Cloudflare answers 403 to default client User-Agents on workers.dev.
 USER_AGENT = "registry-export/1"
+# What the App installation token may do: read the registry files, nothing else.
+READ_PERMISSIONS = {"contents": "read"}
+READ_REPOSITORIES = tuple(sorted({repo for repo, _directory, _files in SOURCES.values() if repo != STORE}))
 
 Fetch = Callable[[str, str, str, str], bytes]
 # publish(text, ref, env) -> "unchanged" | "written"; raises FetchError on failure
@@ -68,6 +74,12 @@ Publish = Callable[[str, str, Mapping[str, str]], str]
 
 class FetchError(RuntimeError):
     pass
+
+
+def app_read_token(env: Mapping[str, str]) -> str:
+    """A one-hour installation token limited to contents:read on the registry repositories."""
+    app = GitHubApp(env, user_agent=USER_AGENT)
+    return app.token(OWNER, permissions=READ_PERMISSIONS, repositories=READ_REPOSITORIES)
 
 
 def github_fetch(repo: str, path: str, ref: str, token: str) -> bytes:
@@ -156,6 +168,7 @@ def run(
     publish: Publish = store_publish,
     catalog_get: catalog_lake_export.Get = catalog_lake_export.http_get,
     fetch_store: Callable[[Mapping[str, str]], Callable[[str], bytes]] = store_fetch,
+    mint_token: Callable[[Mapping[str, str]], str] = app_read_token,
 ) -> int:
     parser = argparse.ArgumentParser(description="Hosted registry export into the lake.")
     parser.add_argument("--dry-run", action="store_true", help="fetch and count; write nothing, no heartbeat")
@@ -164,10 +177,17 @@ def run(
     args = parser.parse_args(list(argv))
     beat = (lambda ok: None) if args.dry_run else heartbeat
 
-    token = env.get("GITHUB_TOKEN", "").strip()
     lake_uri = env.get("SOLO_EMPIRE_DATA_LAKE_URI", "").strip()
     local = args.registries is not None and args.catalog is not None
-    missing = [name for name, value in (("GITHUB_TOKEN", token or local), ("SOLO_EMPIRE_DATA_LAKE_URI", lake_uri or args.dry_run)) if not value]
+    try:
+        # The App vars win over GITHUB_TOKEN; half set fails. Local files need no GitHub at all.
+        use_app = not local and app_configured(env)
+    except GitHubAppError as error:
+        print(json.dumps({"status": "failed", "error": "GitHubAppError", "detail": str(error)[:200]}))
+        beat(False)
+        return 1
+    token = "" if use_app else env.get("GITHUB_TOKEN", "").strip()
+    missing = [name for name, value in (("GITHUB_TOKEN", token or use_app or local), ("SOLO_EMPIRE_DATA_LAKE_URI", lake_uri or args.dry_run)) if not value]
     if not local:
         missing += configured(env)  # the catalog source and the landscape page live in the store
     if missing:
@@ -181,12 +201,14 @@ def run(
             if args.registries is not None and args.catalog is not None:
                 dirs = {"registries": args.registries, "catalog": args.catalog}
             else:
+                if use_app:
+                    token = mint_token(env)
                 dirs = _download(Path(temp_dir), fetch, env.get("REGISTRY_REF", "main"), token, fetch_store(env))
             report = export(dirs["registries"], dirs["catalog"], lake_uri, dry_run=args.dry_run)
             page = render(build(load_records(dirs["registries"], dirs["catalog"])))
             landscape = "dry-run" if args.dry_run else "local" if local else publish(page, env.get("REGISTRY_REF", "main"), env)
             catalog = catalog_lake_export.export(env, lake_uri, dry_run=args.dry_run, get=catalog_get)
-    except (FetchError, StoreError, catalog_lake_export.CatalogError, ValueError, OSError) as error:
+    except (FetchError, StoreError, GitHubAppError, catalog_lake_export.CatalogError, ValueError, OSError) as error:
         print(json.dumps({"status": "failed", "error": type(error).__name__, "detail": str(error)[:200]}))
         beat(False)
         return 1
@@ -199,8 +221,23 @@ def run(
     return 0
 
 
+# Credentials only this process uses (GitHub reads, store JWTs, the catalog export). main() keeps
+# them in a private copy and removes them from os.environ, so the `aws` subprocess of
+# data_lake/storage.py and any other child process never inherits them.
+CHILD_DENYLIST = ("GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_TOKEN", "KNOWLEDGE_STORE_KEY",
+                  "CATALOG_EXPORT_TOKEN")
+
+
+def private_env(environ: os._Environ[str] | dict[str, str]) -> dict[str, str]:
+    """A copy of ``environ`` for run(); the secrets in CHILD_DENYLIST are removed from ``environ``."""
+    env = dict(environ)
+    for key in CHILD_DENYLIST:
+        environ.pop(key, None)
+    return env
+
+
 def main() -> int:
-    return run(sys.argv[1:], env=os.environ)
+    return run(sys.argv[1:], env=private_env(os.environ))
 
 
 if __name__ == "__main__":

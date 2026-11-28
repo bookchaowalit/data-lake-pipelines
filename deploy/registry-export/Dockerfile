@@ -1,5 +1,7 @@
 # Registry export (Railway project `data-schedules`, cron service `registry-export`,
 # `40 23 * * *` UTC = 06:40 Asia/Bangkok). Docs: README "Metadata ใน lake".
+# GitHub auth: GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY (installation token, contents:read on
+# bookchaowalit-empire; PyJWT[crypto] comes from the "store" extra) or the GITHUB_TOKEN fallback.
 # Build from the repository root: railway up (RAILWAY_DOCKERFILE_PATH=deploy/registry-export/Dockerfile).
 FROM python:3.12-slim
 

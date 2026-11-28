@@ -164,7 +164,8 @@ Railway project `data-schedules`, service `registry-export`, cron `40 23 * * *` 
 
 | Variable | Value |
 |---|---|
-| `GITHUB_TOKEN` | fine-grained token, Contents: read บน bookchaowalit-empire |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | GitHub App ของ owner (PEM แบบ PKCS#1 หรือ PKCS#8, `\n` แบบตัวอักษรใช้ได้); ทุกรอบ mint installation token อายุ 1 ชม. ที่ down-scope เหลือ `contents: read` บน `bookchaowalit/bookchaowalit-empire` เท่านั้น (`infra/scripts/data_lake/github_app.py`). ตั้งครบสองตัวแล้วชนะ `GITHUB_TOKEN`; ตั้งตัวเดียว run fail |
+| `GITHUB_TOKEN` | fallback ระหว่างที่ยังไม่ตั้ง App vars: fine-grained token, Contents: read บน bookchaowalit-empire (ลบได้หลังตั้ง App vars) |
 | `SOLO_EMPIRE_DATA_LAKE_URI` | `s3://solo-empire-portfolio/portfolio-demo/free-cloud-e2e-001` |
 | `DATA_LAKE_CLOUD_WRITE_ENABLED` | `true` |
 | `DATA_LAKE_S3_ENDPOINT`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION=auto` | R2 key ของ bucket `solo-empire-portfolio` จาก Infisical `/job-data` |
@@ -172,6 +173,8 @@ Railway project `data-schedules`, service `registry-export`, cron `40 23 * * *` 
 | `EMPIRE_KNOWLEDGE_API` | `https://gateway.bookchaowalit.com/v1/knowledge` (edge gateway) |
 | `SOLO_WEB_PUBLIC_ORIGIN` | `https://solo-web-one.vercel.app` (issuer ของ JWT, ไม่ใช่ secret) |
 | `KNOWLEDGE_STORE_KEY`, `KNOWLEDGE_STORE_SUBJECT` | store-sync key จาก Infisical `/knowledge-sync` (`KNOWLEDGE_SYNC_KEY`, `KNOWLEDGE_SYNC_SUBJECT`); token อายุ 60 วินาทีต่อ request (`infra/scripts/data_lake/knowledge_store.py`) |
+
+ข้อควรรู้เรื่องสิทธิ์: การ down-scope จำกัดเฉพาะ token ที่ job นี้ขอ ส่วนคีย์ `GITHUB_APP_PRIVATE_KEY` เองออก token ได้ทุกสิทธิ์ที่ App มีบนทุก installation. ถ้าใช้ App ตัวเดียวกับงานที่ต้องเขียน (backlog-sync, dispatch, org-hub-sync) service นี้จะถือคีย์ที่กว้างกว่า PAT read-only เดิม; ถ้าต้องการให้แคบเท่าเดิม ให้ใช้ App แยกที่มีแค่ Contents: read และติดตั้งเฉพาะ `bookchaowalit-empire` (owner ตัดสิน).
 
 Deploy: CLI upload (`railway up` ของ `git archive`, `RAILWAY_DOCKERFILE_PATH=deploy/registry-export/Dockerfile`) แบบเดียวกับ
 sheet-summaries; push ขึ้น main ไม่ redeploy เอง. image build รัน dry run บน fixture ถ้าพังจะ build ไม่ผ่าน.
